@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -12,10 +12,13 @@ class Digest(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     date: Mapped[datetime] = mapped_column(Date, nullable=False, unique=True, index=True)
     digest_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    digest_type_via_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)
     current_step: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    step1_budget_capped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    step2_budget_capped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     candidates: Mapped[list["NewsCandidate"]] = relationship(
         "NewsCandidate", back_populates="digest", cascade="all, delete-orphan"
@@ -32,6 +35,9 @@ class Digest(Base):
     assets: Mapped[list["Asset"]] = relationship("Asset", back_populates="digest", cascade="all, delete-orphan")
     quality_checks: Mapped[list["QualityCheck"]] = relationship(
         "QualityCheck", back_populates="digest", cascade="all, delete-orphan"
+    )
+    llm_costs: Mapped[list["LlmCostRecord"]] = relationship(
+        "LlmCostRecord", back_populates="digest", cascade="all, delete-orphan"
     )
 
 
@@ -54,6 +60,8 @@ class NewsCandidate(Base):
     total_score: Mapped[int] = mapped_column(Integer, default=3)
     reliability_status: Mapped[str] = mapped_column(String(40), default="⚠️ сомнительный")
     link_status: Mapped[bool] = mapped_column(Boolean, default=False)
+    headline_editorial_ok: Mapped[bool] = mapped_column(Boolean, default=False)
+    page_verified: Mapped[bool] = mapped_column(Boolean, default=False)
     is_foreign_agent: Mapped[bool] = mapped_column(Boolean, default=False)
     is_aggregator: Mapped[bool] = mapped_column(Boolean, default=False)
     is_duplicate: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -127,3 +135,18 @@ class QualityCheck(Base):
     comment: Mapped[str] = mapped_column(Text, default="")
 
     digest: Mapped["Digest"] = relationship("Digest", back_populates="quality_checks")
+
+
+class LlmCostRecord(Base):
+    __tablename__ = "llm_cost_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    digest_id: Mapped[int] = mapped_column(ForeignKey("digests.id", ondelete="CASCADE"), nullable=False, index=True)
+    step: Mapped[str] = mapped_column(String(40), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(80), nullable=False)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    request_label: Mapped[str] = mapped_column(String(120), nullable=False)
+    cost_rub: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    digest: Mapped["Digest"] = relationship("Digest", back_populates="llm_costs")

@@ -15,6 +15,7 @@ class DigestItem(BaseModel):
     id: int
     date: date
     digest_type: str | None
+    digest_type_via_default: bool = False
     status: str
     current_step: str
     created_at: datetime
@@ -54,6 +55,8 @@ class CandidateOut(BaseModel):
     reliability_status: str
     verification_comment: str
     link_status: bool
+    headline_editorial_ok: bool = False
+    page_verified: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -68,7 +71,7 @@ class OrderRequest(BaseModel):
 
 
 class CommandRequest(BaseModel):
-    command: str
+    command: str = ""
     hook_variant: Literal["A", "B", "V"] | None = None
 
 
@@ -106,9 +109,29 @@ class FinalOutputOut(BaseModel):
     qc_status: str
 
 
+class LlmCostRecordOut(BaseModel):
+    step: str
+    agent_name: str
+    model: str
+    request_label: str
+    cost_rub: float | None
+    created_at: datetime
+
+
+class AgentModelRecommendationOut(BaseModel):
+    agent_name: str
+    recommended_model: str
+    input_rub_per_1m: float
+    output_rub_per_1m: float
+    rationale: str
+
+
 class DigestDetail(BaseModel):
     digest: DigestItem
     candidates: list[CandidateOut]
+    candidates_are_demo_fallback: bool = False
+    budget_notices: list[str] = Field(default_factory=list)
+    rejected_reasons_summary: dict[str, int] = Field(default_factory=dict)
     selected: list[SelectedNewsOut]
     analytics: list[AnalyticsItemOut]
     outputs: list[FinalOutputOut]
@@ -116,3 +139,6 @@ class DigestDetail(BaseModel):
     hashtags: list[str]
     image_path: str | None
     docx_path: str | None
+    llm_costs: list[LlmCostRecordOut]
+    total_cost_rub: float
+    model_recommendations: list[AgentModelRecommendationOut]

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -5,7 +6,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Analytics, Asset, FinalOutput, NewsCandidate, QualityCheck, SelectedNews
+from app.models import Analytics, Asset, FinalOutput, LlmCostRecord, NewsCandidate, QualityCheck, SelectedNews
 from app.schemas import (
     CandidateOut,
     CommandRequest,
@@ -21,6 +22,18 @@ from app.schemas import (
 from app.services.digest_service import DigestService
 
 router = APIRouter(prefix="/digests", tags=["digests"])
+
+
+def _candidate_row_is_demo_placeholder(c: NewsCandidate) -> bool:
+    url = (c.url or "").lower()
+    title = c.title or ""
+    if "example.com/ai-news" in url:
+        return True
+    if title.startswith("AI Candidate"):
+        return True
+    if (c.source or "") == "Example Tech":
+        return True
+    return False
 
 
 @router.post("/create", response_model=DigestCreateResponse)
@@ -47,6 +60,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     analytics = db.query(Analytics).filter(Analytics.digest_id == digest.id).all()
     outputs = db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).all()
     checks = db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).all()
+    llm_costs = db.query(LlmCostRecord).filter(LlmCostRecord.digest_id == digest.id).order_by(LlmCostRecord.id.asc()).all()
     assets = db.query(Asset).filter(Asset.digest_id == digest.id).all()
     candidate_map = {c.id: c for c in candidates}
     selected = []
@@ -69,6 +83,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     hashtags = []
     image_path = None
     docx_path = None
+    rejected_reasons_summary: dict[str, int] = {}
     for a in assets:
         if a.type == "hashtags":
             hashtags = a.prompt.split()
@@ -76,9 +91,22 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
             image_path = a.path
         if a.type == "docx":
             docx_path = a.path
+        if a.type == "step1_rejected_reasons":
+            try:
+                raw = json.loads(a.prompt or "{}")
+                if isinstance(raw, dict):
+                    rejected_reasons_summary = {str(k): int(v) for k, v in raw.items()}
+            except Exception:
+                pass
+    total_cost_rub = round(sum([x.cost_rub or 0.0 for x in llm_costs]), 6)
+    candidates_are_demo_fallback = bool(candidates) and all(_candidate_row_is_demo_placeholder(c) for c in candidates)
+    budget_notices = service.build_budget_notices(digest)
     return DigestDetail(
         digest=DigestItem.model_validate(digest),
         candidates=[CandidateOut.model_validate(c) for c in candidates],
+        candidates_are_demo_fallback=candidates_are_demo_fallback,
+        budget_notices=budget_notices,
+        rejected_reasons_summary=rejected_reasons_summary,
         selected=selected,
         analytics=[
             {
@@ -105,6 +133,19 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         hashtags=hashtags,
         image_path=image_path,
         docx_path=docx_path,
+        llm_costs=[
+            {
+                "step": r.step,
+                "agent_name": r.agent_name,
+                "model": r.model,
+                "request_label": r.request_label,
+                "cost_rub": r.cost_rub,
+                "created_at": r.created_at,
+            }
+            for r in llm_costs
+        ],
+        total_cost_rub=total_cost_rub,
+        model_recommendations=service.get_model_recommendations(),
     )
 
 
@@ -122,17 +163,17 @@ def run_step1(digest_id: int, payload: Step1RunRequest, db: Session = Depends(ge
     return [CandidateOut.model_validate(r) for r in rows]
 
 
-@router.post("/{digest_id}/select")
+@router.post("/{digest_id}/step2/select")
 def select_news(digest_id: int, payload: SelectRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
     rows = service.select_news(digest_id, payload.selected_ids, payload.top5)
     return {"selected_count": len(rows)}
 
 
-@router.post("/{digest_id}/order")
+@router.post("/{digest_id}/step2/order")
 def order_news(digest_id: int, payload: OrderRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
-    rows = service.run_step_1_5_order(digest_id, payload.ordered_candidate_ids)
+    rows = service.run_step_2_order(digest_id, payload.ordered_candidate_ids)
     return {
         "ordered": [
             {
@@ -146,17 +187,17 @@ def order_news(digest_id: int, payload: OrderRequest, db: Session = Depends(get_
     }
 
 
-@router.post("/{digest_id}/confirm-ready")
+@router.post("/{digest_id}/step3/confirm-ready")
 def confirm_ready(digest_id: int, payload: CommandRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
-    data = service.run_step_2_analytics(digest_id, payload.command)
-    return {"message": 'Напишите "Ок" для перехода к Шагу 3', "overall_analysis": data.get("overall_analysis", "")}
+    data = service.run_step_3_analytics(digest_id, payload.command)
+    return {"message": 'Напишите "Ок" для перехода к Шагу 4', "overall_analysis": data.get("overall_analysis", "")}
 
 
-@router.post("/{digest_id}/confirm-final")
+@router.post("/{digest_id}/step4/confirm-final")
 def confirm_final(digest_id: int, payload: CommandRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
-    data = service.run_step_3_final(digest_id, payload.command, payload.hook_variant)
+    data = service.run_step_4_final(digest_id, payload.command, payload.hook_variant)
     return data
 
 

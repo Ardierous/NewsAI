@@ -40,7 +40,8 @@ class ProxyApiClient:
             image = self.client.images.generate(
                 model=model or self.settings.proxyapi_image_model,
                 prompt=prompt,
-                size="1200x630",
+                # Для gpt-image-1 ProxyAPI принимает только фиксированный набор размеров.
+                size="1536x1024",
             )
             b64_json = image.data[0].b64_json
             output_file.write_bytes(base64.b64decode(b64_json))

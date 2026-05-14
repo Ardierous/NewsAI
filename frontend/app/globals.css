@@ -58,3 +58,419 @@ input, textarea, select {
 .grid-2 {
   grid-template-columns: 1fr 1fr;
 }
+
+/* Шаг 2 — выбор новостей: читаемые карточки, чекбокс слева */
+.news-pick-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.news-pick-counter {
+  font-size: 0.95rem;
+  color: #a5b4fc;
+}
+
+.news-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+
+.news-pick-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid #29314f;
+  border-radius: 10px;
+  background: #0f172a;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.news-pick-row:hover {
+  border-color: #4f46e5;
+  background: #131c35;
+}
+
+.news-pick-row.is-selected {
+  border-color: #6366f1;
+  background: #151a32;
+}
+
+.news-pick-row input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  min-width: 20px;
+  margin-top: 4px;
+  cursor: pointer;
+  accent-color: #6366f1;
+}
+
+.news-pick-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.news-pick-eyebrow {
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #64748b;
+  margin-bottom: 4px;
+}
+
+.news-pick-title-label {
+  display: block;
+  cursor: pointer;
+  margin: 0 0 10px;
+}
+
+.news-pick-title {
+  font-size: 1.08rem;
+  font-weight: 600;
+  line-height: 1.4;
+  color: #f8fafc;
+  word-break: break-word;
+}
+
+.news-pick-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.8rem;
+  color: #94a3b8;
+}
+
+.news-pick-meta a {
+  color: #93c5fd;
+  word-break: break-all;
+}
+
+.news-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  font-size: 0.78rem;
+  color: #cbd5e1;
+}
+
+.news-chip.warn {
+  border-color: #854d0e;
+  color: #fde68a;
+  background: #422006;
+}
+
+.news-chip.ok {
+  border-color: #166534;
+  color: #bbf7d0;
+  background: #14532d;
+}
+
+.news-pick-details {
+  margin-top: 10px;
+  font-size: 0.85rem;
+  color: #cbd5e1;
+}
+
+.news-pick-details summary {
+  cursor: pointer;
+  color: #a5b4fc;
+  user-select: none;
+}
+
+.news-pick-details summary:hover {
+  color: #c7d2fe;
+}
+
+.news-pick-details[open] summary {
+  margin-bottom: 8px;
+}
+
+.news-pick-desc {
+  line-height: 1.45;
+  color: #94a3b8;
+  margin: 0 0 8px;
+}
+
+.news-pick-verify {
+  font-size: 0.8rem;
+  color: #64748b;
+  font-style: italic;
+}
+
+/* Длительные операции: полоса прогресса (неопределённая) */
+.async-progress {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  margin: -4px 0 16px;
+  padding: 12px 14px 14px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(17, 24, 49, 0.98) 0%, rgba(15, 23, 42, 0.96) 100%);
+  border: 1px solid #334155;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.async-progress-label {
+  font-size: 0.9rem;
+  color: #c7d2fe;
+  margin-bottom: 10px;
+  line-height: 1.35;
+}
+
+.async-progress-track {
+  height: 6px;
+  border-radius: 999px;
+  background: #1e293b;
+  overflow: hidden;
+}
+
+.async-progress-bar--indeterminate {
+  height: 100%;
+  width: 40%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #4f46e5, #818cf8, #4f46e5);
+  background-size: 200% 100%;
+  animation: async-progress-slide 1.25s ease-in-out infinite;
+}
+
+@keyframes async-progress-slide {
+  0% {
+    transform: translateX(-100%);
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    transform: translateX(350%);
+    background-position: 0% 50%;
+  }
+}
+
+/* Полоса у карточки шага мастера (рядом с заголовком) */
+.step-progress {
+  margin: 8px 0 0;
+}
+
+.step-progress .step-progress-track {
+  height: 5px;
+  border-radius: 999px;
+  background: #1e293b;
+  overflow: hidden;
+}
+
+.step-progress .step-progress-track--idle {
+  opacity: 0.45;
+}
+
+.step-progress .async-progress-bar--indeterminate {
+  height: 100%;
+}
+
+/* Памятка мастера: внешний блок по умолчанию свёрнут; внутри — аккордеоны по шагам */
+.digest-hints-root {
+  margin: 0;
+  padding: 0;
+  border: none;
+}
+
+.digest-hints-root > summary.digest-hints-root-summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 1.05rem;
+  font-weight: 600;
+  color: #f1f5f9;
+  line-height: 1.35;
+  padding: 0;
+}
+
+.digest-hints-root > summary.digest-hints-root-summary::-webkit-details-marker {
+  display: none;
+}
+
+.digest-hints-root > summary.digest-hints-root-summary::before {
+  content: "▸ ";
+  display: inline-block;
+  color: #94a3b8;
+  margin-right: 6px;
+  transition: transform 0.15s ease;
+}
+
+.digest-hints-root[open] > summary.digest-hints-root-summary::before {
+  transform: rotate(90deg);
+}
+
+.digest-hints-root-body {
+  padding-top: 10px;
+}
+
+.digest-hints-panel .digest-hints-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.digest-step-details {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.55);
+  overflow: hidden;
+}
+
+.digest-step-summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  user-select: none;
+}
+
+.digest-step-summary::-webkit-details-marker {
+  display: none;
+}
+
+.digest-step-summary::before {
+  content: "▸ ";
+  display: inline-block;
+  color: #94a3b8;
+  margin-right: 4px;
+  transition: transform 0.15s ease;
+}
+
+.digest-step-details[open] > .digest-step-summary::before {
+  transform: rotate(90deg);
+}
+
+.digest-step-details-body {
+  padding: 0 12px 12px;
+}
+
+/* Мастер / панель: что делать — крупно; зачем и как — мелко, по раскрытию */
+.wizard-hint-do {
+  margin: 0 0 12px;
+  font-size: 1.02rem;
+  font-weight: 600;
+  line-height: 1.55;
+  color: #f8fafc;
+}
+
+.wizard-hint-do code {
+  font-size: 0.88em;
+  font-weight: 500;
+  color: #e2e8f0;
+}
+
+.wizard-hint-do-list {
+  margin: 0 0 12px;
+  padding-left: 1.25rem;
+  font-size: 0.98rem;
+  font-weight: 500;
+  line-height: 1.6;
+  color: #e2e8f0;
+}
+
+.wizard-hint-do-list li {
+  margin-bottom: 6px;
+}
+
+.wizard-hint-do-list li:last-child {
+  margin-bottom: 0;
+}
+
+.wizard-hint-warn {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.1);
+  font-size: 0.96rem;
+  font-weight: 600;
+  line-height: 1.45;
+  color: #fde68a;
+}
+
+.wizard-hint-warn code {
+  color: #fef3c7;
+  font-size: 0.9em;
+}
+
+.wizard-hint-wait {
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: #94a3b8;
+}
+
+.wizard-hint-anchor {
+  margin: 10px 0 0;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #cbd5e1;
+}
+
+details.wizard-hint-why {
+  margin: 0 0 10px;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.wizard-hint-why > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 8px 10px;
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: #64748b;
+  user-select: none;
+}
+
+.wizard-hint-why > summary::-webkit-details-marker {
+  display: none;
+}
+
+.wizard-hint-why > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  color: #475569;
+  margin-right: 3px;
+  transition: transform 0.12s ease;
+}
+
+.wizard-hint-why[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.wizard-hint-why-body {
+  padding: 8px 10px 10px;
+  border-top: 1px solid #1e293b;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: #94a3b8;
+}
+
+.wizard-hint-why-body p {
+  margin: 0 0 8px;
+}
+
+.wizard-hint-why-body p:last-child {
+  margin-bottom: 0;
+}
+
+.wizard-hint-why-body code {
+  color: #cbd5e1;
+  font-size: 0.85em;
+}

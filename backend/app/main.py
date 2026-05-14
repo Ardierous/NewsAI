@@ -10,7 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes_digests import router as digests_router
 from app.config import get_settings
-from app.database import Base, engine
+from app.database import Base, engine, ensure_digest_schema_migrations
 from app.logging_config import setup_logging
 from app.middleware.request_logging import RequestLoggingMiddleware
 from app.services.digest_service import DigestService
@@ -38,6 +38,7 @@ def scheduled_digest_generation() -> None:
 async def lifespan(_: FastAPI):
     logger.info("Старт приложения: создание таблиц БД и планировщика")
     Base.metadata.create_all(bind=engine)
+    ensure_digest_schema_migrations()
     scheduler.add_job(scheduled_digest_generation, "cron", hour=8, minute=0, id="daily_digest_job", replace_existing=True)
     scheduler.start()
     yield
