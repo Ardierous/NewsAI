@@ -55,7 +55,6 @@ AGGREGATOR_HOST_MARKERS = (
 TIER1_HOST_MARKERS = ("openai.com", "anthropic.com", "ai.google.dev", "deepmind.google", "microsoft.com")
 TIER2_HOST_MARKERS = ("techcrunch.com", "theverge.com", "wired.com", "venturebeat.com", "arstechnica.com")
 
-
 def _is_placeholder_candidate_dict(item: dict[str, Any]) -> bool:
     """Резервный набор из workflow при сбое парсинга JSON (не реальные новости)."""
     url = str(item.get("url", "")).lower()
@@ -88,6 +87,18 @@ def _append_reject_reason(item: dict[str, Any], code: str) -> None:
         return
     existing = str(item.get("verification_comment") or "").strip()
     marker = f"{REJECT_REASON_PREFIX}{code}"
+    if marker in existing:
+        return
+    item["verification_comment"] = f"{existing} {marker}".strip()
+
+
+def _append_url_audit(item: dict[str, Any], stage: str, original_url: str, final_url: str) -> None:
+    left = str(original_url or "").strip()[:260]
+    right = str(final_url or "").strip()[:260]
+    if not left or not right:
+        return
+    marker = f"URL_AUDIT:{stage}|from={left}|to={right}"
+    existing = str(item.get("verification_comment") or "").strip()
     if marker in existing:
         return
     item["verification_comment"] = f"{existing} {marker}".strip()
@@ -172,6 +183,15 @@ def _url_fingerprint(url: str) -> str:
     host = (p.hostname or "").lower().removeprefix("www.")
     path = (p.path or "").rstrip("/") or "/"
     return f"{host}{path.lower()}"
+
+
+def _is_site_homepage_url(url: str) -> bool:
+    try:
+        p = urlparse(url.strip())
+    except Exception:
+        return False
+    path = (p.path or "").strip().rstrip("/")
+    return path == ""
 
 
 def _ld_article_url_field(obj: dict[str, Any]) -> str | None:
@@ -793,6 +813,9 @@ class DigestService:
         )
         now_msk = current_msk_iso()
         candidates: list[dict[str, Any]] = []
+        verify_candidates: list[dict[str, Any]] = []
+        guard_rejected: list[dict[str, Any]] = []
+        research_prefilter_dropped: list[dict[str, Any]] = []
         web_flow_available = self.settings.enable_web_fetch
         preview_by_fp: dict[str, dict[str, Any]] = {}
 
@@ -800,57 +823,6 @@ class DigestService:
             fp = _url_fingerprint(str(row.get("url", "")).strip())
             if fp:
                 preview_by_fp[fp] = dict(row)
-
-        if self.settings.enable_web_fetch:
-            try:
-                research_raw, research_cost = self.cost_tracker.measure(
-                    lambda: self.workflow.run_candidates_research(
-                        digest_type=digest.digest_type or "serious",
-                        now_msk=now_msk,
-                        manual_urls=normalized_manual_urls,
-                    ),
-                    source="step1_news_research",
-                )
-                self._save_cost(
-                    digest_id=digest.id,
-                    step="step_1",
-                    agent_name="NewsResearchAgent",
-                    model=AGENT_MODEL_RECOMMENDATIONS["NewsResearchAgent"],
-                    request_label="run_candidates_research",
-                    cost_rub=research_cost.cost_rub,
-                )
-                verify_raw, verify_cost = self.cost_tracker.measure(
-                    lambda: self.workflow.run_candidates_verify(research_raw),
-                    source="step1_source_verification",
-                )
-                self._save_cost(
-                    digest_id=digest.id,
-                    step="step_1",
-                    agent_name="SourceVerificationAgent",
-                    model=AGENT_MODEL_RECOMMENDATIONS["SourceVerificationAgent"],
-                    request_label="run_candidates_verify",
-                    cost_rub=verify_cost.cost_rub,
-                )
-                candidates, score_cost = self.cost_tracker.measure(
-                    lambda: self.workflow.run_candidates_score(verify_raw, now_msk=now_msk),
-                    source="step1_scoring",
-                )
-                self._save_cost(
-                    digest_id=digest.id,
-                    step="step_1",
-                    agent_name="ScoringAgent",
-                    model=AGENT_MODEL_RECOMMENDATIONS["ScoringAgent"],
-                    request_label="run_candidates_score",
-                    cost_rub=score_cost.cost_rub,
-                )
-            except Exception:
-                web_flow_available = False
-                logger.exception("Шаг 1: веб-поиск недоступен, переключение на ручные ссылки")
-                if not normalized_manual_urls:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Веб-поиск временно недоступен. Вставьте вручную 5-10 ссылок в поле manual_urls.",
-                    )
 
         manual_candidates = self._build_manual_candidates(digest.id, normalized_manual_urls, now_msk)
         failed_manual = [str(x["url"])[:220] for x in manual_candidates if not x.get("page_verified")]
@@ -889,7 +861,6 @@ class DigestService:
         def persist_reject_stats() -> None:
             if not reject_stats:
                 return
-            # Нужна видимость причин даже при 502: записываем сводку до raise.
             self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "step1_rejected_reasons").delete()
             self.db.add(
                 Asset(
@@ -911,6 +882,88 @@ class DigestService:
         for m in manual_candidates:
             snapshot_preview_row(m)
             append_verified(m)
+
+        if self.settings.enable_web_fetch and len(verified_pool) < STEP1_TARGET_VERIFIED:
+            for item in self._collect_search_verified_candidates(
+                digest.id,
+                digest,
+                now_msk,
+                seen_fp,
+                limit=STEP1_TARGET_VERIFIED,
+            ):
+                snapshot_preview_row(item)
+                append_verified(item)
+
+        if self.settings.enable_web_fetch and len(verified_pool) < STEP1_TARGET_VERIFIED:
+            try:
+                research_candidates, research_cost = self.cost_tracker.measure(
+                    lambda: self.workflow.run_candidates_research(
+                        digest_type=digest.digest_type or "serious",
+                        now_msk=now_msk,
+                        manual_urls=normalized_manual_urls,
+                    ),
+                    source="step1_news_research",
+                )
+                self._save_cost(
+                    digest_id=digest.id,
+                    step="step_1",
+                    agent_name="NewsResearchAgent",
+                    model=AGENT_MODEL_RECOMMENDATIONS["NewsResearchAgent"],
+                    request_label="run_candidates_research",
+                    cost_rub=research_cost.cost_rub,
+                )
+                research_candidates, research_prefilter_dropped = self._prefilter_llm_candidates_fetchable(
+                    digest.id, research_candidates
+                )
+                for dropped in research_prefilter_dropped:
+                    snapshot_preview_row(dropped)
+                verify_candidates, verify_cost = self.cost_tracker.measure(
+                    lambda: self.workflow.run_candidates_verify(research_candidates),
+                    source="step1_source_verification",
+                )
+                self._save_cost(
+                    digest_id=digest.id,
+                    step="step_1",
+                    agent_name="SourceVerificationAgent",
+                    model=AGENT_MODEL_RECOMMENDATIONS["SourceVerificationAgent"],
+                    request_label="run_candidates_verify",
+                    cost_rub=verify_cost.cost_rub,
+                )
+                scored_candidates, score_cost = self.cost_tracker.measure(
+                    lambda: self.workflow.run_candidates_score(verify_candidates, now_msk=now_msk),
+                    source="step1_scoring",
+                )
+                candidates, guard_rejected = self._filter_score_url_mutations(verify_candidates, scored_candidates)
+                for item in guard_rejected:
+                    snapshot_preview_row(item)
+                self._save_cost(
+                    digest_id=digest.id,
+                    step="step_1",
+                    agent_name="ScoringAgent",
+                    model=AGENT_MODEL_RECOMMENDATIONS["ScoringAgent"],
+                    request_label="run_candidates_score",
+                    cost_rub=score_cost.cost_rub,
+                )
+            except Exception:
+                web_flow_available = False
+                logger.exception("Шаг 1: веб-поиск недоступен, переключение на ручные ссылки")
+                if not normalized_manual_urls:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Веб-поиск временно недоступен. Вставьте вручную 5-10 ссылок в поле manual_urls.",
+                    )
+
+        for item in guard_rejected:
+            register_reject(item)
+            raw_u = str(item.get("url") or "").strip()
+            if raw_u.startswith("http"):
+                excluded_urls.append(raw_u[:800])
+
+        for item in research_prefilter_dropped:
+            register_reject(item)
+            raw_u = str(item.get("url") or "").strip()
+            if raw_u.startswith("http"):
+                excluded_urls.append(raw_u[:800])
 
         llm_merged = self._merge_candidates([], candidates, limit=40) if candidates else []
         for item in llm_merged:
@@ -996,16 +1049,17 @@ class DigestService:
                 if spent_step1 >= self.settings.step1_max_cost_rub - 1e-9
                 else ""
             )
-            search_hint = (
-                " Поиск без ручных URL работает только при наличии SERPAPI_API_KEY или TAVILY_API_KEY в backend/.env."
-                if not normalized_manual_urls and not (self.settings.serpapi_api_key or self.settings.tavily_api_key)
-                else ""
-            )
+            search_hint = ""
+            if not normalized_manual_urls and self.settings.enable_web_fetch:
+                search_hint = (
+                    " Проверьте PROXYAPI_API_KEY и веб-поиск (PROXYAPI_WEB_SEARCH_ENABLED=true) "
+                    "или добавьте SERPAPI_API_KEY / TAVILY_API_KEY в backend/.env."
+                )
             raise HTTPException(
                 status_code=502,
                 detail=(
                     f"Подтверждено только {len(verified_pool)} материалов по страницам (нужно минимум {STEP1_MIN_VERIFIED}). "
-                    "Добавьте прямые URL статей в поле шага 1 или укажите SERPAPI_API_KEY или TAVILY_API_KEY в backend/.env для добора ссылок из поиска."
+                    "Добавьте прямые URL статей в поле шага 1 — автопоиск идёт через ProxyAPI web_search (и опционально SerpAPI/Tavily)."
                     + top_reject_reasons()
                     + search_hint
                     + tail
@@ -1484,14 +1538,8 @@ class DigestService:
     def _check_url(self, url: str) -> bool:
         if not url.startswith("http"):
             return False
-        try:
-            response = requests.head(url, timeout=5, allow_redirects=True)
-            if response.status_code < 400:
-                return True
-            response = requests.get(url, timeout=5, allow_redirects=True)
-            return response.status_code < 400
-        except Exception:
-            return False
+        resp = _http_get_html_for_article(url)
+        return bool(resp is not None and getattr(resp, "status_code", 500) < 400 and getattr(resp, "text", ""))
 
     def _save_cost(
         self,
@@ -1634,8 +1682,9 @@ class DigestService:
                     "Вставьте прямую ссылку на страницу материала — тогда заголовок подтянется из разметки страницы."
                 )
                 logger.warning("Ручной URL: заголовок не извлечён | url=%s", stored[:120])
-            link_ok = self._check_url(stored)
-            headline_editorial_ok = bool(bundle.get("ok") and link_ok and raw_headline)
+            # Для ручных URL используем тот же результат GET, что и для LLM-кандидатов (без отдельного HEAD).
+            link_ok = bool(bundle.get("ok"))
+            headline_editorial_ok = bool(link_ok and raw_headline)
             page_verified = headline_editorial_ok and link_ok
             comment = "MANUAL_REQUIRED: добавлено пользователем"
             if manual_reject:
@@ -1697,6 +1746,77 @@ class DigestService:
             "page_verified": False,
         }
 
+    def _prefilter_llm_candidates_fetchable(
+        self, digest_id: int, rows: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Отсекаем URL, которые LLM придумал: страница не открывается по HTTP."""
+        kept: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            u = str(item.get("url") or "").strip()
+            if not u.startswith("http"):
+                _append_reject_reason(item, "invalid_url")
+                dropped.append(item)
+                continue
+            bundle = _fetch_article_page_bundle(u)
+            if not bundle.get("ok"):
+                _append_reject_reason(item, "llm_hallucinated_url")
+                item["link_status"] = False
+                dropped.append(item)
+                continue
+            kept.append(item)
+        return kept, dropped
+
+    def _step1_search_query(self, digest: Digest) -> str:
+        if (digest.digest_type or "serious") == "serious":
+            return "искусственный интеллект нейросети машинное обучение новости последние 48 часов"
+        return "AI artificial intelligence neural networks machine learning news last 48 hours"
+
+    def _collect_search_verified_candidates(
+        self,
+        digest_id: int,
+        digest: Digest,
+        now_msk: str,
+        seen_fp: set[str],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Реальные URL из ProxyAPI web_search / SerpAPI / Tavily — до LLM-цепочки."""
+        query = self._step1_search_query(digest)
+        urls, measure = self.cost_tracker.measure(
+            lambda: fetch_article_urls_from_search(
+                self.settings,
+                query,
+                limit=max(limit * 3, 18),
+                proxy=self.proxy,
+            ),
+            source="step1_web_search",
+        )
+        if measure.cost_rub is not None:
+            self._save_cost(
+                digest_id=digest_id,
+                step="step_1",
+                agent_name="WebSearch",
+                model=self.settings.proxyapi_web_search_model,
+                request_label="proxyapi_web_search_urls",
+                cost_rub=measure.cost_rub,
+            )
+        verified: list[dict[str, Any]] = []
+        seq = 1
+        for u in urls:
+            fp = _url_fingerprint(u)
+            if not fp or fp in seen_fp:
+                continue
+            item = self._skeleton_dict_from_search_url(u, now_msk, seq)
+            self._verify_llm_candidate_dict(digest_id, item)
+            if item.get("headline_editorial_ok") and item.get("link_status"):
+                seen_fp.add(fp)
+                verified.append(item)
+                seq += 1
+            if len(verified) >= limit:
+                break
+        return verified
+
     def _verify_llm_candidate_dict(self, digest_id: int, item: dict[str, Any]) -> None:
         """Нормализация URL и заголовка по HTML.
 
@@ -1709,11 +1829,12 @@ class DigestService:
         item["headline_editorial_ok"] = False
         item["page_verified"] = False
         item["link_status"] = bool(item.get("link_status", False))
+        original_url = str(item.get("url") or "").strip()
         if _is_placeholder_candidate_dict(item):
             item["link_status"] = False
             _append_reject_reason(item, "placeholder_candidate")
             return
-        u = str(item.get("url") or "").strip()
+        u = original_url
         if not u.startswith("http"):
             item["link_status"] = False
             _append_reject_reason(item, "invalid_url")
@@ -1732,6 +1853,13 @@ class DigestService:
             _append_reject_reason(item, "http_unreachable")
             return
         stored = str(bundle.get("final_url") or bundle.get("display_url") or u).strip()
+        _append_url_audit(item, "http_verify", original_url, stored)
+        orig_fp = _url_fingerprint(original_url)
+        stor_fp = _url_fingerprint(stored)
+        if orig_fp != stor_fp or _is_site_homepage_url(stored):
+            _append_reject_reason(item, "url_redirect_mismatch")
+            item["link_status"] = False
+            return
         item["url"] = stored[:1000]
         # HTML уже успешно загружен в bundle — отдельный HEAD часто даёт ложный отказ (403/405).
         item["link_status"] = True
@@ -1755,6 +1883,58 @@ class DigestService:
         item["headline_editorial_ok"] = True
         item["page_verified"] = bool(item.get("link_status", False)) and bool(item["headline_editorial_ok"])
 
+    def _filter_score_url_mutations(
+        self,
+        verify_rows: list[dict[str, Any]],
+        scored_rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        verify_url_by_num: dict[int, str] = {}
+        verify_fp_set: set[str] = set()
+        for row in verify_rows:
+            url = str(row.get("url") or "").strip()
+            fp = _url_fingerprint(url)
+            if fp:
+                verify_fp_set.add(fp)
+            try:
+                num = int(row.get("original_number"))
+            except Exception:
+                continue
+            if url.startswith("http") and num > 0:
+                verify_url_by_num[num] = url
+
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        for row in scored_rows:
+            item = dict(row)
+            score_url = str(item.get("url") or "").strip()
+            score_fp = _url_fingerprint(score_url)
+            expected_url = ""
+            number_ok = False
+            try:
+                number = int(item.get("original_number"))
+                if number in verify_url_by_num:
+                    expected_url = verify_url_by_num[number]
+                    number_ok = True
+            except Exception:
+                number_ok = False
+            if number_ok:
+                if score_fp and _url_fingerprint(expected_url) == score_fp:
+                    accepted.append(item)
+                else:
+                    _append_reject_reason(item, "url_mutated_between_agents")
+                    _append_url_audit(item, "score_guard", expected_url or "<missing>", score_url or "<missing>")
+                    item["link_status"] = False
+                    rejected.append(item)
+                continue
+            if score_fp and score_fp in verify_fp_set:
+                accepted.append(item)
+                continue
+            _append_reject_reason(item, "url_mutated_between_agents")
+            _append_url_audit(item, "score_guard", "<not_in_verify>", score_url or "<missing>")
+            item["link_status"] = False
+            rejected.append(item)
+        return accepted, rejected
+
     def _step1_fetch_supplementary_dicts(
         self,
         digest: Digest,
@@ -1763,12 +1943,25 @@ class DigestService:
         now_msk: str,
         need_hint: int,
     ) -> list[dict[str, Any]]:
-        query = (
-            "искусственный интеллект нейросети машинное обучение новости"
-            if (digest.digest_type or "serious") == "serious"
-            else "AI artificial intelligence neural networks machine learning news"
+        query = self._step1_search_query(digest)
+        urls, measure = self.cost_tracker.measure(
+            lambda: fetch_article_urls_from_search(
+                self.settings,
+                query,
+                limit=max(need_hint * 3, 14),
+                proxy=self.proxy,
+            ),
+            source="step1_web_search_supplement",
         )
-        urls = fetch_article_urls_from_search(self.settings, query, limit=max(need_hint * 3, 14))
+        if measure.cost_rub is not None:
+            self._save_cost(
+                digest_id=digest.id,
+                step="step_1",
+                agent_name="WebSearch",
+                model=self.settings.proxyapi_web_search_model,
+                request_label="proxyapi_web_search_supplement",
+                cost_rub=measure.cost_rub,
+            )
         out: list[dict[str, Any]] = []
         seq = 900
         for u in urls:

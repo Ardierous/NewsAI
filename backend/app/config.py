@@ -31,6 +31,11 @@ class Settings(BaseSettings):
     backend_port: int = 8000
     frontend_origin: str = "http://localhost:3000"
     enable_web_fetch: bool = False
+    # Веб-поиск новостей через ProxyAPI (OpenAI Responses + tool web_search). Требует ENABLE_WEB_FETCH=true.
+    proxyapi_web_search_enabled: bool = True
+    proxyapi_web_search_model: str = "gpt-4o-mini"
+    proxyapi_web_search_preview_model: str = "gpt-4o-mini-search-preview"
+    proxyapi_web_search_context_size: str = "medium"
     serpapi_api_key: str | None = None
     tavily_api_key: str | None = None
     # Сумма по llm_cost_records step=step_1: после лимита добор и LLM-refill прекращаются.

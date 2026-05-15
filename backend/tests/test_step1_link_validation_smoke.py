@@ -93,3 +93,39 @@ def test_ai_topic_accepts_ai_headline_even_if_corpus_too_short():
 def test_article_markers_detects_article_element():
     chunk = '<html><body><article><h1>Нейросеть и ИИ</h1><p>Текст</p></article></body></html>'
     assert ds._has_article_markers(chunk, []) is True
+
+
+def test_pick_display_url_prefers_canonical_for_same_page():
+    final_url = "https://example.com/news/abc?utm_source=x"
+    canonical = "https://example.com/news/abc"
+    assert ds._pick_display_url(final_url, canonical, None) == canonical
+
+
+def test_pick_display_url_keeps_final_for_other_page():
+    final_url = "https://example.com/news/abc"
+    canonical = "https://example.com/news/other"
+    assert ds._pick_display_url(final_url, canonical, None) == final_url
+
+
+def test_verify_rejects_redirect_to_homepage(monkeypatch):
+    html = """
+    <html><head><title>Expert - news</title></head>
+    <body><h1>Главная</h1><p>ИИ новости на сайте</p></body></html>
+    """
+
+    def fake_get(*_args, **_kwargs):
+        return _Resp(200, "https://expert.ru/", html)
+
+    monkeypatch.setattr(ds.requests, "get", fake_get)
+    item = {
+        "original_number": 1,
+        "title": "Статья про ИИ",
+        "url": "https://expert.ru/2026/05/17/strategiya-razvitiya-ai",
+        "verification_comment": "",
+    }
+    from unittest.mock import MagicMock
+
+    svc = MagicMock()
+    ds.DigestService._verify_llm_candidate_dict(svc, 1, item)
+    assert "REJECT_REASON:url_redirect_mismatch" in str(item.get("verification_comment") or "")
+    assert item.get("headline_editorial_ok") is not True

@@ -6,6 +6,7 @@ from typing import Any
 from openai import OpenAI
 
 from app.config import get_settings
+from app.services.news_search import extract_http_urls_from_text, extract_urls_from_responses_payload
 
 logger = logging.getLogger("app.proxyapi")
 
@@ -54,6 +55,74 @@ class ProxyApiClient:
         except Exception as exc:
             logger.exception("Ошибка images.generate | model=%s", model or self.settings.proxyapi_image_model)
             raise RuntimeError("ProxyAPI image generation failed") from exc
+
+    def search_news_article_urls(self, query: str, limit: int = 15) -> list[str]:
+        """
+        Реальный веб-поиск через ProxyAPI (OpenAI Responses API + tool web_search).
+        Документация: https://proxyapi.ru/docs/openai-web-search
+        """
+        if not self.settings.proxyapi_web_search_enabled:
+            return []
+        user_prompt = (
+            f"Найди до {limit} свежих новостей за последние 96 часов (часовой пояс Europe/Moscow) по теме: {query}. "
+            "Только материалы про искусственный интеллект, нейросети, машинное обучение или крупные модели (GPT, Gemini, Claude и т.п.). "
+            "Нужны прямые URL HTML-статей с сайтов изданий (не агрегаторы, не Google News, не Reddit, не главные страницы, не поиск). "
+            f"Ответ: строго JSON-массив из не более {limit} строк — каждая строка один полный URL, без markdown и без пояснений."
+        )
+        location = {
+            "type": "approximate",
+            "country": "RU",
+            "city": "Moscow",
+            "region": "Moscow",
+        }
+        tools = [
+            {
+                "type": "web_search",
+                "search_context_size": self.settings.proxyapi_web_search_context_size,
+                "user_location": location,
+            }
+        ]
+        model = self.settings.proxyapi_web_search_model
+        try:
+            response = self.client.responses.create(
+                model=model,
+                tools=tools,
+                input=[{"role": "user", "content": user_prompt}],
+            )
+            urls = extract_urls_from_responses_payload(response, limit=limit)
+            if urls:
+                logger.info("ProxyAPI web_search (responses) | model=%s count=%s", model, len(urls))
+                return urls
+        except Exception:
+            logger.warning("ProxyAPI responses web_search failed, fallback to search-preview", exc_info=True)
+        return self._search_news_urls_chat_preview(user_prompt, limit)
+
+    def _search_news_urls_chat_preview(self, user_prompt: str, limit: int) -> list[str]:
+        preview_model = self.settings.proxyapi_web_search_preview_model
+        try:
+            response = self.client.chat.completions.create(
+                model=preview_model,
+                messages=[{"role": "user", "content": user_prompt}],
+                web_search_options={
+                    "search_context_size": self.settings.proxyapi_web_search_context_size,
+                    "user_location": {
+                        "type": "approximate",
+                        "approximate": {
+                            "country": "RU",
+                            "city": "Moscow",
+                            "region": "Moscow",
+                        },
+                    },
+                },
+            )
+            text = response.choices[0].message.content or ""
+            urls = extract_http_urls_from_text(text, limit=limit)
+            if urls:
+                logger.info("ProxyAPI web_search (chat preview) | model=%s count=%s", preview_model, len(urls))
+            return urls
+        except Exception:
+            logger.exception("ProxyAPI chat search-preview failed | model=%s", preview_model)
+            raise RuntimeError("ProxyAPI web search request failed") from None
 
     def response_json(self, system_prompt: str, user_prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
         try:

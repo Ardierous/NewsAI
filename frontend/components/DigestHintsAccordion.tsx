@@ -86,13 +86,13 @@ export function DigestHintsAccordion() {
 
         <Acc title="Шаг 1 — кандидаты, поиск, проверка ссылок">
           <p style={{ ...li, marginTop: 0 }}>
-            Сбор URL (поиск SerpAPI/Tavily или только ручные ссылки), вызовы Crew для списка, затем для каждого URL: GET
+            Сбор URL (ProxyAPI web_search, опционально SerpAPI/Tavily или ручные ссылки), затем Crew при нехватке, для каждого URL: GET
             страницы, маркеры статьи, согласование заголовка, тема ИИ, «читаемый» заголовок, агрегаторы. Долго — нормально.
           </p>
           <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
             <li style={li}>
-              <strong>С ИИ-поиском:</strong> <code style={c}>ENABLE_WEB_FETCH=true</code>, <code style={c}>PROXYAPI_API_KEY</code>, опционально{" "}
-              <code style={c}>SERPAPI_API_KEY</code> / <code style={c}>TAVILY_API_KEY</code> в <code style={c}>backend/.env</code>.
+              <strong>С автопоиском:</strong> <code style={c}>ENABLE_WEB_FETCH=true</code>, <code style={c}>PROXYAPI_API_KEY</code> (веб-поиск через ProxyAPI), опционально{" "}
+              <code style={c}>SERPAPI_API_KEY</code> / <code style={c}>TAVILY_API_KEY</code>.
             </li>
             <li style={{ ...li, marginBottom: 0 }}>
               <strong>Без поиска:</strong> <code style={c}>ENABLE_WEB_FETCH=false</code> — обязательны ручные URL в теле запроса шага 1.

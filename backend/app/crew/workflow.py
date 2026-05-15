@@ -40,6 +40,13 @@ def _extract_json(raw: str, fallback: Any) -> Any:
     return fallback
 
 
+def _extract_candidate_list(raw: str) -> list[dict[str, Any]]:
+    parsed = _extract_json(raw, [])
+    if not isinstance(parsed, list):
+        return []
+    return [x for x in parsed if isinstance(x, dict)]
+
+
 _SUBSCRIPTION_MD_LINE = (
     "👉 Подпишитесь на ExTellect: [Telegram](https://t.me/extellect) • [ВКонтакте](https://vk.com/extellect) • "
     "[MAX](https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY) • [Дзен](https://dzen.ru/extellect) • "
@@ -104,11 +111,11 @@ class CrewWorkflow:
         return f"Контракт поведения (обязательно):\n{self.contract_prompt}\n\nЗадача:\n{text}"
 
     def run_candidates_pipeline(self, digest_type: str, now_msk: str, manual_urls: list[str]) -> list[dict[str, Any]]:
-        research_raw = self.run_candidates_research(digest_type, now_msk, manual_urls)
-        verify_raw = self.run_candidates_verify(research_raw)
-        return self.run_candidates_score(verify_raw, now_msk)
+        research_rows = self.run_candidates_research(digest_type, now_msk, manual_urls)
+        verify_rows = self.run_candidates_verify(research_rows)
+        return self.run_candidates_score(verify_rows, now_msk)
 
-    def run_candidates_research(self, digest_type: str, now_msk: str, manual_urls: list[str]) -> str:
+    def run_candidates_research(self, digest_type: str, now_msk: str, manual_urls: list[str]) -> list[dict[str, Any]]:
         prompt = (
             "Подготовь массив из 10 кандидатов новостей про ИИ в JSON. "
             "Поля: original_number,title,url,source,published_at,category,description,tier,"
@@ -122,6 +129,8 @@ class CrewWorkflow:
             "не подставляй URL главной сайта, поиска или ленты вместо URL материала. "
             "Каждая новость должна быть именно про искусственный интеллект, нейросети, ML, крупные модели (GPT, Gemini и т.п.) "
             "или их применение — не подмешивай нерелевантные темы (банкротства, спорт, быт и т.д.), даже если URL с крупного СМИ. "
+            "КРИТИЧНО: не выдумывай URL. Каждый url должен быть реальной страницей, которую можно открыть в браузере прямо сейчас. "
+            "Если не уверен в существовании ссылки — не включай кандидата. "
             "Ответ — только один JSON-массив из 10 объектов, без markdown-ограждений и без текста до/после JSON. "
             f"digest_type={digest_type}, now_msk={now_msk}, manual_urls={manual_urls}"
         )
@@ -131,7 +140,8 @@ class CrewWorkflow:
             agent=self.agents.news_research,
         )
         research_crew = Crew(agents=[self.agents.news_research], tasks=[research_task], process=Process.sequential, verbose=False)
-        return str(research_crew.kickoff())
+        raw = str(research_crew.kickoff())
+        return _extract_candidate_list(raw)[:15]
 
     def run_candidates_refill(self, digest_type: str, now_msk: str, excluded_urls: list[str]) -> list[dict[str, Any]]:
         """Дополнительный проход LLM: новые URL, не пересекающиеся с excluded_urls."""
@@ -158,22 +168,19 @@ class CrewWorkflow:
         )
         research_crew = Crew(agents=[self.agents.news_research], tasks=[research_task], process=Process.sequential, verbose=False)
         raw = str(research_crew.kickoff())
-        parsed = _extract_json(raw, [])
-        if isinstance(parsed, list):
-            return [x for x in parsed if isinstance(x, dict)][:15]
-        return []
+        return _extract_candidate_list(raw)[:15]
 
-    def run_candidates_verify(self, research_raw: str) -> str:
+    def run_candidates_verify(self, research_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         verify_task = Task(
             description=self._with_contract(
                 "Проверь источники и обнови reliability_status/link_status/tier/is_aggregator/is_duplicate. "
                 "Для каждого кандидата: url и title должны относиться к одной и той же публикации и к теме ИИ/нейросетей; "
                 "если материал не про ИИ — удали объект из массива или пометь link_status=false. "
-                "если url ведёт на другую статью, ленту или 404 — исправь url или пометь link_status=false. "
+                "если url ведёт на другую статью, ленту или 404 — не подменяй ссылку на новую, только пометь link_status=false. "
                 "Пересчитай tier строго по разделу «Система приоритетов источников»: Tier-1…Tier-4 для допустимых изданий; "
                 "для доменов из запрещённых агрегаторов (Tier-5 того раздела) выставь is_aggregator=true и снизь пригодность к финальной пятёрке. "
                 "Ответ — только один JSON-массив из 10 объектов, без текста до/после JSON. "
-                f"Входные кандидаты: {research_raw}"
+                f"Входные кандидаты: {json.dumps(research_rows, ensure_ascii=False)}"
             ),
             expected_output="Обновленный JSON массив 10 объектов",
             agent=self.agents.source_verification,
@@ -181,23 +188,26 @@ class CrewWorkflow:
         verify_crew = Crew(
             agents=[self.agents.source_verification], tasks=[verify_task], process=Process.sequential, verbose=False
         )
-        return str(verify_crew.kickoff())
+        raw = str(verify_crew.kickoff())
+        return _extract_candidate_list(raw)[:15]
 
-    def run_candidates_score(self, verify_raw: str, now_msk: str) -> list[dict[str, Any]]:
+    def run_candidates_score(self, verify_rows: list[dict[str, Any]], now_msk: str) -> list[dict[str, Any]]:
         score_task = Task(
             description=self._with_contract(
                 "Оцени и проставь scoring 1-3, total_score 3-9, сохрани баланс категорий. "
                 "Учитывай Tier из контракта: при прочих равных более высокий приоритет у Tier-1, затем Tier-2 и т.д. "
+                "Не меняй поля идентичности материала: original_number, url, title, source, published_at, category. "
+                "Не добавляй новые URL и не удаляй существующие: можно менять только оценочные поля и служебные флаги пригодности. "
                 "Ответ — только один JSON-массив из 10 объектов, без markdown-ограждений и без текста до/после JSON. "
-                f"Вход после верификации: {verify_raw}"
+                f"Вход после верификации: {json.dumps(verify_rows, ensure_ascii=False)}"
             ),
             expected_output="Финальный JSON массив 10 объектов",
             agent=self.agents.scoring,
         )
         score_crew = Crew(agents=[self.agents.scoring], tasks=[score_task], process=Process.sequential, verbose=False)
         output = str(score_crew.kickoff())
-        parsed = _extract_json(output, [])
-        if isinstance(parsed, list) and len(parsed) >= 5:
+        parsed = _extract_candidate_list(output)
+        if len(parsed) >= 5:
             return parsed[:10]
         return self._fallback_candidates(now_msk)
 
