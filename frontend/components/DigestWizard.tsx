@@ -5,6 +5,14 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AsyncProgress, StepProgressBar } from "./AsyncProgress";
+import {
+  WizardStepStatus,
+  getStep3PhaseText,
+  getStep4ImagesPhaseText,
+  getStep4PhaseText,
+  getStep4TextsPhaseText,
+  type Step3ProgressMode,
+} from "./WizardStepStatus";
 import { DigestHintsAccordion } from "./DigestHintsAccordion";
 import { api, assetUrl } from "../lib/api";
 
@@ -28,6 +36,21 @@ function hostFromUrl(url: string): string {
 function truncateText(s: string, max: number): string {
   if (s.length <= max) return s;
   return `${s.slice(0, max - 1)}…`;
+}
+
+/** Дата публикации новости для карточек (шаг 1 / 3). Всегда возвращает строку для отображения. */
+function formatNewsPublishedAt(iso: string | undefined): string {
+  const s = String(iso || "").trim();
+  if (!s || s === "UNDEFINED" || s.startsWith("1970-")) return "Дата не определена";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return "Дата не определена";
+  return d.toLocaleString("ru-RU", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 /** Дата выпуска для заголовка (без «#id»). */
@@ -90,6 +113,8 @@ const REJECT_REASON_LABELS: Record<string, string> = {
     "страница не открылась: сеть, блокировка, ошибка сайта, страница не найдена или доступ закрыт, долгое ожидание или битый адрес",
   no_article_markers:
     "похоже не отдельная статья, а раздел сайта, главная или сервисная страница без признаков материала «как в газете»",
+  news_listing_page:
+    "это лента или рубрика со списком новостей, а не отдельная статья — в дайджест попадут ссылки на материалы из неё",
   non_article_page: "на странице нет нормального заголовка материала (как у обычной статьи)",
   off_topic_not_ai: "по тексту страницы тема не про искусственный интеллект и нейросети — это другая тематика",
   headline_low_quality:
@@ -101,6 +126,8 @@ const REJECT_REASON_LABELS: Record<string, string> = {
     "ссылка изменилась в процессе обработки и больше не совпадает с исходной проверенной страницей",
   llm_hallucinated_url:
     "ссылка не открывается — похоже, адрес придуман моделью, а не взят из реальной публикации",
+  published_before_window:
+    "дата публикации раньше окна, заданного на шаге 0 (материал слишком старый для этого выпуска)",
   url_redirect_mismatch:
     "ссылка ведёт на другую страницу (редирект на главную или другой материал), не на заявленную новость",
   unknown_reject: "точная причина в данных не указана",
@@ -147,7 +174,7 @@ async function copyPlainTextToClipboard(text: string): Promise<void> {
 
 type Props = { digestId: number };
 
-type RunningStepKey = "init" | "0" | "1" | "2pick" | "2order" | "3" | "4";
+type RunningStepKey = "init" | "0" | "1" | "2pick" | "2order" | "3" | "4" | "4img" | "4txt";
 
 /** Соответствие текста прогресса карточке шага (для полосы у шага). */
 function parseRunningStepFromLabel(label: string): RunningStepKey | null {
@@ -156,9 +183,12 @@ function parseRunningStepFromLabel(label: string): RunningStepKey | null {
   if (t.includes("Загрузка выпуска")) return "init";
   if (t.includes("Сохранение типа") || t.includes("типа дайджеста")) return "0";
   if (t.includes("Шаг 1:")) return "1";
-  if (t.includes("Шаг 2: применение порядка")) return "2order";
+  if (t.includes("Шаг 2–3") || t.includes("Шаг 2-3")) return "3";
+  if (t.includes("Шаг 2: применение порядка") || t.includes("Шаг 2: оптимальный порядок")) return "2order";
   if (t.includes("Шаг 2:")) return "2pick";
   if (t.includes("Шаг 3:")) return "3";
+  if (t.includes("Шаг 4: обложки")) return "4img";
+  if (t.includes("Шаг 4: тексты")) return "4txt";
   if (t.includes("Шаг 4:")) return "4";
   return null;
 }
@@ -171,13 +201,26 @@ export function DigestWizard({ digestId }: Props) {
   const [error, setError] = useState("");
   const [manualUrls, setManualUrls] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
-  const [finalCommand, setFinalCommand] = useState("");
   const [hookVariant, setHookVariant] = useState<"A" | "B" | "V" | "">("");
+  const [step4Platforms, setStep4Platforms] = useState<Record<string, boolean>>({
+    telegram: true,
+    max: true,
+    vk: true,
+    dzen: true,
+  });
+  const [selectedImageVariant, setSelectedImageVariant] = useState<number | null>(null);
   const [draggedId, setDraggedId] = useState<number | null>(null);
   const [copyStatus, setCopyStatus] = useState<Record<string, "idle" | "ok" | "err">>({});
   const copyTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const step2CardRef = useRef<HTMLDivElement | null>(null);
+  const step3CardRef = useRef<HTMLDivElement | null>(null);
+  const step4CardRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToStep2Ref = useRef(false);
+  const step3ModeRef = useRef<Step3ProgressMode>("analytics");
+  const [step3Elapsed, setStep3Elapsed] = useState(0);
+  const [step4Elapsed, setStep4Elapsed] = useState(0);
+  const [newsWindowDays, setNewsWindowDays] = useState(3);
+  const [newsWindowDayKind, setNewsWindowDayKind] = useState<"calendar" | "working">("working");
 
   const sortedOutputs = useMemo(() => {
     const list = [...(digest?.outputs || [])];
@@ -229,7 +272,13 @@ export function DigestWizard({ digestId }: Props) {
         const data = await api.getDigest(digestId);
         setDigest(data);
         if (data.selected?.length) {
-          setSelected(data.selected.map((s: any) => s.candidate_id));
+          const sorted = [...data.selected].sort(
+            (a: { output_position?: number }, b: { output_position?: number }) =>
+              (a.output_position ?? 0) - (b.output_position ?? 0),
+          );
+          setSelected(sorted.map((s: { candidate_id: number }) => s.candidate_id));
+        } else {
+          setSelected([]);
         }
       } catch (e) {
         setError((e as Error).message);
@@ -250,6 +299,21 @@ export function DigestWizard({ digestId }: Props) {
   }, [digestId, loadDigest]);
 
   useEffect(() => {
+    const d = digest?.digest;
+    if (!d) return;
+    if (d.news_window_days != null) setNewsWindowDays(Number(d.news_window_days) || 3);
+    const st = d.status as string | undefined;
+    if (!st || st === "draft" || st === "step_0") {
+      setNewsWindowDayKind("working");
+      return;
+    }
+    const kind = d.news_window_day_kind;
+    if (kind === "working" || kind === "calendar") {
+      setNewsWindowDayKind(kind);
+    }
+  }, [digest?.digest?.news_window_days, digest?.digest?.news_window_day_kind, digest?.digest?.status]);
+
+  useEffect(() => {
     const list = digest?.candidates as
       | { id: number; page_verified?: boolean; link_status?: boolean; headline_editorial_ok?: boolean }[]
       | undefined;
@@ -263,16 +327,41 @@ export function DigestWizard({ digestId }: Props) {
   const digestStatus = digest?.digest?.status as string | undefined;
   const isDraft = digestStatus === "draft";
   const canRunStep1 = digestStatus === "step_0" || digestStatus === "step_1_candidates";
+  const pastStep2ForRebuild =
+    digestStatus === "selected" || digestStatus === "analytics_ready" || digestStatus === "final_ready";
   const canSelect = digestStatus === "step_1_candidates";
   const canOrder = digestStatus === "selected";
-  const canAnalytics = digestStatus === "selected";
-  const canFinal = digestStatus === "analytics_ready";
+  const canAnalytics = digestStatus === "selected" || digestStatus === "analytics_ready";
+  const analyticsDone = digestStatus === "analytics_ready" || digestStatus === "final_ready";
+  const canStep4 = analyticsDone;
   const isFinal = digestStatus === "final_ready";
+  const hasStep4Images = (digest?.image_variants?.length ?? 0) > 0;
+  const hasStep4Outputs = (digest?.outputs?.length ?? 0) > 0;
+  const showStep4Results = isFinal || hasStep4Images || hasStep4Outputs;
+
+  const selectedPlatformsList = useMemo(
+    () => PLATFORM_ORDER.filter((p) => step4Platforms[p]),
+    [step4Platforms],
+  );
+
+  useEffect(() => {
+    if (digest?.step4_selected_image_variant != null) {
+      setSelectedImageVariant(Number(digest.step4_selected_image_variant));
+    }
+  }, [digest?.step4_selected_image_variant]);
 
   const candidatesSorted = useMemo(
     () => [...(digest?.candidates || [])].sort((a, b) => a.original_number - b.original_number),
     [digest],
   );
+
+  const hasCandidatePool = candidatesSorted.length > 0;
+  /** Пересборка: когда пул уже есть, выпуск на шаге 1+ или прошёл выбор (повтор после 502 / обновление ленты). */
+  const showRebuildPoolButton =
+    !isDraft &&
+    (hasCandidatePool ||
+      digestStatus === "step_1_candidates" ||
+      pastStep2ForRebuild);
 
   const toggleSelected = (id: number) => {
     const row = candidatesSorted.find((x: any) => x.id === id);
@@ -284,18 +373,45 @@ export function DigestWizard({ digestId }: Props) {
     });
   };
 
+  const manualUrlList = useMemo(
+    () =>
+      manualUrls
+        .split("\n")
+        .map((x) => x.trim())
+        .filter(Boolean),
+    [manualUrls],
+  );
+
   const run = async (label: string, fn: () => Promise<unknown>) => {
     if (label.includes("Шаг 1:")) {
       pendingScrollToStep2Ref.current = true;
     }
     const rk = parseRunningStepFromLabel(label);
     if (rk !== null) setRunningStepKey(rk);
+    if (rk === "3") {
+      step3ModeRef.current =
+        label.includes("2–3") || label.includes("2-3") ? "combined" : "analytics";
+      setStep3Elapsed(0);
+      requestAnimationFrame(() => {
+        step3CardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+    if (rk === "4") {
+      setStep4Elapsed(0);
+      requestAnimationFrame(() => {
+        step4CardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
     setProgressLabel(label);
     setLoading(true);
     try {
       setError("");
       await fn();
-      setProgressLabel("Обновление данных…");
+      if (rk === "4") {
+        setProgressLabel("Шаг 4: обновление результата на экране…");
+      } else {
+        setProgressLabel("Обновление данных…");
+      }
       await loadDigest({ skipProgress: true });
       if (pendingScrollToStep2Ref.current) {
         pendingScrollToStep2Ref.current = false;
@@ -316,6 +432,26 @@ export function DigestWizard({ digestId }: Props) {
       setProgressLabel("");
       setRunningStepKey(null);
     }
+  };
+
+  const runStep1 = (rebuild: boolean) => {
+    const label = rebuild
+      ? "Шаг 1: полная пересборка пула (поиск, проверка, оценка; 1–5 мин)…"
+      : "Шаг 1: поиск новостей, проверка источников и оценка кандидатов (AI, обычно 1–5 мин)…";
+    if (rebuild) {
+      const ok = window.confirm(
+        pastStep2ForRebuild
+          ? "Пересобрать пул кандидатов с нуля?\n\n" +
+              "Будет заново: веб-поиск, проверка страниц, скоринг.\n" +
+              "Сотрутся: выбранные 5 новостей, порядок, аналитика (шаг 3) и финальная сборка (шаг 4).\n\n" +
+              "Тип дайджеста (шаг 0) сохранится. Продолжить?"
+          : "Пересобрать пул кандидатов с нуля?\n\n" +
+              "Текущий список в шаге 2 будет заменён: снова веб-поиск, проверка страниц и скоринг.\n" +
+              "Отмеченные галочки сбросятся. Тип дайджеста (шаг 0) сохранится. Продолжить?",
+      );
+      if (!ok) return;
+    }
+    void run(label, () => api.step1Run(digestId, manualUrlList, { rebuild }));
   };
 
   const selectedMap = useMemo(() => {
@@ -339,6 +475,99 @@ export function DigestWizard({ digestId }: Props) {
   }, [digest?.candidates_are_demo_fallback, candidatesSorted]);
 
   const step1CollectionInProgress = loading && progressLabel.includes("Шаг 1:");
+
+  const step3InProgress = loading && runningStepKey === "3";
+  const step4InProgress = loading && (runningStepKey === "4" || runningStepKey === "4img" || runningStepKey === "4txt");
+  const step4ImagesInProgress = loading && runningStepKey === "4img";
+  const step4TextsInProgress = loading && runningStepKey === "4txt";
+
+  useEffect(() => {
+    if (!step3InProgress) {
+      setStep3Elapsed(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => {
+      setStep3Elapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [step3InProgress]);
+
+  useEffect(() => {
+    if (!step4InProgress) {
+      setStep4Elapsed(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => {
+      setStep4Elapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [step4InProgress]);
+
+  const step3PhaseText = useMemo(() => {
+    if (!step3InProgress) return "";
+    if (progressLabel.includes("обновление") || progressLabel.includes("Обновление")) {
+      return "Обновляем экран: подгружаем готовую аналитику…";
+    }
+    return getStep3PhaseText(step3ModeRef.current, step3Elapsed);
+  }, [step3InProgress, step3Elapsed, progressLabel]);
+
+  const step4PhaseText = useMemo(() => {
+    if (!step4InProgress) return "";
+    const refreshing =
+      progressLabel.includes("обновление результата") || progressLabel.includes("Обновление");
+    if (runningStepKey === "4img") return getStep4ImagesPhaseText(step4Elapsed, refreshing);
+    if (runningStepKey === "4txt") return getStep4TextsPhaseText(step4Elapsed, refreshing);
+    return getStep4PhaseText(step4Elapsed, refreshing);
+  }, [step4InProgress, step4Elapsed, progressLabel, runningStepKey]);
+
+  const step4StatusHeadline = useMemo(() => {
+    if (runningStepKey === "4img") return "Шаг 4: обложки";
+    if (runningStepKey === "4txt") return "Шаг 4: тексты";
+    return "Шаг 4: финальная сборка";
+  }, [runningStepKey]);
+
+  const step3StatusHeadline =
+    step3ModeRef.current === "combined" ? "Шаг 2–3: порядок и аналитика" : "Шаг 3: аналитика";
+
+  const asyncProgressLabel = useMemo(() => {
+    if (step3InProgress && step3PhaseText) {
+      return `${step3StatusHeadline} — ${step3PhaseText}`;
+    }
+    if (step4InProgress && step4PhaseText) {
+      return `${step4StatusHeadline} — ${step4PhaseText}`;
+    }
+    return progressLabel;
+  }, [
+    step3InProgress,
+    step3PhaseText,
+    step3StatusHeadline,
+    step4InProgress,
+    step4PhaseText,
+    step4StatusHeadline,
+    progressLabel,
+  ]);
+
+  const handleSelectImageVariant = useCallback(
+    async (variant: number) => {
+      setSelectedImageVariant(variant);
+      setLoading(true);
+      setProgressLabel("Шаг 4: сохранение выбранной обложки…");
+      try {
+        setError("");
+        await api.selectStep4Image(digestId, variant);
+        await loadDigest({ skipProgress: true });
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setLoading(false);
+        setProgressLabel("");
+        setRunningStepKey(null);
+      }
+    },
+    [digestId, loadDigest],
+  );
 
   /** Шаг 2 показываем сразу после шага 0 (и дальше), чтобы под шагом 1 всегда было место списка; в draft карточка не нужна. */
   const showStep2Section = useMemo(() => {
@@ -388,24 +617,32 @@ export function DigestWizard({ digestId }: Props) {
 
   return (
     <div className="grid">
-      <AsyncProgress active={loading} label={progressLabel} />
+      <AsyncProgress active={loading} label={asyncProgressLabel} />
 
       <div className="card">
         <h2 style={{ marginBottom: 6 }}>Мастер дайджеста · {formatDigestDateLabel(digest?.digest?.date)}</h2>
         <div style={{ fontSize: "0.88rem", color: "#94a3b8", marginBottom: 8 }}>
           Текущий статус: <strong style={{ color: "#e2e8f0" }}>{digest?.digest?.status ?? "…"}</strong>
           {" · "}
-          Суммарно AI: {digest?.total_cost_rub != null ? `${Number(digest.total_cost_rub).toFixed(4)} ₽` : "—"}
+          По выпуску: {digest?.total_cost_rub != null ? `${Number(digest.total_cost_rub).toFixed(2)} ₽` : "—"}
+          {" · "}
+          Сегодня ProxyAPI:{" "}
+          {digest?.proxyapi_spent_today_rub != null
+            ? `${Number(digest.proxyapi_spent_today_rub).toFixed(2)} ₽`
+            : digest?.tracked_spend_today_rub != null
+              ? `~${Number(digest.tracked_spend_today_rub).toFixed(2)} ₽ (учёт приложения)`
+              : "—"}
         </div>
         <p className="wizard-hint-do">
           Идите по шагам сверху вниз: <strong>0 → 1 → 2</strong> (выбор и при желании порядок) → <strong>3 → 4</strong>. Поле
           статуса в шапке показывает, на каком этапе вы сейчас.
         </p>
-        <WizardWhy summary="Что означают статус и «Суммарно AI»">
+        <WizardWhy summary="Что означают статус и суммы в рублях">
           <p>
-            <strong>Статус</strong> — этап конвейера на сервере: от черновика до готового выпуска. Меняется только после
-            успешных действий (кнопок). <strong>Суммарно AI</strong> — ориентировочная стоимость вызовов моделей по этому выпуску
-            (учёт ProxyAPI); растёт по мере шагов с ИИ.
+            <strong>Статус</strong> — этап конвейера на сервере. <strong>По выпуску</strong> — разница баланса ProxyAPI
+            с начала работы над выпуском до последнего шага (снимки до и после каждого запуска шагов 1–4).{" "}
+            <strong>Сегодня ProxyAPI</strong> — разница баланса с первого запуска backend за календарный день (МСК) до
+            текущего момента.
           </p>
         </WizardWhy>
         <WizardWhy summary="Панель, ссылка и кнопка «Создать на сегодня» — в чём разница">
@@ -484,12 +721,49 @@ export function DigestWizard({ digestId }: Props) {
       <DigestHintsAccordion />
 
       <div className="card">
-        <h3>Шаг 0 — тип дайджеста</h3>
+        <h3>Шаг 0 — тип дайджеста и окно новостей</h3>
         <StepProgressBar active={runningStepKey === "0" || runningStepKey === "init"} />
         <p className="wizard-hint-do">
-          Нажмите <strong>одну</strong> кнопку тона и дождитесь окончания полоски загрузки. После успеха статус в шапке станет{" "}
-          <code>step_0</code> — откроется шаг 1.
+          Задайте окно по дате публикации, затем нажмите <strong>одну</strong> кнопку тона и дождитесь полоски загрузки. После
+          успеха статус в шапке станет <code>step_0</code> — откроется шаг 1.
         </p>
+        <label style={{ display: "block", marginBottom: 8 }}>
+          Окно поиска (дней от даты выпуска):{" "}
+          <input
+            type="number"
+            min={1}
+            max={90}
+            value={newsWindowDays}
+            disabled={loading}
+            onChange={(e) => setNewsWindowDays(Math.max(1, Math.min(90, Number(e.target.value) || 3)))}
+            style={{ width: 64, marginLeft: 6 }}
+          />
+        </label>
+        <fieldset className="wizard-radio-group">
+          <legend>Тип дней в окне</legend>
+          <label className="wizard-radio-option">
+            <input
+              type="radio"
+              name="newsWindowDayKind"
+              value="working"
+              checked={newsWindowDayKind === "working"}
+              disabled={loading}
+              onChange={() => setNewsWindowDayKind("working")}
+            />
+            Рабочие (пн–пт)
+          </label>
+          <label className="wizard-radio-option">
+            <input
+              type="radio"
+              name="newsWindowDayKind"
+              value="calendar"
+              checked={newsWindowDayKind === "calendar"}
+              disabled={loading}
+              onChange={() => setNewsWindowDayKind("calendar")}
+            />
+            Календарные
+          </label>
+        </fieldset>
         <WizardWhy summary="Зачем тип важен и как ведут себя кнопки">
           <p>
             От выбора зависят промпты к ИИ на шагах 1–4 — это не просто «стиль оформления». До первого сохранения ни одна
@@ -500,6 +774,11 @@ export function DigestWizard({ digestId }: Props) {
             <strong>Серьёзный</strong> — нейтральный деловой стиль. <strong>Курьёзный</strong> — легче формулировки.{" "}
             <strong>По умолчанию</strong> — в будни серьёзный, в выходные курьёзный (решает сервер по календарю Москвы).
           </p>
+          <p>
+            <strong>Окно новостей</strong> ограничивает шаг 1: в пул попадают только материалы с датой публикации не раньше N
+            дней от даты выпуска (календарных или рабочих). Слишком старые URL отсекаются с причиной{" "}
+            <code>published_before_window</code>.
+          </p>
         </WizardWhy>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
@@ -508,7 +787,15 @@ export function DigestWizard({ digestId }: Props) {
             style={step0BtnStyle("serious")}
             aria-pressed={step0Active === "serious"}
             title="Деловой нейтральный тон; рекомендуется для будничных выпусков вручную."
-            onClick={() => run("Сохранение типа дайджеста: серьёзный…", () => api.step0(digestId, "serious"))}
+            onClick={() =>
+              run("Сохранение типа дайджеста: серьёзный…", () =>
+                api.step0(digestId, {
+                  digest_type: "serious",
+                  news_window_days: newsWindowDays,
+                  news_window_day_kind: newsWindowDayKind,
+                }),
+              )
+            }
           >
             Серьёзный
           </button>
@@ -518,7 +805,15 @@ export function DigestWizard({ digestId }: Props) {
             style={step0BtnStyle("curious")}
             aria-pressed={step0Active === "curious"}
             title="Более лёгкий тон под курьёзные заметки; выберите осознанно."
-            onClick={() => run("Сохранение типа дайджеста: курьёзный…", () => api.step0(digestId, "curious"))}
+            onClick={() =>
+              run("Сохранение типа дайджеста: курьёзный…", () =>
+                api.step0(digestId, {
+                  digest_type: "curious",
+                  news_window_days: newsWindowDays,
+                  news_window_day_kind: newsWindowDayKind,
+                }),
+              )
+            }
           >
             Курьёзный
           </button>
@@ -528,7 +823,14 @@ export function DigestWizard({ digestId }: Props) {
             style={step0BtnStyle("default")}
             aria-pressed={step0Active === "default"}
             title="Будни → серьёзный, выходные → курьёзный; сервер решает по календарю Москвы."
-            onClick={() => run("Сохранение типа дайджеста по умолчанию…", () => api.step0(digestId, undefined))}
+            onClick={() =>
+              run("Сохранение типа дайджеста по умолчанию…", () =>
+                api.step0(digestId, {
+                  news_window_days: newsWindowDays,
+                  news_window_day_kind: newsWindowDayKind,
+                }),
+              )
+            }
           >
             По умолчанию
           </button>
@@ -556,9 +858,8 @@ export function DigestWizard({ digestId }: Props) {
             время.
           </p>
           <p>
-            <strong>Поле URL</strong> — для обязательных материалов; оставьте пустым, если дополнительных ссылок нет. Повторный
-            запуск шага 1 <strong>удалит</strong> прежних кандидатов, выбор и аналитику и соберёт всё заново — используйте при
-            смене .env или для обновления ленты.
+            <strong>Поле URL</strong> — для обязательных материалов; оставьте пустым, если дополнительных ссылок нет. Когда список
+            кандидатов уже есть в шаге 2, для повторного сбора используйте <strong>«Пересобрать пул кандидатов»</strong> там же.
           </p>
           <p>Результат сбора отображается в блоке «Шаг 2» ниже после завершения запроса.</p>
         </WizardWhy>
@@ -573,42 +874,70 @@ export function DigestWizard({ digestId }: Props) {
           value={manualUrls}
           onChange={(e) => setManualUrls(e.target.value)}
         />
-        <button
-          type="button"
-          disabled={!canRunStep1 || loading}
-          title={
-            !canRunStep1
-              ? "Сначала шаг 0"
-              : "Запуск поиска, проверки страниц и скоринга (долго). Повтор затирает старых кандидатов."
-          }
-          onClick={() =>
-            run(
-              "Шаг 1: поиск новостей, проверка источников и оценка кандидатов (AI, обычно 1–5 мин)…",
-              () =>
-                api.step1Run(
-                  digestId,
-                  manualUrls
-                    .split("\n")
-                    .map((x) => x.trim())
-                    .filter(Boolean),
-                ),
-            )
-          }
-        >
-          Запустить сбор кандидатов → результат в «Шаг 2» ниже
-        </button>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+          <button
+            type="button"
+            disabled={!canRunStep1 || loading || (hasCandidatePool && digestStatus === "step_1_candidates")}
+            title={
+              !canRunStep1
+                ? isDraft
+                  ? "Сначала шаг 0"
+                  : pastStep2ForRebuild
+                    ? "Пересборка пула — в шаге 2, когда виден список кандидатов"
+                    : "Сбор недоступен для текущего статуса"
+                : hasCandidatePool && digestStatus === "step_1_candidates"
+                  ? "Пул уже собран — пересоберите в шаге 2"
+                  : "Запуск поиска, проверки страниц и скоринга (обычно 1–5 мин)"
+            }
+            onClick={() => runStep1(false)}
+          >
+            Запустить сбор кандидатов → результат в «Шаг 2» ниже
+          </button>
+        </div>
+        {showRebuildPoolButton && hasCandidatePool ? (
+          <p className="wizard-hint-do" style={{ marginTop: 10, fontSize: "0.92rem" }}>
+            Список кандидатов уже в блоке <strong>«Шаг 2»</strong> ниже. Чтобы обновить ленту — кнопка{" "}
+            <strong>«Пересобрать пул кандидатов»</strong> в шапке шага 2.
+          </p>
+        ) : null}
       </div>
 
       {showStep2Section && (
         <div className="card" ref={step2CardRef}>
-          <div className="news-pick-toolbar">
+          <div
+            className="news-pick-toolbar"
+            style={{ flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}
+          >
             <h3 style={{ margin: 0 }}>Шаг 2 — выбор 5 новостей</h3>
-            <span className="news-pick-counter">
-              Выбрано: <strong>{selected.length}</strong> / 5
-              {selected.length >= 5 ? " — снимите галочку, чтобы заменить новость" : ""}
-            </span>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+              <span className="news-pick-counter">
+                Выбрано: <strong>{selected.length}</strong> / 5
+                {selected.length >= 5 ? " — снимите галочку, чтобы заменить новость" : ""}
+              </span>
+              {showRebuildPoolButton ? (
+                <button
+                  type="button"
+                  className="btn-rebuild"
+                  disabled={loading}
+                  title={
+                    pastStep2ForRebuild
+                      ? "Новый поиск и проверка; сброс выбора, порядка, аналитики и финала"
+                      : "Заново собрать список кандидатов (поиск, проверка ссылок, скоринг)"
+                  }
+                  onClick={() => runStep1(true)}
+                >
+                  Пересобрать пул кандидатов
+                </button>
+              ) : null}
+            </div>
           </div>
           <StepProgressBar active={runningStepKey === "2pick"} />
+          {showRebuildPoolButton && pastStep2ForRebuild ? (
+            <p className="wizard-hint-warn" style={{ marginTop: 0, marginBottom: 12, fontSize: "0.92rem" }}>
+              Выпуск уже прошёл выбор или аналитику. Пересборка пула сбросит шаги 2–4 — затем снова отметьте пятёрку и пройдите
+              порядок и аналитику.
+            </p>
+          ) : null}
           {step1CollectionInProgress && candidatesSorted.length === 0 ? (
             <p className="wizard-hint-do" style={{ fontSize: "0.95rem" }}>
               Идёт сбор и проверка кандидатов (обычно 1–5 минут). Списки появятся здесь сразу после завершения — не уходите со
@@ -618,7 +947,7 @@ export function DigestWizard({ digestId }: Props) {
             <p className="wizard-hint-wait">
               Список появится здесь после <strong>успешного</strong> шага 1 (в шапке статус <code>step_1_candidates</code>).
               Чекбоксы станут активны вместе со строками. Если выше показана ошибка (например 502) — исправьте URL или .env и
-              снова запустите шаг 1.
+              нажмите <strong>«Пересобрать пул кандидатов»</strong> (когда список уже есть) или снова запустите сбор в шаге 1.
             </p>
           ) : null}
           {canSelect && candidatesSorted.length > 0 ? (
@@ -655,8 +984,8 @@ export function DigestWizard({ digestId }: Props) {
               после сбоя разбора JSON). Запросы к LLM при этом могли выполняться — деньги списываются за ответ модели,
               даже если список в БД остался заглушкой. Чтобы увидеть настоящие материалы: проверьте{" "}
               <code style={{ color: "#e2e8f0" }}>ENABLE_WEB_FETCH=true</code> и <code style={{ color: "#e2e8f0" }}>PROXYAPI_API_KEY</code> в{" "}
-              <code style={{ color: "#e2e8f0" }}>backend/.env</code>, перезапустите backend и снова нажмите{" "}
-              <strong>«Запустить сбор кандидатов»</strong> в шаге 1. Либо вставьте 5–10 прямых URL на статьи (при{" "}
+              <code style={{ color: "#e2e8f0" }}>backend/.env</code>, перезапустите backend и нажмите{" "}
+              <strong>«Пересобрать пул кандидатов»</strong> в этом блоке. Либо вставьте 5–10 прямых URL на статьи (при{" "}
               <code style={{ color: "#e2e8f0" }}>ENABLE_WEB_FETCH=false</code>
               ) и снова тот же шаг.
             </div>
@@ -708,9 +1037,7 @@ export function DigestWizard({ digestId }: Props) {
                       {c.category ? <span className="news-chip">{c.category}</span> : null}
                       {c.tier ? <span className="news-chip">{c.tier}</span> : null}
                       <span className="news-chip">Балл: {c.total_score}</span>
-                      {c.published_at ? (
-                        <span className="news-chip">{String(c.published_at).replace("T", " ").slice(0, 16)}</span>
-                      ) : null}
+                      <span className="news-chip">{formatNewsPublishedAt(c.published_at)}</span>
                       {headlineEditorialOk(c) ? (
                         <span className="news-chip ok">Читаемый заголовок</span>
                       ) : (
@@ -798,8 +1125,10 @@ export function DigestWizard({ digestId }: Props) {
           ) : null}
           <WizardWhy summary="Зачем менять порядок до шага 3">
             <p>
-              Порядок задаёт очередь тем в выпуске (1 — самая верхняя). После «Применить порядок» ИИ пересоберёт краткие
-              обоснования позиций. Это не обязательно для кнопки «Шаг 3», но влияет на читаемость итогового текста.
+              Порядок задаёт очередь тем в выпуске (1 — самая верхняя).{" "}
+              <strong>«Оптимально по мнению ИИ»</strong> расставит пятёрку с упором на интерес читателя и сохранит
+              обоснования позиций, затем <strong>автоматически запускается аналитика (шаг 3)</strong>.{" "}
+              <strong>«Применить порядок»</strong> — сохранить ваш порядок после перетаскивания.
             </p>
           </WizardWhy>
           {orderedSelectedRows.map((s: any) => (
@@ -824,24 +1153,52 @@ export function DigestWizard({ digestId }: Props) {
           <button
             type="button"
             disabled={!canOrder || selected.length !== 5 || loading}
-            title="Вызов OrderingAgent: краткое обоснование порядка по каждой позиции"
-            onClick={() => run("Шаг 2: применение порядка новостей (AI)…", () => api.orderNews(digestId, selected))}
+            title="ProxyAPI gpt-4.1-mini: порядок для удержания читателя (сильный заход, ритм, финал)"
+            onClick={() =>
+              run("Шаг 2–3: оптимальный порядок и аналитика (AI, несколько минут)…", async () => {
+                await api.orderNewsAiOptimal(digestId);
+              })
+            }
+          >
+            Оптимально по мнению ИИ
+          </button>
+          <button
+            type="button"
+            disabled={!canOrder || selected.length !== 5 || loading}
+            style={{ marginLeft: 10 }}
+            title="Сохранить текущий порядок карточек после перетаскивания"
+            onClick={() =>
+              run("Шаг 2–3: порядок и аналитика (AI, несколько минут)…", () => api.orderNews(digestId, selected))
+            }
           >
             Применить порядок
           </button>
         </div>
       )}
 
-      <div className="card" style={{ opacity: canAnalytics ? 1 : 0.55 }}>
+      <div ref={step3CardRef} className="card" style={{ opacity: canAnalytics ? 1 : 0.55 }}>
         <h3>Шаг 3 — аналитика</h3>
         <StepProgressBar active={runningStepKey === "3"} />
+        {step3InProgress ? (
+          <WizardStepStatus
+            headline={step3StatusHeadline}
+            phase={step3PhaseText}
+            elapsedSec={step3Elapsed}
+            combinedWithOrder={step3ModeRef.current === "combined"}
+          />
+        ) : null}
         <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-          После подтверждения пятёрки на шаге 2 нажмите <strong>«Запустить аналитику (шаг 3)»</strong> и дождитесь заполнения
-          блоков ниже. Отдельно вводить «готово» не нужно.
+          После <strong>«Применить порядок»</strong> или <strong>«Оптимально по мнению ИИ»</strong> аналитика запускается
+          автоматически — дождитесь заполнения блоков ниже (обычно несколько минут).
         </p>
-        {!canAnalytics ? (
+        {!canOrder && !analyticsDone ? (
           <p className="wizard-hint-wait">
-            Сначала шаг 2 — «Подтвердить 5 новостей» или «Оставь топ-5», пока статус не станет <code>selected</code>.
+            Сначала подтвердите пятёрку («Подтвердить 5» / «Оставь топ-5»), затем сохраните порядок — аналитика пойдёт сама.
+          </p>
+        ) : null}
+        {analyticsDone && !loading ? (
+          <p className="wizard-hint-do" style={{ fontSize: "0.95rem" }}>
+            Аналитика уже готова. Кнопка ниже — только если нужно пересобрать блоки заново.
           </p>
         ) : null}
         <WizardWhy summary="Что появится в результате аналитики">
@@ -852,13 +1209,17 @@ export function DigestWizard({ digestId }: Props) {
         </WizardWhy>
         <button
           type="button"
-          disabled={!canAnalytics || loading}
-          title="Запуск аналитики по пяти выбранным (долго, списывается в сумму AI)"
+          disabled={!canAnalytics || loading || (!analyticsDone && canOrder)}
+          title={
+            analyticsDone
+              ? "Пересобрать аналитику по текущей пятёрке"
+              : "Запуск вручную, если автозапуск после порядка не сработал"
+          }
           onClick={() =>
             run("Шаг 3: аналитика по выбранным новостям (AI, может занять несколько минут)…", () => api.confirmReady(digestId, ""))
           }
         >
-          Запустить аналитику (шаг 3)
+          {analyticsDone ? "Повторить аналитику" : "Запустить аналитику вручную"}
         </button>
         {digest?.analytics?.length > 0 && (
           <div style={{ marginTop: 12 }}>
@@ -871,7 +1232,8 @@ export function DigestWizard({ digestId }: Props) {
             {digest.analytics.map((a: any) => (
               <div className="card" key={a.candidate_id}>
                 <div>
-                  <strong>{a.source_name}</strong> | {a.published_at}
+                  <strong>{a.source_name}</strong>
+                  <span> · {formatNewsPublishedAt(a.published_at)}</span>
                 </div>
                 <div>{a.essence}</div>
                 <div>{a.comment}</div>
@@ -883,50 +1245,168 @@ export function DigestWizard({ digestId }: Props) {
         )}
       </div>
 
-      <div className="card" style={{ opacity: canFinal ? 1 : 0.55 }}>
-        <h3>Шаг 4 — финальная сборка</h3>
-        <StepProgressBar active={runningStepKey === "4"} />
-        <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-          После шага 3 выберите при желании вариант «крючка», в поле введите <strong>Ок</strong> (как в placeholder) и нажмите{" "}
-          <strong>«Запустить финальную сборку (шаг 4)»</strong>.
-        </p>
-        {!canFinal ? (
-          <p className="wizard-hint-wait">Сначала завершите аналитику (шаг 3); затем вернитесь сюда.</p>
+      <div ref={step4CardRef} className="card" style={{ opacity: canStep4 ? 1 : 0.55 }}>
+        <h3>Шаг 4 — обложки и тексты</h3>
+        <StepProgressBar active={step4InProgress} />
+        {step4InProgress ? (
+          <WizardStepStatus
+            headline={step4StatusHeadline}
+            phase={step4PhaseText}
+            elapsedSec={step4Elapsed}
+            hint={
+              step4ImagesInProgress
+                ? "Четыре варианта обложки — обычно 2–5 минут. Не закрывайте вкладку."
+                : step4TextsInProgress
+                  ? "Тексты выбранных площадок и QC — обычно 2–4 минуты. Не закрывайте вкладку."
+                  : "Обложки, тексты и QC — обычно 3–6 минут. Не закрывайте вкладку."
+            }
+          />
         ) : null}
-        <WizardWhy summary="Зачем именно «Ок» и когда блок активен">
-          <p>
-            Сбор готовых постов под площадки, обложки и проверки качества. Доступно после шага 3 (статус{" "}
-            <code>analytics_ready</code>). Текст в поле — по редакционному контракту пайплайна, не произвольная фраза.
-          </p>
-        </WizardWhy>
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-          <select
-            value={hookVariant}
-            onChange={(e) => setHookVariant(e.target.value as "A" | "B" | "V" | "")}
-            title="Тон первого абзаца: риск, деньги или дефицит; «Авто» — ротация по выпускам"
-          >
-            <option value="">Авто-ротация крючка</option>
-            <option value="A">A — риск/перегрев</option>
-            <option value="B">B — деньги/прибыль</option>
-            <option value="V">V — дефицит/ограничения</option>
-          </select>
-        </div>
-        <input value={finalCommand} onChange={(e) => setFinalCommand(e.target.value)} placeholder="Введите: Ок" />
-        <button
-          type="button"
-          disabled={!canFinal || loading}
-          title="Долгий запрос: тексты платформ, изображение, QC"
-          onClick={() =>
-            run("Шаг 4: финальная сборка текста, изображения и проверки (AI, может занять несколько минут)…", () =>
-              api.confirmFinal(digestId, finalCommand, hookVariant || undefined),
-            )
-          }
-        >
-          Запустить финальную сборку (шаг 4)
-        </button>
+        {!canStep4 ? (
+          <p className="wizard-hint-wait">Сначала завершите аналитику (шаг 3); затем вернитесь сюда.</p>
+        ) : (
+          <>
+            <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
+              Сначала сгенерируйте <strong>4 варианта обложки</strong> и выберите одну для всех площадок. Затем отметьте
+              нужные площадки и нажмите кнопку генерации текстов.
+            </p>
+            <WizardWhy summary="Зачем раздельные действия">
+              <p>
+                Обложки и тексты — отдельные запросы к AI: можно перегенерировать картинки, не трогая посты, и наоборот.
+                Выбранная обложка копируется в финальный файл и попадает в .docx.
+              </p>
+            </WizardWhy>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+              <select
+                value={hookVariant}
+                onChange={(e) => setHookVariant(e.target.value as "A" | "B" | "V" | "")}
+                title="Тон первого абзаца для обложки и текстов"
+              >
+                <option value="">Авто-ротация крючка</option>
+                <option value="A">A — риск/перегрев</option>
+                <option value="B">B — деньги/прибыль</option>
+                <option value="V">V — дефицит/ограничения</option>
+              </select>
+            </div>
+            {digest?.enable_step4_image_generation !== true ? (
+              <div className="card" style={{ marginTop: 12, padding: 12, color: "#94a3b8" }}>
+                <h4>4.1 — Обложки</h4>
+                <p style={{ margin: 0, fontSize: "0.92rem" }}>
+                  Генерация обложек временно отключена на сервере. Шаг 4.2 (тексты площадок) доступен без обложки.
+                </p>
+              </div>
+            ) : (
+            <div className="card" style={{ marginTop: 12, padding: 12 }}>
+              <h4>4.1 — Обложки</h4>
+              <button
+                type="button"
+                disabled={!canStep4 || loading}
+                onClick={() =>
+                  run("Шаг 4: обложки — генерация 4 вариантов (AI, может занять несколько минут)…", () =>
+                    api.generateStep4Images(digestId, hookVariant || undefined),
+                  )
+                }
+              >
+                Сгенерировать 4 варианта обложки
+              </button>
+              {hasStep4Images ? (
+                <div style={{ marginTop: 12 }}>
+                  <p style={{ fontSize: "0.95rem", marginBottom: 8 }}>Выберите одну обложку для всех площадок:</p>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+                      gap: 12,
+                    }}
+                  >
+                    {(digest?.image_variants || []).map((v: { variant: number; available?: boolean }) => {
+                      if (v.available === false) return null;
+                      const n = v.variant;
+                      const selected = selectedImageVariant === n;
+                      return (
+                        <label
+                          key={n}
+                          style={{
+                            cursor: loading ? "wait" : "pointer",
+                            border: selected ? "2px solid #a78bfa" : "1px solid #334155",
+                            borderRadius: 8,
+                            padding: 6,
+                            background: selected ? "rgba(167,139,250,0.12)" : "transparent",
+                          }}
+                        >
+                          <input
+                            type="radio"
+                            name="cover-variant"
+                            checked={selected}
+                            disabled={loading}
+                            onChange={() => void handleSelectImageVariant(n)}
+                            style={{ marginRight: 6 }}
+                          />
+                          <span>Вариант {n}</span>
+                          <img
+                            src={assetUrl(digestId, "image", n)}
+                            alt={`Обложка вариант ${n}`}
+                            style={{ width: "100%", marginTop: 6, borderRadius: 4, display: "block" }}
+                          />
+                        </label>
+                      );
+                    })}
+                  </div>
+                  {digest?.step4_selected_image_variant ? (
+                    <p style={{ marginTop: 8, color: "#a78bfa", fontSize: "0.9rem" }}>
+                      Выбран вариант {digest.step4_selected_image_variant} — используется для экспорта и .docx.
+                    </p>
+                  ) : (
+                    <p style={{ marginTop: 8, color: "#fbbf24", fontSize: "0.9rem" }}>
+                      Обложка ещё не выбрана — выберите вариант перед публикацией.
+                    </p>
+                  )}
+                </div>
+              ) : null}
+            </div>
+            )}
+
+            <div className="card" style={{ marginTop: 12, padding: 12 }}>
+              <h4>4.2 — Тексты площадок</h4>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 10 }}>
+                {PLATFORM_ORDER.map((p) => (
+                  <label key={p} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                    <input
+                      type="checkbox"
+                      checked={Boolean(step4Platforms[p])}
+                      disabled={loading}
+                      onChange={() => setStep4Platforms((prev) => ({ ...prev, [p]: !prev[p] }))}
+                    />
+                    {PLATFORM_LABELS[p]}
+                  </label>
+                ))}
+              </div>
+              {digest?.enable_step4_image_generation !== false &&
+              !digest?.step4_selected_image_variant &&
+              hasStep4Images ? (
+                <p style={{ color: "#fbbf24", fontSize: "0.9rem", marginBottom: 8 }}>
+                  Рекомендуем выбрать обложку выше — в .docx попадёт выбранный вариант.
+                </p>
+              ) : null}
+              <button
+                type="button"
+                disabled={!canStep4 || loading || selectedPlatformsList.length === 0}
+                onClick={() =>
+                  run("Шаг 4: тексты — генерация для выбранных площадок (AI, может занять несколько минут)…", () =>
+                    api.generateStep4Texts(digestId, [...selectedPlatformsList], hookVariant || undefined),
+                  )
+                }
+              >
+                Сгенерировать тексты ({selectedPlatformsList.length}{" "}
+                {selectedPlatformsList.length === 1 ? "площадка" : "площадок"})
+              </button>
+            </div>
+          </>
+        )}
+
       </div>
 
-      {isFinal && (
+      {showStep4Results && (
         <div className="card">
           <h3>Шаг 4 — результат</h3>
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
@@ -934,14 +1414,21 @@ export function DigestWizard({ digestId }: Props) {
             редактор (Ctrl+V). При ошибке буфера выделите текст в поле и Ctrl+C.
           </p>
           <div style={{ marginBottom: 10 }}>
-            <a href={assetUrl(digestId, "image")} target="_blank" rel="noopener noreferrer">
-              Скачать изображение
-            </a>{" "}
-            |{" "}
-            <a href={assetUrl(digestId, "docx")} target="_blank" rel="noopener noreferrer">
-              Скачать .docx
-            </a>
+            {digest?.step4_selected_image_variant || digest?.image_path ? (
+              <a href={assetUrl(digestId, "image")} target="_blank" rel="noopener noreferrer">
+                Скачать выбранную обложку
+              </a>
+            ) : null}
+            {digest?.step4_selected_image_variant || digest?.image_path ? " | " : null}
+            {digest?.docx_path ? (
+              <a href={assetUrl(digestId, "docx")} target="_blank" rel="noopener noreferrer">
+                Скачать .docx
+              </a>
+            ) : null}
           </div>
+          {sortedOutputs.length === 0 ? (
+            <p className="wizard-hint-wait">Тексты площадок ещё не сгенерированы — отметьте площадки в блоке 4.2.</p>
+          ) : null}
           {sortedOutputs.map((o: any) => {
             const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();
             const st = copyStatus[o.platform] ?? "idle";
@@ -1007,16 +1494,37 @@ export function DigestWizard({ digestId }: Props) {
           <h3>Стоимость запросов</h3>
           <WizardWhy summary="Зачем эта таблица">
             <p>
-              Детализация по вызовам моделей на этом выпуске: шаг, агент, метка запроса, модель и оценка в рублях по тарифам
-              ProxyAPI. Полезно сверять с «Суммарно AI» в шапке и с лимитами в .env.
+              Списание по шагам выпуска: разница баланса ProxyAPI до и после операции. Сверяйте с суммой «По выпуску» в шапке.
             </p>
           </WizardWhy>
-          {digest.llm_costs.map((row: any, idx: number) => (
-            <div key={idx} style={{ marginBottom: 6 }}>
-              [{row.step}] {row.agent_name} / {row.request_label} / {row.model} :{" "}
-              {row.cost_rub != null ? `${Number(row.cost_rub).toFixed(6)} ₽` : "н/д"}
-            </div>
-          ))}
+          <div style={{ overflowX: "auto" }}>
+            <table className="wizard-table" style={{ width: "100%", fontSize: "0.88rem" }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: "left" }}>Агент</th>
+                  <th style={{ textAlign: "left" }}>Операция</th>
+                  <th style={{ textAlign: "left" }}>Модель</th>
+                  <th style={{ textAlign: "right" }}>Стоимость</th>
+                </tr>
+              </thead>
+              <tbody>
+                {digest.llm_costs.map((row: any, idx: number) => (
+                  <tr key={idx}>
+                    <td>
+                      <span style={{ color: "#94a3b8", fontSize: "0.8rem" }}>{row.agent_name}</span>
+                      <br />
+                      {row.agent_title_ru || row.agent_name}
+                    </td>
+                    <td>{row.operation_title_ru || row.request_label}</td>
+                    <td>{row.model}</td>
+                    <td style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                      {row.cost_rub != null ? `${Number(row.cost_rub).toFixed(4)} ₽` : "н/д"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 

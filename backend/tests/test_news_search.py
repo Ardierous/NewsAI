@@ -13,6 +13,47 @@ def test_extract_http_urls_from_json_array():
     assert urls == ["https://example.com/a", "https://techcrunch.com/b"]
 
 
+def test_bad_search_url_rejects_listing_sections():
+    assert news_search._is_bad_search_url("https://www.unian.net/techno/neiroseti") is True
+    assert news_search._is_bad_search_url("https://www.content-review.com/articles/artificial_intelligence/") is True
+    assert news_search._is_bad_search_url("https://vc.ru/ai/12345-some-article-title") is False
+
+
+def test_hallucinated_urls_rejected():
+    assert news_search.url_suspected_hallucinated(
+        "https://www.wsj.com/articles/openai-launches-gpt-5-with-enhanced-reasoning-abilities-2026-"
+    )
+    assert news_search.url_suspected_hallucinated(
+        "https://tass.ru/ekonomika/15052026/mincifry-zapuskaet-programmu"
+    )
+    assert news_search._is_bad_search_url("https://www.kommersant.ru/doc/5678901")
+    assert not news_search.url_suspected_hallucinated(
+        "https://www.cnews.ru/news/top/2026-05-06_sozdateli_yandeksa_potratyat"
+    )
+
+
+def test_listing_page_urls_rejected():
+    assert news_search.is_listing_page_url("https://shtruzel.ru/news") is True
+    assert news_search.is_listing_page_url("https://arxiv.org/list/cs.CL/2024-03") is True
+    assert news_search.is_listing_page_url("https://www.aiweekly.co/ai-news-today") is True
+    assert news_search._is_bad_search_url("https://shtruzel.ru/news") is True
+    assert news_search._is_bad_search_url("https://arxiv.org/list/cs.CL/2024-03") is True
+    assert news_search.is_listing_page_url("https://www.1tv.ru/news/2026-04-26/540448") is False
+    assert news_search.is_listing_page_url("https://arxiv.org/abs/2403.08295") is False
+
+
+def test_topic_pool_urls_rejected():
+    assert news_search.is_topic_pool_page_url("https://www.cnews.ru/book/mutual/8757/251081") is True
+    assert news_search.is_topic_pool_page_url("https://www.cnews.ru/book/mutual/95/6095") is True
+    assert news_search._is_bad_search_url("https://www.cnews.ru/book/mutual/95/6095") is True
+    assert (
+        news_search._is_bad_search_url(
+            "https://www.cnews.ru/news/top/2026-05-06_sozdateli_yandeksa_potratyat"
+        )
+        is False
+    )
+
+
 def test_extract_http_urls_filters_aggregators():
     raw = '["https://news.google.com/articles/abc", "https://vc.ru/ai/123"]'
     urls = news_search.extract_http_urls_from_text(raw, limit=10)

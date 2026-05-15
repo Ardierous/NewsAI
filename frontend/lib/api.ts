@@ -74,30 +74,71 @@ export const api = {
   listDigests: () => request<any[]>("/digests"),
   createTodayDigest: () => request<any>("/digests/create", { method: "POST" }),
   getDigest: (id: number) => request<any>(`/digests/${id}`),
-  step0: (id: number, digest_type?: "serious" | "curious") =>
-    request<any>(`/digests/${id}/step0`, { method: "POST", body: JSON.stringify({ digest_type }) }),
-  step1Run: (id: number, manual_urls: string[]) =>
+  step0: (
+    id: number,
+    opts?: {
+      digest_type?: "serious" | "curious";
+      news_window_days?: number;
+      news_window_day_kind?: "calendar" | "working";
+    },
+  ) =>
+    request<any>(`/digests/${id}/step0`, {
+      method: "POST",
+      body: JSON.stringify({
+        digest_type: opts?.digest_type,
+        news_window_days: opts?.news_window_days ?? 3,
+        news_window_day_kind: opts?.news_window_day_kind ?? "working",
+      }),
+    }),
+  step1Run: (id: number, manual_urls: string[], opts?: { rebuild?: boolean }) =>
     request<any[]>(`/digests/${id}/step1/run`, {
       method: "POST",
-      body: JSON.stringify({ manual_urls }),
+      body: JSON.stringify({ manual_urls, rebuild: opts?.rebuild ?? false }),
       timeoutMs: LONG_POST_MS,
     }),
   selectNews: (id: number, selected_ids: number[], top5: boolean) =>
     request<any>(`/digests/${id}/step2/select`, { method: "POST", body: JSON.stringify({ selected_ids, top5 }) }),
   orderNews: (id: number, ordered_candidate_ids: number[]) =>
     request<any>(`/digests/${id}/step2/order`, { method: "POST", body: JSON.stringify({ ordered_candidate_ids }) }),
+  orderNewsAiOptimal: (id: number) =>
+    request<{ ordered: { candidate_id: number; output_position: number; ordering_reason: string; title?: string }[] }>(
+      `/digests/${id}/step2/order/ai-optimal`,
+      { method: "POST", body: "{}" },
+    ),
   confirmReady: (id: number, command: string) =>
     request<any>(`/digests/${id}/step3/confirm-ready`, {
       method: "POST",
       body: JSON.stringify({ command }),
       timeoutMs: LONG_POST_MS,
     }),
-  confirmFinal: (id: number, command: string, hook_variant?: "A" | "B" | "V") =>
+  generateStep4Images: (id: number, hook_variant?: "A" | "B" | "V") =>
+    request<any>(`/digests/${id}/step4/generate-images`, {
+      method: "POST",
+      body: JSON.stringify({ hook_variant }),
+      timeoutMs: LONG_POST_MS,
+    }),
+  selectStep4Image: (id: number, variant: number) =>
+    request<any>(`/digests/${id}/step4/select-image`, {
+      method: "POST",
+      body: JSON.stringify({ variant }),
+    }),
+  generateStep4Texts: (id: number, platforms: string[], hook_variant?: "A" | "B" | "V") =>
+    request<any>(`/digests/${id}/step4/generate-texts`, {
+      method: "POST",
+      body: JSON.stringify({ platforms, hook_variant }),
+      timeoutMs: LONG_POST_MS,
+    }),
+  confirmFinal: (id: number, hook_variant?: "A" | "B" | "V") =>
     request<any>(`/digests/${id}/step4/confirm-final`, {
       method: "POST",
-      body: JSON.stringify({ command, hook_variant }),
+      body: JSON.stringify({ hook_variant }),
       timeoutMs: LONG_POST_MS,
     }),
 };
 
-export const assetUrl = (id: number, type: "docx" | "image") => `${API_BASE}/digests/${id}/${type}`;
+export const assetUrl = (id: number, type: "docx" | "image", variant?: number) => {
+  if (type === "image" && variant != null) {
+    return `${API_BASE}/digests/${id}/image?variant=${variant}`;
+  }
+  return `${API_BASE}/digests/${id}/${type}`;
+};

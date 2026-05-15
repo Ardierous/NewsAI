@@ -1,9 +1,12 @@
 import json
 import logging
+from contextlib import contextmanager
 import html
 import re
+import shutil
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urljoin
@@ -15,13 +18,18 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS, PRICING_RUB
+from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS, PRICING_RUB, STEP2_AI_ORDER_MODEL
 from app.crew.workflow import CrewWorkflow, current_msk_iso
 from app.models import Analytics, Asset, Digest, FinalOutput, LlmCostRecord, NewsCandidate, QualityCheck, SelectedNews
 from app.proxyapi_client import ProxyApiClient
-from app.services.cost_tracker import ProxyApiCostTracker
+from app.services.cost_tracker import ProxyApiCostTracker, record_today_balance, proxyapi_spent_today_rub
 from app.services.export_service import build_docx
-from app.services.news_search import fetch_article_urls_from_search
+from app.services.news_search import (
+    fetch_article_urls_from_search,
+    is_listing_page_url,
+    is_topic_pool_page_url,
+    url_suspected_hallucinated,
+)
 
 logger = logging.getLogger("app.digest")
 MSK_TZ = ZoneInfo("Europe/Moscow")
@@ -33,9 +41,13 @@ STATUS_SELECTED = "selected"
 STATUS_ANALYTICS = "analytics_ready"
 STATUS_FINAL = "final_ready"
 
+STEP4_PLATFORMS = ("telegram", "max", "vk", "dzen")
+STEP4_IMAGE_VARIANT_COUNT = 4
+
 STEP1_TARGET_VERIFIED = 10
 STEP1_MIN_VERIFIED = 5
 STEP1_SUPPLEMENT_MAX_ROUNDS = 5
+STEP1_PRE_CREW_SUPPLEMENT_ROUNDS = 3
 
 REJECT_REASON_PREFIX = "REJECT_REASON:"
 AGGREGATOR_HOST_MARKERS = (
@@ -192,6 +204,250 @@ def _is_site_homepage_url(url: str) -> bool:
         return False
     path = (p.path or "").strip().rstrip("/")
     return path == ""
+
+
+def _redirect_should_reject(original_url: str, stored_url: str, bundle: dict[str, Any]) -> bool:
+    """
+    Отклоняем редирект только если финал — главная или страница без признаков статьи.
+    Если HTML уже отдал заголовок материала — ссылка рабочая (типичный редирект поиска → канонический URL).
+    """
+    if _is_site_homepage_url(stored_url):
+        return True
+    if _url_fingerprint(original_url) == _url_fingerprint(stored_url):
+        return False
+    headline = str(bundle.get("headline") or "").strip()
+    if len(headline) >= 8:
+        return False
+    if bool(bundle.get("article_markers")) or bool(bundle.get("soft_article_signals")):
+        return False
+    try:
+        o_host = (urlparse(original_url).hostname or "").lower().removeprefix("www.")
+        s_host = (urlparse(stored_url).hostname or "").lower().removeprefix("www.")
+        if o_host and s_host and o_host != s_host:
+            return True
+    except Exception:
+        pass
+    return True
+
+
+def _page_is_article_like(bundle: dict[str, Any]) -> bool:
+    """Страница похожа на материал, а не на ленту/раздел (смягчённо, как в debug-пайплайне)."""
+    if bundle.get("is_listing_page"):
+        return False
+    if bool(bundle.get("article_markers")) or bool(bundle.get("soft_article_signals")):
+        return True
+    headline = str(bundle.get("headline") or "").strip()
+    corpus = str(bundle.get("topic_corpus") or "")
+    if len(headline) >= 8 and len(corpus) >= 120:
+        return True
+    return False
+
+
+_LISTING_PATH_HINTS = re.compile(
+    r"(?:^|/)(?:neiroseti|artificial_intelligence|neural|ai-news|"
+    r"book/mutual|book|mutual|"
+    r"category|tag|tags|topic|topics|rubric|section)(?:/|$)",
+    re.IGNORECASE,
+)
+
+_CNEWS_ARTICLE_PATH_RE = re.compile(
+    r"^/(?:news/(?:top|line)|articles)/\d{4}-\d{2}-\d{2}",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_article_url_from_listing(url: str, listing_url: str) -> bool:
+    """Ссылка похожа на отдельную статью, а не на рубрику/пагинацию."""
+    try:
+        p = urlparse(url.strip())
+        listing = urlparse(listing_url.strip())
+    except Exception:
+        return False
+    path = (p.path or "").rstrip("/")
+    if not path or _is_site_homepage_url(url):
+        return False
+    low = url.lower()
+    if any(x in low for x in ("?page=", "/page/", "/search", "/login", "/subscribe", "/rss", "/feed")):
+        return False
+    if re.search(r"\.(jpg|jpeg|png|gif|webp|pdf|zip)(\?|$)", low):
+        return False
+    if "arxiv.org" in low and "/format/" in low:
+        return False
+    if _CNEWS_ARTICLE_PATH_RE.search(path):
+        return True
+    listing_path = (listing.path or "").rstrip("/")
+    listing_depth = len([x for x in listing_path.split("/") if x])
+    path_depth = len([x for x in path.split("/") if x])
+    last_seg = path.split("/")[-1]
+    if listing_path and path.startswith(listing_path + "/") and len(path) > len(listing_path) + 4:
+        return True
+    if re.search(r"\d{5,}", path):
+        return True
+    if re.search(r"\d{4}[/-]\d{2}", path):
+        return True
+    if re.search(r"\.html?$", path, re.IGNORECASE):
+        return True
+    if len(last_seg) >= 18 and "-" in last_seg:
+        return True
+    if path_depth > listing_depth + 1 and len(last_seg) >= 10:
+        return True
+    if listing_path and path.startswith("/articles/") and path != listing_path and path.count("/") >= 3:
+        return True
+    return False
+
+
+def _extract_listing_article_urls(chunk: str, page_url: str, limit: int = 12) -> list[str]:
+    """Извлекает ссылки на отдельные материалы со страницы-ленты/рубрики."""
+    try:
+        base = urlparse(page_url)
+    except Exception:
+        return []
+    host = (base.hostname or "").lower().removeprefix("www.")
+    scored: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for m in re.finditer(r'<a[^>]+href=["\']([^"\']+)["\']', chunk, re.IGNORECASE):
+        href = html.unescape(m.group(1).strip())
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        try:
+            abs_url = urljoin(page_url, href).split("#")[0]
+            pu = urlparse(abs_url)
+        except Exception:
+            continue
+        phost = (pu.hostname or "").lower().removeprefix("www.")
+        if phost != host:
+            continue
+        if not _looks_like_article_url_from_listing(abs_url, page_url):
+            continue
+        key = _url_fingerprint(abs_url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        path = (pu.path or "")
+        score = len(path) + (20 if re.search(r"\d", path) else 0)
+        scored.append((score, abs_url))
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    return [u for _, u in scored[:limit]]
+
+
+def _is_news_listing_page(page_url: str, chunk: str, bundle: dict[str, Any]) -> bool:
+    """Страница-лента/рубрика со списком новостей, а не одна статья."""
+    if is_listing_page_url(page_url):
+        return True
+    if is_topic_pool_page_url(page_url):
+        return True
+    if _is_site_homepage_url(page_url):
+        return True
+    try:
+        path = (urlparse(page_url).path or "").rstrip("/").lower()
+    except Exception:
+        path = ""
+    child_urls = _extract_listing_article_urls(chunk, page_url, limit=10)
+    h2_count = len(re.findall(r"<h2\b", chunk, re.IGNORECASE))
+    og_type = (_meta_property_content(chunk, "og:type") or "").lower()
+
+    if len(child_urls) >= 3 and _LISTING_PATH_HINTS.search(path):
+        return True
+    if re.search(r"^/articles/[\w_-]+$", path, re.IGNORECASE) and len(child_urls) >= 3:
+        return True
+    if path.endswith("/neiroseti") and len(child_urls) >= 3:
+        return True
+    if len(child_urls) >= 3 and not bundle.get("article_markers"):
+        if og_type in {"", "website", "webpage"} or not bundle.get("headline_strict"):
+            return True
+    if len(child_urls) >= 5 and h2_count >= 3:
+        if not bundle.get("article_markers"):
+            return True
+        if og_type in {"", "website", "webpage"} and not bundle.get("headline_strict"):
+            return True
+        if not bundle.get("soft_article_signals"):
+            return True
+    link_count = len(re.findall(r"<a\b[^>]*\bhref\s*=", chunk, re.IGNORECASE))
+    para_n = len(re.findall(r"<p\b", chunk, re.IGNORECASE))
+    if link_count >= 30 and para_n <= 4 and len(child_urls) >= 2:
+        return True
+    return False
+
+
+def _expand_listing_url_candidates(initial_url: str, max_children: int = 10) -> list[tuple[str, dict[str, Any]]]:
+    """
+    Если URL — лента, возвращает пары (url, bundle) дочерних статей.
+    Иначе одну пару для самой страницы.
+    """
+    if is_listing_page_url(initial_url):
+        bundle = _fetch_article_page_bundle(initial_url)
+        if not bundle.get("ok"):
+            return []
+        children = list(bundle.get("listing_article_urls") or [])
+        if not children:
+            chunk_resp = _http_get_html_for_article(initial_url)
+            if chunk_resp and chunk_resp.text:
+                children = _extract_listing_article_urls(chunk_resp.text[:400_000], initial_url, limit=max_children + 4)
+        out: list[tuple[str, dict[str, Any]]] = []
+        for child in children[:max_children]:
+            child_bundle = _fetch_article_page_bundle(child)
+            if not child_bundle.get("ok") or child_bundle.get("is_listing_page"):
+                continue
+            if is_listing_page_url(str(child_bundle.get("final_url") or child)):
+                continue
+            stored = str(child_bundle.get("final_url") or child_bundle.get("display_url") or child).strip()
+            out.append((stored, child_bundle))
+        if out:
+            logger.info(
+                "Шаг 1: разбор ленты | listing=%s extracted=%s",
+                initial_url[:100],
+                len(out),
+            )
+        else:
+            logger.warning(
+                "Шаг 1: индексная страница без дочерних статей | url=%s",
+                initial_url[:120],
+            )
+        return out
+
+    bundle = _fetch_article_page_bundle(initial_url)
+    if not bundle.get("ok"):
+        return []
+    if bundle.get("is_listing_page"):
+        out: list[tuple[str, dict[str, Any]]] = []
+        for child in (bundle.get("listing_article_urls") or [])[:max_children]:
+            child_bundle = _fetch_article_page_bundle(child)
+            if not child_bundle.get("ok") or child_bundle.get("is_listing_page"):
+                continue
+            stored = str(child_bundle.get("final_url") or child_bundle.get("display_url") or child).strip()
+            out.append((stored, child_bundle))
+        if out:
+            logger.info(
+                "Шаг 1: разбор ленты | listing=%s extracted=%s",
+                initial_url[:100],
+                len(out),
+            )
+            return out
+        if is_topic_pool_page_url(initial_url) or is_listing_page_url(initial_url):
+            logger.warning(
+                "Шаг 1: индекс/лента без дочерних статей | url=%s",
+                initial_url[:120],
+            )
+            return []
+        # Ложная «лента» (много ссылок, но это статья) — только если URL не похож на индекс.
+        if _page_is_article_like({**bundle, "is_listing_page": False}):
+            stored = str(bundle.get("final_url") or bundle.get("display_url") or initial_url).strip()
+            if is_listing_page_url(stored):
+                logger.warning("Шаг 1: лента по URL после редиректа | url=%s", stored[:120])
+                return []
+            single = {**bundle, "is_listing_page": False}
+            logger.info(
+                "Шаг 1: лента без дочерних URL, проверяем как статью | url=%s",
+                stored[:100],
+            )
+            return [(stored, single)]
+        logger.warning(
+            "Шаг 1: лента без извлечённых статей | url=%s",
+            initial_url[:120],
+        )
+        return []
+    stored = str(bundle.get("final_url") or bundle.get("display_url") or initial_url).strip()
+    return [(stored, bundle)]
 
 
 def _ld_article_url_field(obj: dict[str, Any]) -> str | None:
@@ -502,6 +758,345 @@ def _has_article_markers(chunk: str, ld_pairs: list[tuple[str, str | None]]) -> 
     return False
 
 
+_PUBLISHED_AT_MIN_YEAR = 2010
+PUBLISHED_AT_UNDEFINED = "UNDEFINED"
+NEWS_WINDOW_DAY_KINDS = frozenset({"calendar", "working"})
+_URL_PATH_DATE_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})(?:/|$)")
+_URL_PATH_DATE_DASH_RE = re.compile(r"/(\d{4})-(\d{2})-(\d{2})(?:/|$)")
+_RU_MONTHS: dict[str, int] = {
+    "января": 1,
+    "февраля": 2,
+    "марта": 3,
+    "апреля": 4,
+    "мая": 5,
+    "июня": 6,
+    "июля": 7,
+    "августа": 8,
+    "сентября": 9,
+    "октября": 10,
+    "ноября": 11,
+    "декабря": 12,
+}
+_RU_DATE_TEXT_RE = re.compile(
+    r"(\d{1,2})\s+("
+    + "|".join(_RU_MONTHS)
+    + r")\s+(\d{4})(?:,?\s*(\d{1,2}):(\d{2}))?",
+    re.IGNORECASE,
+)
+_DOT_DATE_RE = re.compile(
+    r"\b(\d{1,2})\.(\d{1,2})\.(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?\b"
+)
+
+
+def _parse_published_at_raw(raw: str) -> datetime | None:
+    """Разбор даты публикации из meta / JSON-LD / time."""
+    s = (raw or "").strip()
+    if not s or len(s) > 120:
+        return None
+    if re.fullmatch(r"\d{10,13}", s):
+        try:
+            ts = int(s[:13])
+            if len(s) > 10:
+                ts = ts / 1000.0
+            return datetime.fromtimestamp(ts, tz=MSK_TZ)
+        except (ValueError, OSError):
+            return None
+    norm = s.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(norm)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=MSK_TZ)
+        return dt.astimezone(MSK_TZ)
+    except ValueError:
+        pass
+    dot = _DOT_DATE_RE.search(s)
+    if dot:
+        try:
+            sec = int(dot.group(6)) if dot.group(6) else 0
+            return datetime(
+                int(dot.group(3)),
+                int(dot.group(2)),
+                int(dot.group(1)),
+                int(dot.group(4) or 0),
+                int(dot.group(5) or 0),
+                sec,
+                tzinfo=MSK_TZ,
+            )
+        except ValueError:
+            pass
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+        "%d.%m.%Y %H:%M:%S",
+        "%d.%m.%Y %H:%M",
+        "%d.%m.%Y",
+    ):
+        try:
+            return datetime.strptime(s[:19], fmt).replace(tzinfo=MSK_TZ)
+        except ValueError:
+            continue
+    try:
+        dt = parsedate_to_datetime(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=MSK_TZ)
+        return dt.astimezone(MSK_TZ)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    m_ru = _RU_DATE_TEXT_RE.search(s)
+    if m_ru:
+        month = _RU_MONTHS.get(m_ru.group(2).lower())
+        if month:
+            try:
+                hour = int(m_ru.group(4)) if m_ru.group(4) else 0
+                minute = int(m_ru.group(5)) if m_ru.group(5) else 0
+                return datetime(
+                    int(m_ru.group(3)),
+                    month,
+                    int(m_ru.group(1)),
+                    hour,
+                    minute,
+                    tzinfo=MSK_TZ,
+                )
+            except ValueError:
+                return None
+    return None
+
+
+def _normalize_news_window_day_kind(kind: str | None) -> str:
+    k = (kind or "working").strip().lower()
+    return k if k in NEWS_WINDOW_DAY_KINDS else "working"
+
+
+def _subtract_working_days_rf(anchor: date, days: int) -> date:
+    """N рабочих дней (пн–пт) назад от anchor, не включая сам anchor."""
+    d = anchor
+    left = max(0, int(days))
+    while left > 0:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            left -= 1
+    return d
+
+
+def digest_earliest_news_date(digest: Digest) -> date:
+    anchor = digest.date if isinstance(digest.date, date) else digest.date
+    days = max(1, int(getattr(digest, "news_window_days", None) or 3))
+    kind = _normalize_news_window_day_kind(getattr(digest, "news_window_day_kind", None))
+    if kind == "working":
+        return _subtract_working_days_rf(anchor, days)
+    return anchor - timedelta(days=days)
+
+
+def _published_at_from_url_path(url: str) -> datetime | None:
+    try:
+        path = urlparse(url.strip()).path or ""
+    except Exception:
+        return None
+    for pattern in (_URL_PATH_DATE_DASH_RE, _URL_PATH_DATE_RE):
+        m = pattern.search(path)
+        if not m:
+            continue
+        try:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)), tzinfo=MSK_TZ)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_published_at_storage_value(value: str | None) -> datetime | None:
+    s = (value or "").strip()
+    if not s or s == PUBLISHED_AT_UNDEFINED:
+        return None
+    if s.startswith("1970-"):
+        return None
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return _parse_published_at_raw(s)
+
+
+def _published_at_before_digest_window(digest: Digest, published_at: str | None, page_url: str) -> bool:
+    """True, если дата материала раньше допустимого окна от даты выпуска."""
+    earliest = digest_earliest_news_date(digest)
+    dt = _parse_published_at_storage_value(published_at)
+    if dt is None:
+        dt = _published_at_from_url_path(page_url)
+    if dt is None:
+        return False
+    pub_day = dt.astimezone(MSK_TZ).date()
+    return pub_day < earliest
+
+
+def _published_at_plausible(dt: datetime, *, now: datetime | None = None) -> bool:
+    now = now or datetime.now(MSK_TZ)
+    if dt.year < _PUBLISHED_AT_MIN_YEAR:
+        return False
+    return dt <= now + timedelta(days=2)
+
+
+def _format_published_at_storage(dt: datetime) -> str:
+    return dt.astimezone(MSK_TZ).isoformat(timespec="seconds")[:100]
+
+
+def _ld_collect_publication_dates(obj: Any, out: list[tuple[int, str]]) -> None:
+    """Приоритет: datePublished (2) раньше dateCreated (4)."""
+    if isinstance(obj, dict):
+        types = obj.get("@type")
+        if isinstance(types, str):
+            type_list = [types]
+        elif isinstance(types, list):
+            type_list = [str(x) for x in types]
+        else:
+            type_list = []
+        is_article = any(
+            t in ("NewsArticle", "Article", "BlogPosting", "WebPage", "ReportageNewsArticle")
+            for t in type_list
+        )
+        if is_article:
+            dp = obj.get("datePublished")
+            if isinstance(dp, str) and dp.strip():
+                out.append((2, dp.strip()))
+            dc = obj.get("dateCreated")
+            if isinstance(dc, str) and dc.strip():
+                out.append((4, dc.strip()))
+        g = obj.get("@graph")
+        if isinstance(g, list):
+            for it in g:
+                _ld_collect_publication_dates(it, out)
+        for k, v in obj.items():
+            if k == "@graph":
+                continue
+            _ld_collect_publication_dates(v, out)
+    elif isinstance(obj, list):
+        for it in obj:
+            _ld_collect_publication_dates(it, out)
+
+
+def _article_focus_html(chunk: str, *, max_len: int = 30_000) -> str:
+    """Фрагмент вокруг заголовка материала — без лент «популярное» и подвала."""
+    m = re.search(r"<h1\b", chunk, re.IGNORECASE)
+    if not m:
+        return chunk[:max_len]
+    return chunk[m.start() : m.start() + max_len]
+
+
+def _collect_published_at_raw_candidates(chunk: str) -> list[tuple[int, str]]:
+    """(priority, raw) — меньший priority предпочтительнее."""
+    found: list[tuple[int, str]] = []
+    focus = _article_focus_html(chunk)
+
+    def add(priority: int, raw: str | None) -> None:
+        if raw and raw.strip():
+            found.append((priority, raw.strip()[:120]))
+
+    add(1, _meta_property_content(chunk, "article:published_time"))
+    add(1, _meta_property_content(chunk, "og:article:published_time"))
+    add(2, _meta_property_content(chunk, "article:published"))
+    add(3, _meta_name_content(chunk, "pubdate"))
+    add(3, _meta_name_content(chunk, "publishdate"))
+    add(3, _meta_name_content(chunk, "date"))
+
+    for m in re.finditer(
+        r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
+        chunk,
+        re.IGNORECASE | re.DOTALL,
+    ):
+        raw_json = m.group(1).strip()
+        if not raw_json:
+            continue
+        try:
+            data = json.loads(raw_json)
+        except json.JSONDecodeError:
+            continue
+        _ld_collect_publication_dates(data, found)
+
+    for m in re.finditer(r'"datePublished"\s*:\s*"([^"]+)"', chunk, flags=re.IGNORECASE):
+        add(2, m.group(1))
+
+    for m in re.finditer(
+        r'itemprop\s*=\s*["\']datePublished["\'][^>]*content\s*=\s*["\']([^"\']+)["\']',
+        chunk,
+        re.IGNORECASE,
+    ):
+        add(2, m.group(1))
+    for m in re.finditer(
+        r'content\s*=\s*["\']([^"\']+)["\'][^>]*itemprop\s*=\s*["\']datePublished["\']',
+        chunk,
+        re.IGNORECASE,
+    ):
+        add(2, m.group(1))
+
+    for m in re.finditer(r"<time\b([^>]*)>", chunk, re.IGNORECASE):
+        tag = m.group(1)
+        dm = re.search(r'\bdatetime\s*=\s*["\']([^"\']+)["\']', tag, re.IGNORECASE)
+        if not dm:
+            continue
+        val = dm.group(1)
+        if re.search(r'itemprop\s*=\s*["\']datePublished["\']', tag, re.IGNORECASE):
+            add(1, val)
+        else:
+            add(3, val)
+
+    for m in _DOT_DATE_RE.finditer(focus):
+        add(3, m.group(0))
+
+    for m in _RU_DATE_TEXT_RE.finditer(focus):
+        add(4, m.group(0))
+
+    return found
+
+
+def _extract_published_at_from_page(chunk: str, page_url: str = "") -> str | None:
+    """Дата из разметки страницы; при отсутствии — из пути URL (/YYYY/MM/DD/)."""
+    got = _extract_published_at_from_chunk(chunk)
+    if got:
+        return got
+    from_url = _published_at_from_url_path(page_url)
+    if from_url and _published_at_plausible(from_url):
+        return _format_published_at_storage(from_url)
+    return None
+
+
+def _extract_published_at_from_chunk(chunk: str) -> str | None:
+    """Дата публикации материала со страницы (МСК, ISO) или None."""
+    best: tuple[int, datetime] | None = None
+    for priority, raw in _collect_published_at_raw_candidates(chunk):
+        dt = _parse_published_at_raw(raw)
+        if dt is None or not _published_at_plausible(dt):
+            continue
+        if best is None or priority < best[0]:
+            best = (priority, dt)
+        elif priority == best[0] and priority <= 2 and dt > best[1]:
+            # meta / JSON-LD: при нескольких метках берём более позднюю
+            best = (priority, dt)
+        # priority >= 3 (текст, time без itemprop): оставляем первую в порядке разбора
+    if best is None:
+        return None
+    dt = best[1]
+    if not (dt.hour or dt.minute or dt.second):
+        for _p, raw in _collect_published_at_raw_candidates(chunk):
+            parsed = _parse_published_at_raw(raw)
+            if (
+                parsed
+                and parsed.date() == dt.date()
+                and (parsed.hour or parsed.minute)
+                and _published_at_plausible(parsed)
+            ):
+                dt = parsed
+                break
+    return _format_published_at_storage(dt)
+
+
+def _apply_bundle_published_at(item: dict[str, Any], bundle: dict[str, Any]) -> None:
+    """Дата только со страницы; технические метки и даты от LLM не сохраняем."""
+    pub = bundle.get("published_at")
+    if isinstance(pub, str) and pub.strip():
+        item["published_at"] = pub.strip()[:100]
+    else:
+        item["published_at"] = PUBLISHED_AT_UNDEFINED
+
+
 def _http_get_html_for_article(url: str) -> requests.Response | None:
     """Несколько попыток и второй User-Agent: снижаем ложные http_unreachable (403/таймаут/обрыв)."""
     headers_base = {
@@ -556,6 +1151,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
         "final_url": None,
         "display_url": None,
         "headline": None,
+        "published_at": None,
         "topic_corpus": "",
     }
     try:
@@ -599,7 +1195,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
             and para_n >= 2
             and len(rough_vis) >= 380
         )
-        return {
+        partial_bundle = {
             "ok": True,
             "status_code": r.status_code,
             "final_url": final_url,
@@ -610,6 +1206,15 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
             "article_markers": article_markers,
             "soft_article_signals": soft_article_signals,
             "topic_corpus": topic_corpus,
+        }
+        is_listing = _is_news_listing_page(display or final_url, chunk, partial_bundle)
+        listing_urls = _extract_listing_article_urls(chunk, display or final_url, limit=14) if is_listing else []
+        published_at = _extract_published_at_from_page(chunk, display or final_url)
+        return {
+            **partial_bundle,
+            "published_at": published_at,
+            "is_listing_page": is_listing,
+            "listing_article_urls": listing_urls,
         }
     except Exception:
         logger.debug("Не удалось загрузить страницу для согласования URL/заголовка", exc_info=True)
@@ -678,11 +1283,106 @@ class DigestService:
         )
         return float(total or 0.0)
 
+    def _snapshot_proxyapi_before(self, digest: Digest, *, reset: bool = False) -> None:
+        snap = self.cost_tracker.get_balance_snapshot()
+        record_today_balance(self.db, snap)
+        if reset or digest.proxyapi_balance_session_start is None:
+            digest.proxyapi_balance_session_start = snap.balance
+            digest.proxyapi_budget_used_session_start = snap.budget_used
+        digest.proxyapi_balance_before = snap.balance
+        digest.proxyapi_budget_used_before = snap.budget_used
+        self.db.commit()
+
+    def _snapshot_proxyapi_after(self, digest: Digest) -> None:
+        snap = self.cost_tracker.get_balance_snapshot()
+        digest.proxyapi_balance_after = snap.balance
+        digest.proxyapi_budget_used_after = snap.budget_used
+        record_today_balance(self.db, snap)
+        self.db.commit()
+
+    def _last_step_balance_delta_rub(self, digest: Digest) -> float | None:
+        if digest.proxyapi_budget_used_before is not None and digest.proxyapi_budget_used_after is not None:
+            delta = float(digest.proxyapi_budget_used_after) - float(digest.proxyapi_budget_used_before)
+            if delta > 0.0001:
+                return round(delta, 6)
+        if digest.proxyapi_balance_before is not None and digest.proxyapi_balance_after is not None:
+            delta = float(digest.proxyapi_balance_before) - float(digest.proxyapi_balance_after)
+            if delta > 0.0001:
+                return round(delta, 6)
+        return None
+
+    def _record_proxyapi_step_cost(
+        self,
+        digest: Digest,
+        *,
+        step: str,
+        agent_name: str,
+        request_label: str,
+        model: str,
+    ) -> None:
+        cost = self._last_step_balance_delta_rub(digest)
+        if cost is None:
+            return
+        self._save_cost(
+            digest_id=digest.id,
+            step=step,
+            agent_name=agent_name,
+            model=model,
+            request_label=request_label,
+            cost_rub=cost,
+        )
+
+    @contextmanager
+    def _digest_cost_session(
+        self,
+        digest: Digest,
+        *,
+        reset: bool = False,
+        step: str,
+        agent_name: str,
+        request_label: str,
+        model: str,
+    ):
+        self._snapshot_proxyapi_before(digest, reset=reset)
+        try:
+            yield
+        finally:
+            self.db.refresh(digest)
+            self._snapshot_proxyapi_after(digest)
+            self._record_proxyapi_step_cost(
+                digest,
+                step=step,
+                agent_name=agent_name,
+                request_label=request_label,
+                model=model,
+            )
+
+    def _digest_proxyapi_spent_rub(self, digest: Digest) -> float:
+        snap = self.cost_tracker.get_balance_snapshot()
+        if digest.proxyapi_budget_used_before is not None and snap.budget_used is not None:
+            return max(0.0, float(snap.budget_used) - float(digest.proxyapi_budget_used_before))
+        if digest.proxyapi_balance_before is not None and snap.balance is not None:
+            return max(0.0, float(digest.proxyapi_balance_before) - float(snap.balance))
+        return 0.0
+
+    def digest_proxyapi_cost_rub(self, digest: Digest) -> float | None:
+        if (
+            digest.proxyapi_budget_used_session_start is not None
+            and digest.proxyapi_budget_used_after is not None
+        ):
+            spent = float(digest.proxyapi_budget_used_after) - float(digest.proxyapi_budget_used_session_start)
+            return round(max(0.0, spent), 4)
+        if digest.proxyapi_balance_session_start is not None and digest.proxyapi_balance_after is not None:
+            spent = float(digest.proxyapi_balance_session_start) - float(digest.proxyapi_balance_after)
+            return round(max(0.0, spent), 4)
+        live = self._digest_proxyapi_spent_rub(digest)
+        return round(live, 4) if live > 0 else None
+
     def build_budget_notices(self, digest: Digest) -> list[str]:
         """Человекочитаемые предупреждения о лимите расходов для UI."""
         notices: list[str] = []
         if digest.step1_budget_capped:
-            spent = self._digest_step_llm_cost_sum(digest.id, "step_1")
+            spent = self.digest_proxyapi_cost_rub(digest) or self._digest_proxyapi_spent_rub(digest)
             lim = self.settings.step1_max_cost_rub
             notices.append(
                 f"Достигнут лимит расходов на сбор кандидатов ({lim:g} ₽). По учёту ProxyAPI на этом шаге ~{spent:.2f} ₽; "
@@ -690,7 +1390,7 @@ class DigestService:
                 "При необходимости увеличьте лимит в настройках сервера (STEP1_MAX_COST_RUB) или задайте прямые ссылки на статьи."
             )
         if digest.step2_budget_capped:
-            spent2 = self._digest_step_llm_cost_sum(digest.id, "step_2")
+            spent2 = self.digest_proxyapi_cost_rub(digest) or self._digest_proxyapi_spent_rub(digest)
             lim2 = self.settings.step2_max_cost_rub
             notices.append(
                 f"Достигнут лимит расходов на упорядочивание новостей ({lim2:g} ₽). На этом шаге уже ~{spent2:.2f} ₽; "
@@ -705,7 +1405,13 @@ class DigestService:
         if digest:
             logger.info("Выпуск на сегодня уже существует | digest_id=%s date=%s", digest.id, today)
             return digest
-        digest = Digest(date=today, status=STATUS_DRAFT, current_step=STATUS_DRAFT)
+        digest = Digest(
+            date=today,
+            status=STATUS_DRAFT,
+            current_step=STATUS_DRAFT,
+            news_window_days=3,
+            news_window_day_kind="working",
+        )
         self.db.add(digest)
         self.db.commit()
         self.db.refresh(digest)
@@ -721,7 +1427,14 @@ class DigestService:
             raise HTTPException(status_code=404, detail="Digest not found")
         return digest
 
-    def run_step_0(self, digest_id: int, digest_type: str | None) -> Digest:
+    def run_step_0(
+        self,
+        digest_id: int,
+        digest_type: str | None,
+        *,
+        news_window_days: int = 3,
+        news_window_day_kind: str = "working",
+    ) -> Digest:
         digest = self.get_digest(digest_id)
         via_default = digest_type is None
         if via_default:
@@ -731,12 +1444,91 @@ class DigestService:
             raise HTTPException(status_code=400, detail="digest_type must be serious or curious")
         digest.digest_type = digest_type
         digest.digest_type_via_default = via_default
+        digest.news_window_days = max(1, min(90, int(news_window_days)))
+        digest.news_window_day_kind = _normalize_news_window_day_kind(news_window_day_kind)
         digest.status = STATUS_STEP0
         digest.current_step = STATUS_STEP0
         self.db.commit()
         self.db.refresh(digest)
-        logger.info("Шаг 0: тип дайджеста | digest_id=%s type=%s", digest.id, digest_type)
+        logger.info(
+            "Шаг 0: параметры выпуска | digest_id=%s type=%s window_days=%s window_kind=%s",
+            digest.id,
+            digest_type,
+            digest.news_window_days,
+            digest.news_window_day_kind,
+        )
         return digest
+
+    def _backup_verified_candidate_dicts(self, digest_id: int) -> list[dict[str, Any]]:
+        rows = (
+            self.db.query(NewsCandidate)
+            .filter(
+                NewsCandidate.digest_id == digest_id,
+                NewsCandidate.link_status.is_(True),
+                NewsCandidate.headline_editorial_ok.is_(True),
+            )
+            .order_by(NewsCandidate.original_number)
+            .all()
+        )
+        return [
+            {
+                "original_number": c.original_number,
+                "title": c.title,
+                "url": c.url,
+                "source": c.source,
+                "tier": c.tier,
+                "published_at": c.published_at,
+                "category": c.category,
+                "description": c.description,
+                "significance_score": c.significance_score,
+                "novelty_score": c.novelty_score,
+                "impact_score": c.impact_score,
+                "total_score": c.total_score,
+                "reliability_status": c.reliability_status,
+                "link_status": True,
+                "headline_editorial_ok": True,
+                "page_verified": True,
+                "is_foreign_agent": c.is_foreign_agent,
+                "is_aggregator": c.is_aggregator,
+                "is_duplicate": c.is_duplicate,
+                "verification_comment": c.verification_comment or "",
+            }
+            for c in rows
+        ]
+
+    def _restore_step1_verified_candidates(self, digest_id: int, items: list[dict[str, Any]]) -> None:
+        self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest_id).delete()
+        seen_urls_lower: set[str] = set()
+        for idx, item in enumerate(items, start=1):
+            url_norm = str(item.get("url", "")).strip().lower()
+            is_duplicate = url_norm in seen_urls_lower
+            seen_urls_lower.add(url_norm)
+            self.db.add(
+                NewsCandidate(
+                    digest_id=digest_id,
+                    original_number=idx,
+                    title=str(item.get("title", ""))[:500],
+                    url=str(item.get("url", ""))[:1000],
+                    source=str(item.get("source", ""))[:255],
+                    tier=str(item.get("tier", "Tier-3"))[:32],
+                    published_at=str(item.get("published_at", "")),
+                    category=str(item.get("category", "technology"))[:120],
+                    description=str(item.get("description", "")),
+                    significance_score=int(item.get("significance_score", 1)),
+                    novelty_score=int(item.get("novelty_score", 1)),
+                    impact_score=int(item.get("impact_score", 1)),
+                    total_score=int(item.get("total_score", 3)),
+                    reliability_status=str(item.get("reliability_status", "✅ подтверждено"))[:40],
+                    link_status=True,
+                    headline_editorial_ok=True,
+                    page_verified=True,
+                    is_foreign_agent=bool(item.get("is_foreign_agent", False)),
+                    is_aggregator=bool(item.get("is_aggregator", False)),
+                    is_duplicate=is_duplicate,
+                    verification_comment=str(item.get("verification_comment", "")),
+                )
+            )
+        self.db.commit()
 
     def _persist_step1_preview_candidates(self, digest_id: int, rows_by_fp: dict[str, dict[str, Any]]) -> None:
         """При неуспешном шаге 1 сохраняем карточки в БД для UI (часть строк может быть с отбраковкой)."""
@@ -764,7 +1556,7 @@ class DigestService:
                 url=str(item.get("url", ""))[:1000],
                 source=str(item.get("source", "") or _host_from_url(str(item.get("url", ""))))[:255],
                 tier=str(item.get("tier", "Tier-3"))[:32],
-                published_at=str(item.get("published_at", ""))[:100] or "1970-01-01T00:00:00",
+                published_at=str(item.get("published_at", ""))[:100] or PUBLISHED_AT_UNDEFINED,
                 category=str(item.get("category", "technology"))[:120],
                 description=str(item.get("description", "")),
                 significance_score=int(item.get("significance_score", 1)),
@@ -783,10 +1575,24 @@ class DigestService:
             self.db.add(entity)
         self.db.commit()
 
-    def run_step_1(self, digest_id: int, manual_urls: list[str]) -> list[NewsCandidate]:
+    def run_step_1(self, digest_id: int, manual_urls: list[str], *, rebuild: bool = False) -> list[NewsCandidate]:
         digest = self.get_digest(digest_id)
-        if digest.status not in {STATUS_STEP0, STATUS_STEP1}:
-            raise HTTPException(status_code=400, detail="Step 1 requires step_0")
+        if digest.status == STATUS_DRAFT:
+            raise HTTPException(status_code=400, detail="Step 1 requires step_0 (choose digest type first).")
+        step1_allowed = {STATUS_STEP0, STATUS_STEP1, STATUS_SELECTED, STATUS_ANALYTICS, STATUS_FINAL}
+        if digest.status not in step1_allowed:
+            raise HTTPException(status_code=400, detail=f"Cannot run step 1 from status {digest.status!r}")
+        past_step1 = digest.status in {STATUS_SELECTED, STATUS_ANALYTICS, STATUS_FINAL}
+        if past_step1 and not rebuild:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Выпуск уже прошёл выбор новостей. Для полной пересборки пула передайте rebuild=true "
+                    "(сбросятся шаги 2–4: выбор, порядок, аналитика, финал)."
+                ),
+            )
+        if rebuild and not past_step1 and digest.status != STATUS_STEP1:
+            rebuild = False
 
         normalized_manual_urls = self._normalize_manual_urls(manual_urls)
         if not self.settings.enable_web_fetch and not normalized_manual_urls:
@@ -800,68 +1606,294 @@ class DigestService:
         self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).delete()
         self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).delete()
         self.db.query(Asset).filter(Asset.digest_id == digest.id).delete()
-        self.db.query(LlmCostRecord).filter(LlmCostRecord.digest_id == digest.id).delete()
-        self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
+        # Записи llm_cost_records не удаляем: иначе «Суммарно AI» занижается после пересборки.
+        prev_verified_backup = self._backup_verified_candidate_dicts(digest.id)
 
         digest.step1_budget_capped = False
         digest.step2_budget_capped = False
 
-        logger.info(
-            "Шаг 1: запуск сбора кандидатов | digest_id=%s manual_urls=%s",
-            digest.id,
-            len(normalized_manual_urls),
-        )
-        now_msk = current_msk_iso()
-        candidates: list[dict[str, Any]] = []
-        verify_candidates: list[dict[str, Any]] = []
-        guard_rejected: list[dict[str, Any]] = []
-        research_prefilter_dropped: list[dict[str, Any]] = []
-        web_flow_available = self.settings.enable_web_fetch
-        preview_by_fp: dict[str, dict[str, Any]] = {}
-
-        def snapshot_preview_row(row: dict[str, Any]) -> None:
-            fp = _url_fingerprint(str(row.get("url", "")).strip())
-            if fp:
-                preview_by_fp[fp] = dict(row)
-
-        manual_candidates = self._build_manual_candidates(digest.id, normalized_manual_urls, now_msk)
-        failed_manual = [str(x["url"])[:220] for x in manual_candidates if not x.get("page_verified")]
-        if failed_manual:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Не удалось подтвердить ручные ссылки (страница недоступна или не отвечает): "
-                    + "; ".join(failed_manual[:12])
-                ),
+        if rebuild or past_step1:
+            logger.info(
+                "Шаг 1: полная пересборка пула | digest_id=%s prev_status=%s manual_urls=%s",
+                digest.id,
+                digest.status,
+                len(normalized_manual_urls),
             )
-
-        verified_pool: list[dict[str, Any]] = []
-        seen_fp: set[str] = set()
-        excluded_urls: list[str] = []
-        reject_stats: dict[str, int] = {}
-
-        def append_verified(item: dict[str, Any]) -> None:
-            if not item.get("headline_editorial_ok") or not item.get("link_status"):
-                return
-            if bool(item.get("is_aggregator")):
-                return
-            fp = _url_fingerprint(str(item.get("url", "")))
-            if not fp or fp in seen_fp:
-                return
-            seen_fp.add(fp)
-            verified_pool.append(item)
-
-        def register_reject(item: dict[str, Any]) -> None:
-            codes = _reject_reason_codes(str(item.get("verification_comment") or ""))
-            if not codes:
-                codes = ["unknown_reject"]
-            for code in codes:
-                reject_stats[code] = reject_stats.get(code, 0) + 1
-
-        def persist_reject_stats() -> None:
-            if not reject_stats:
-                return
-            self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "step1_rejected_reasons").delete()
+        else:
+            logger.info(
+                "Шаг 1: запуск сбора кандидатов | digest_id=%s manual_urls=%s",
+                digest.id,
+                len(normalized_manual_urls),
+            )
+        self._snapshot_proxyapi_before(digest, reset=(rebuild or past_step1))
+        try:
+            now_msk = current_msk_iso()
+            candidates: list[dict[str, Any]] = []
+            verify_candidates: list[dict[str, Any]] = []
+            guard_rejected: list[dict[str, Any]] = []
+            research_prefilter_dropped: list[dict[str, Any]] = []
+            web_flow_available = self.settings.enable_web_fetch
+            preview_by_fp: dict[str, dict[str, Any]] = {}
+    
+            def snapshot_preview_row(row: dict[str, Any]) -> None:
+                fp = _url_fingerprint(str(row.get("url", "")).strip())
+                if fp:
+                    preview_by_fp[fp] = dict(row)
+    
+            manual_candidates = self._build_manual_candidates(digest, normalized_manual_urls, now_msk)
+            failed_manual = [str(x["url"])[:220] for x in manual_candidates if not x.get("page_verified")]
+            if failed_manual:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Не удалось подтвердить ручные ссылки (страница недоступна или не отвечает): "
+                        + "; ".join(failed_manual[:12])
+                    ),
+                )
+    
+            verified_pool: list[dict[str, Any]] = []
+            seen_fp: set[str] = set()
+            excluded_urls: list[str] = []
+            reject_stats: dict[str, int] = {}
+    
+            def append_verified(item: dict[str, Any]) -> None:
+                if not item.get("headline_editorial_ok") or not item.get("link_status"):
+                    return
+                if bool(item.get("is_aggregator")):
+                    return
+                fp = _url_fingerprint(str(item.get("url", "")))
+                if not fp or fp in seen_fp:
+                    return
+                seen_fp.add(fp)
+                verified_pool.append(item)
+    
+            def register_reject(item: dict[str, Any]) -> None:
+                codes = _reject_reason_codes(str(item.get("verification_comment") or ""))
+                if not codes:
+                    codes = ["unknown_reject"]
+                for code in codes:
+                    reject_stats[code] = reject_stats.get(code, 0) + 1
+    
+            def persist_reject_stats() -> None:
+                if not reject_stats:
+                    return
+                self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "step1_rejected_reasons").delete()
+                self.db.add(
+                    Asset(
+                        digest_id=digest.id,
+                        type="step1_rejected_reasons",
+                        path="",
+                        prompt=json.dumps(reject_stats, ensure_ascii=False),
+                    )
+                )
+                self.db.commit()
+    
+            def top_reject_reasons(limit: int = 3) -> str:
+                if not reject_stats:
+                    return ""
+                items = sorted(reject_stats.items(), key=lambda x: (-x[1], x[0]))[:limit]
+                details = ", ".join(f"{code}={count}" for code, count in items)
+                return f" Основные причины отбраковки: {details}."
+    
+            for m in manual_candidates:
+                snapshot_preview_row(m)
+                append_verified(m)
+    
+            if self.settings.enable_web_fetch and len(verified_pool) < STEP1_TARGET_VERIFIED:
+                for item in self._collect_search_verified_candidates(
+                    digest.id,
+                    digest,
+                    now_msk,
+                    seen_fp,
+                    limit=max(STEP1_TARGET_VERIFIED, STEP1_MIN_VERIFIED * 2),
+                    on_row=snapshot_preview_row,
+                ):
+                    append_verified(item)
+    
+            if self.settings.enable_web_fetch and len(verified_pool) < STEP1_MIN_VERIFIED:
+                self._step1_run_web_supplement_rounds(
+                    digest,
+                    verified_pool=verified_pool,
+                    seen_fp=seen_fp,
+                    excluded_urls=excluded_urls,
+                    now_msk=now_msk,
+                    snapshot_preview_row=snapshot_preview_row,
+                    append_verified=append_verified,
+                    register_reject=register_reject,
+                    stop_at=STEP1_MIN_VERIFIED,
+                    max_rounds=STEP1_PRE_CREW_SUPPLEMENT_ROUNDS,
+                )
+    
+            # CrewAI research/score часто портят URL; если веб-поиск уже дал минимум — не вызываем LLM-цепочку.
+            if self.settings.enable_web_fetch and len(verified_pool) < STEP1_MIN_VERIFIED:
+                try:
+                    research_candidates = self.workflow.run_candidates_research(
+                        digest_type=digest.digest_type or "serious",
+                        now_msk=now_msk,
+                        manual_urls=normalized_manual_urls,
+                    )
+                    research_candidates, research_prefilter_dropped = self._prefilter_llm_candidates_fetchable(
+                        digest.id, research_candidates
+                    )
+                    for dropped in research_prefilter_dropped:
+                        snapshot_preview_row(dropped)
+                    verify_candidates = self.workflow.run_candidates_verify(research_candidates)
+                    scored_candidates = self.workflow.run_candidates_score(verify_candidates, now_msk=now_msk)
+                    candidates, guard_rejected = self._filter_score_url_mutations(verify_candidates, scored_candidates)
+                    for item in guard_rejected:
+                        snapshot_preview_row(item)
+                except Exception:
+                    web_flow_available = False
+                    logger.exception("Шаг 1: веб-поиск недоступен, переключение на ручные ссылки")
+                    if not normalized_manual_urls:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Веб-поиск временно недоступен. Вставьте вручную 5-10 ссылок в поле manual_urls.",
+                        )
+    
+            for item in guard_rejected:
+                register_reject(item)
+                raw_u = str(item.get("url") or "").strip()
+                if raw_u.startswith("http"):
+                    excluded_urls.append(raw_u[:800])
+    
+            for item in research_prefilter_dropped:
+                register_reject(item)
+                raw_u = str(item.get("url") or "").strip()
+                if raw_u.startswith("http"):
+                    excluded_urls.append(raw_u[:800])
+    
+            llm_merged = self._merge_candidates([], candidates, limit=40) if candidates else []
+            for item in llm_merged:
+                if _is_placeholder_candidate_dict(item):
+                    continue
+                raw_u = str(item.get("url") or "").strip()
+                if not raw_u.startswith("http"):
+                    continue
+                for resolved_url, bundle in _expand_listing_url_candidates(raw_u, max_children=6):
+                    if _url_fingerprint(resolved_url) in seen_fp:
+                        continue
+                    work = dict(item)
+                    work["url"] = resolved_url
+                    work["title"] = ""
+                    work["headline_editorial_ok"] = False
+                    work["link_status"] = False
+                    self._verify_llm_candidate_dict(digest, work, prefetched_bundle=bundle)
+                    snapshot_preview_row(work)
+                    if work.get("headline_editorial_ok") and work.get("link_status"):
+                        append_verified(work)
+                    else:
+                        excluded_urls.append(resolved_url[:800])
+                        register_reject(work)
+    
+            if len(verified_pool) < STEP1_TARGET_VERIFIED:
+                self._step1_run_web_supplement_rounds(
+                    digest,
+                    verified_pool=verified_pool,
+                    seen_fp=seen_fp,
+                    excluded_urls=excluded_urls,
+                    now_msk=now_msk,
+                    snapshot_preview_row=snapshot_preview_row,
+                    append_verified=append_verified,
+                    register_reject=register_reject,
+                    stop_at=STEP1_TARGET_VERIFIED,
+                    max_rounds=STEP1_SUPPLEMENT_MAX_ROUNDS,
+                )
+    
+            if verified_pool and all(_is_placeholder_candidate_dict(x) for x in verified_pool):
+                persist_reject_stats()
+                self._persist_step1_preview_candidates(digest.id, preview_by_fp)
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Не удалось получить реальные новости: модель вернула невалидный ответ или сработал внутренний шаблон-заглушка. "
+                        "Проверьте PROXYAPI_API_KEY и снова запустите шаг 1. "
+                        "Либо задайте ENABLE_WEB_FETCH=false в backend/.env и вставьте 5–10 прямых URL на статьи в поле шага 1 — "
+                        "заголовки будут подтянуты с страниц без LLM-поиска."
+                    ),
+                )
+    
+            if not web_flow_available and len(candidates) == 0 and not normalized_manual_urls:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Не удалось собрать кандидатов автоматически. Вставьте вручную 5-10 ссылок.",
+                )
+    
+            if len(verified_pool) < STEP1_MIN_VERIFIED:
+                persist_reject_stats()
+                if rebuild and len(prev_verified_backup) >= STEP1_MIN_VERIFIED:
+                    self._restore_step1_verified_candidates(digest.id, prev_verified_backup)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"Пересборка не дала {STEP1_MIN_VERIFIED} подтверждённых материалов (получено {len(verified_pool)}). "
+                            f"Восстановлен прежний пул из {len(prev_verified_backup)} проверенных новостей."
+                            + top_reject_reasons()
+                        ),
+                    )
+                self._persist_step1_preview_candidates(digest.id, preview_by_fp)
+                spent_step1 = self._digest_proxyapi_spent_rub(digest)
+                tail = (
+                    f" Сработал лимит расходов на сбор кандидатов ({self.settings.step1_max_cost_rub:g} ₽): по учёту ProxyAPI ~{spent_step1:.2f} ₽. "
+                    "Увеличьте STEP1_MAX_COST_RUB в backend/.env или добавьте прямые URL статей."
+                    if spent_step1 >= self.settings.step1_max_cost_rub - 1e-9
+                    else ""
+                )
+                search_hint = ""
+                if not normalized_manual_urls and self.settings.enable_web_fetch:
+                    search_hint = (
+                        " Проверьте PROXYAPI_API_KEY и веб-поиск (PROXYAPI_WEB_SEARCH_ENABLED=true) "
+                        "или добавьте SERPAPI_API_KEY / TAVILY_API_KEY в backend/.env."
+                    )
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Подтверждено только {len(verified_pool)} материалов по страницам (нужно минимум {STEP1_MIN_VERIFIED}). "
+                        "Добавьте прямые URL статей в поле шага 1 — автопоиск идёт через ProxyAPI web_search (и опционально SerpAPI/Tavily)."
+                        + top_reject_reasons()
+                        + search_hint
+                        + tail
+                    ),
+                )
+    
+            # Кандидатов удаляем только перед успешной записью: промежуточные commit не должны оставлять пустой список при 502.
+            self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
+    
+            verified_pool = verified_pool[:STEP1_TARGET_VERIFIED]
+            entities: list[NewsCandidate] = []
+            seen_urls_lower: set[str] = set()
+            for idx, item in enumerate(verified_pool, start=1):
+                url_norm = str(item.get("url", "")).strip().lower()
+                is_duplicate = url_norm in seen_urls_lower or bool(item.get("is_duplicate", False))
+                seen_urls_lower.add(url_norm)
+                entity = NewsCandidate(
+                    digest_id=digest.id,
+                    original_number=idx,
+                    title=str(item.get("title", ""))[:500],
+                    url=str(item.get("url", ""))[:1000],
+                    source=str(item.get("source", ""))[:255],
+                    tier=str(item.get("tier", "Tier-3"))[:32],
+                    published_at=str(item.get("published_at", "")),
+                    category=str(item.get("category", "technology"))[:120],
+                    description=str(item.get("description", "")),
+                    significance_score=int(item.get("significance_score", 1)),
+                    novelty_score=int(item.get("novelty_score", 1)),
+                    impact_score=int(item.get("impact_score", 1)),
+                    total_score=int(item.get("total_score", 3)),
+                    reliability_status=str(item.get("reliability_status", "⚠️ сомнительный")),
+                    link_status=bool(item.get("link_status", False)),
+                    headline_editorial_ok=bool(item.get("headline_editorial_ok", False)),
+                    page_verified=bool(item.get("headline_editorial_ok", False)) and bool(item.get("link_status", False)),
+                    is_foreign_agent=bool(item.get("is_foreign_agent", False)),
+                    is_aggregator=bool(item.get("is_aggregator", False)),
+                    is_duplicate=is_duplicate,
+                    verification_comment=str(item.get("verification_comment", "")),
+                )
+                entities.append(entity)
+                self.db.add(entity)
+    
+            spent_step1_final = self._digest_proxyapi_spent_rub(digest)
+            digest.step1_budget_capped = spent_step1_final >= self.settings.step1_max_cost_rub - 1e-9
             self.db.add(
                 Asset(
                     digest_id=digest.id,
@@ -870,258 +1902,27 @@ class DigestService:
                     prompt=json.dumps(reject_stats, ensure_ascii=False),
                 )
             )
+            digest.status = STATUS_STEP1
+            digest.current_step = STATUS_STEP1
             self.db.commit()
-
-        def top_reject_reasons(limit: int = 3) -> str:
-            if not reject_stats:
-                return ""
-            items = sorted(reject_stats.items(), key=lambda x: (-x[1], x[0]))[:limit]
-            details = ", ".join(f"{code}={count}" for code, count in items)
-            return f" Основные причины отбраковки: {details}."
-
-        for m in manual_candidates:
-            snapshot_preview_row(m)
-            append_verified(m)
-
-        if self.settings.enable_web_fetch and len(verified_pool) < STEP1_TARGET_VERIFIED:
-            for item in self._collect_search_verified_candidates(
+            logger.info(
+                "Шаг 1: сохранено проверенных кандидатов | digest_id=%s count=%s rejected=%s",
                 digest.id,
+                len(entities),
+                reject_stats,
+            )
+            return entities
+
+        finally:
+            self.db.refresh(digest)
+            self._snapshot_proxyapi_after(digest)
+            self._record_proxyapi_step_cost(
                 digest,
-                now_msk,
-                seen_fp,
-                limit=STEP1_TARGET_VERIFIED,
-            ):
-                snapshot_preview_row(item)
-                append_verified(item)
-
-        if self.settings.enable_web_fetch and len(verified_pool) < STEP1_TARGET_VERIFIED:
-            try:
-                research_candidates, research_cost = self.cost_tracker.measure(
-                    lambda: self.workflow.run_candidates_research(
-                        digest_type=digest.digest_type or "serious",
-                        now_msk=now_msk,
-                        manual_urls=normalized_manual_urls,
-                    ),
-                    source="step1_news_research",
-                )
-                self._save_cost(
-                    digest_id=digest.id,
-                    step="step_1",
-                    agent_name="NewsResearchAgent",
-                    model=AGENT_MODEL_RECOMMENDATIONS["NewsResearchAgent"],
-                    request_label="run_candidates_research",
-                    cost_rub=research_cost.cost_rub,
-                )
-                research_candidates, research_prefilter_dropped = self._prefilter_llm_candidates_fetchable(
-                    digest.id, research_candidates
-                )
-                for dropped in research_prefilter_dropped:
-                    snapshot_preview_row(dropped)
-                verify_candidates, verify_cost = self.cost_tracker.measure(
-                    lambda: self.workflow.run_candidates_verify(research_candidates),
-                    source="step1_source_verification",
-                )
-                self._save_cost(
-                    digest_id=digest.id,
-                    step="step_1",
-                    agent_name="SourceVerificationAgent",
-                    model=AGENT_MODEL_RECOMMENDATIONS["SourceVerificationAgent"],
-                    request_label="run_candidates_verify",
-                    cost_rub=verify_cost.cost_rub,
-                )
-                scored_candidates, score_cost = self.cost_tracker.measure(
-                    lambda: self.workflow.run_candidates_score(verify_candidates, now_msk=now_msk),
-                    source="step1_scoring",
-                )
-                candidates, guard_rejected = self._filter_score_url_mutations(verify_candidates, scored_candidates)
-                for item in guard_rejected:
-                    snapshot_preview_row(item)
-                self._save_cost(
-                    digest_id=digest.id,
-                    step="step_1",
-                    agent_name="ScoringAgent",
-                    model=AGENT_MODEL_RECOMMENDATIONS["ScoringAgent"],
-                    request_label="run_candidates_score",
-                    cost_rub=score_cost.cost_rub,
-                )
-            except Exception:
-                web_flow_available = False
-                logger.exception("Шаг 1: веб-поиск недоступен, переключение на ручные ссылки")
-                if not normalized_manual_urls:
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Веб-поиск временно недоступен. Вставьте вручную 5-10 ссылок в поле manual_urls.",
-                    )
-
-        for item in guard_rejected:
-            register_reject(item)
-            raw_u = str(item.get("url") or "").strip()
-            if raw_u.startswith("http"):
-                excluded_urls.append(raw_u[:800])
-
-        for item in research_prefilter_dropped:
-            register_reject(item)
-            raw_u = str(item.get("url") or "").strip()
-            if raw_u.startswith("http"):
-                excluded_urls.append(raw_u[:800])
-
-        llm_merged = self._merge_candidates([], candidates, limit=40) if candidates else []
-        for item in llm_merged:
-            if _is_placeholder_candidate_dict(item):
-                continue
-            raw_u = str(item.get("url") or "").strip()
-            if not raw_u.startswith("http"):
-                continue
-            if _url_fingerprint(raw_u) in seen_fp:
-                continue
-            self._verify_llm_candidate_dict(digest.id, item)
-            snapshot_preview_row(item)
-            if item.get("headline_editorial_ok") and item.get("link_status"):
-                append_verified(item)
-            else:
-                excluded_urls.append(raw_u[:800])
-                register_reject(item)
-
-        sup_round = 0
-        while len(verified_pool) < STEP1_TARGET_VERIFIED and sup_round < STEP1_SUPPLEMENT_MAX_ROUNDS:
-            sup_round += 1
-            need = STEP1_TARGET_VERIFIED - len(verified_pool)
-            if need <= 0:
-                break
-            spent_step1 = self._digest_step_llm_cost_sum(digest.id, "step_1")
-            if spent_step1 >= self.settings.step1_max_cost_rub:
-                logger.warning(
-                    "Шаг 1: добор остановлен — лимит LLM step_1_max_cost_rub (%s ₽) | digest_id=%s spent=%.4f verified=%s",
-                    self.settings.step1_max_cost_rub,
-                    digest.id,
-                    spent_step1,
-                    len(verified_pool),
-                )
-                break
-            extra = self._step1_fetch_supplementary_dicts(digest, seen_fp, excluded_urls, now_msk, need)
-            if not extra:
-                logger.warning(
-                    "Шаг 1: добор кандидатов без результата | digest_id=%s round=%s",
-                    digest.id,
-                    sup_round,
-                )
-                continue
-            for item in extra:
-                raw_u = str(item.get("url") or "").strip()
-                if not raw_u.startswith("http"):
-                    continue
-                if _url_fingerprint(raw_u) in seen_fp:
-                    continue
-                self._verify_llm_candidate_dict(digest.id, item)
-                snapshot_preview_row(item)
-                if item.get("headline_editorial_ok") and item.get("link_status"):
-                    append_verified(item)
-                else:
-                    excluded_urls.append(raw_u[:800])
-                    register_reject(item)
-
-        if verified_pool and all(_is_placeholder_candidate_dict(x) for x in verified_pool):
-            persist_reject_stats()
-            self._persist_step1_preview_candidates(digest.id, preview_by_fp)
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "Не удалось получить реальные новости: модель вернула невалидный ответ или сработал внутренний шаблон-заглушка. "
-                    "Проверьте PROXYAPI_API_KEY и снова запустите шаг 1. "
-                    "Либо задайте ENABLE_WEB_FETCH=false в backend/.env и вставьте 5–10 прямых URL на статьи в поле шага 1 — "
-                    "заголовки будут подтянуты с страниц без LLM-поиска."
-                ),
+                step="step_1",
+                agent_name="NewsResearchAgent",
+                request_label="step_1_collect_pool",
+                model=AGENT_MODEL_RECOMMENDATIONS["NewsResearchAgent"],
             )
-
-        if not web_flow_available and len(candidates) == 0 and not normalized_manual_urls:
-            raise HTTPException(
-                status_code=400,
-                detail="Не удалось собрать кандидатов автоматически. Вставьте вручную 5-10 ссылок.",
-            )
-
-        if len(verified_pool) < STEP1_MIN_VERIFIED:
-            persist_reject_stats()
-            self._persist_step1_preview_candidates(digest.id, preview_by_fp)
-            spent_step1 = self._digest_step_llm_cost_sum(digest.id, "step_1")
-            tail = (
-                f" Сработал лимит расходов на сбор кандидатов ({self.settings.step1_max_cost_rub:g} ₽): по учёту ProxyAPI ~{spent_step1:.2f} ₽. "
-                "Увеличьте STEP1_MAX_COST_RUB в backend/.env или добавьте прямые URL статей."
-                if spent_step1 >= self.settings.step1_max_cost_rub - 1e-9
-                else ""
-            )
-            search_hint = ""
-            if not normalized_manual_urls and self.settings.enable_web_fetch:
-                search_hint = (
-                    " Проверьте PROXYAPI_API_KEY и веб-поиск (PROXYAPI_WEB_SEARCH_ENABLED=true) "
-                    "или добавьте SERPAPI_API_KEY / TAVILY_API_KEY в backend/.env."
-                )
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    f"Подтверждено только {len(verified_pool)} материалов по страницам (нужно минимум {STEP1_MIN_VERIFIED}). "
-                    "Добавьте прямые URL статей в поле шага 1 — автопоиск идёт через ProxyAPI web_search (и опционально SerpAPI/Tavily)."
-                    + top_reject_reasons()
-                    + search_hint
-                    + tail
-                ),
-            )
-
-        # Кандидатов удаляем только перед успешной записью: промежуточные commit в _save_cost не должны оставлять пустой список при 502.
-        self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
-
-        verified_pool = verified_pool[:STEP1_TARGET_VERIFIED]
-        entities: list[NewsCandidate] = []
-        seen_urls_lower: set[str] = set()
-        for idx, item in enumerate(verified_pool, start=1):
-            url_norm = str(item.get("url", "")).strip().lower()
-            is_duplicate = url_norm in seen_urls_lower or bool(item.get("is_duplicate", False))
-            seen_urls_lower.add(url_norm)
-            entity = NewsCandidate(
-                digest_id=digest.id,
-                original_number=idx,
-                title=str(item.get("title", ""))[:500],
-                url=str(item.get("url", ""))[:1000],
-                source=str(item.get("source", ""))[:255],
-                tier=str(item.get("tier", "Tier-3"))[:32],
-                published_at=str(item.get("published_at", "")),
-                category=str(item.get("category", "technology"))[:120],
-                description=str(item.get("description", "")),
-                significance_score=int(item.get("significance_score", 1)),
-                novelty_score=int(item.get("novelty_score", 1)),
-                impact_score=int(item.get("impact_score", 1)),
-                total_score=int(item.get("total_score", 3)),
-                reliability_status=str(item.get("reliability_status", "⚠️ сомнительный")),
-                link_status=bool(item.get("link_status", True)),
-                headline_editorial_ok=bool(item.get("headline_editorial_ok", False)),
-                page_verified=bool(item.get("headline_editorial_ok", False)) and bool(item.get("link_status", False)),
-                is_foreign_agent=bool(item.get("is_foreign_agent", False)),
-                is_aggregator=bool(item.get("is_aggregator", False)),
-                is_duplicate=is_duplicate,
-                verification_comment=str(item.get("verification_comment", "")),
-            )
-            entities.append(entity)
-            self.db.add(entity)
-
-        spent_step1_final = self._digest_step_llm_cost_sum(digest.id, "step_1")
-        digest.step1_budget_capped = spent_step1_final >= self.settings.step1_max_cost_rub - 1e-9
-        self.db.add(
-            Asset(
-                digest_id=digest.id,
-                type="step1_rejected_reasons",
-                path="",
-                prompt=json.dumps(reject_stats, ensure_ascii=False),
-            )
-        )
-        digest.status = STATUS_STEP1
-        digest.current_step = STATUS_STEP1
-        self.db.commit()
-        logger.info(
-            "Шаг 1: сохранено проверенных кандидатов | digest_id=%s count=%s rejected=%s",
-            digest.id,
-            len(entities),
-            reject_stats,
-        )
-        return entities
 
     def select_news(self, digest_id: int, selected_ids: list[int], top5: bool) -> list[SelectedNews]:
         digest = self.get_digest(digest_id)
@@ -1216,37 +2017,33 @@ class DigestService:
         else:
             order_payload = [{"candidate_id": cid} for cid in selected_ids]
 
-        spent_step2_before = self._digest_step_llm_cost_sum(digest.id, "step_2")
-        if spent_step2_before >= self.settings.step2_max_cost_rub:
-            logger.warning(
-                "Шаг 2: порядок без OrderingAgent — достигнут STEP2_MAX_COST_RUB (%s ₽) | digest_id=%s spent=%.4f",
-                self.settings.step2_max_cost_rub,
-                digest.id,
-                spent_step2_before,
-            )
-            agent_order = [
-                {
-                    "candidate_id": item["candidate_id"],
-                    "output_position": idx + 1,
-                    "ordering_reason": "Порядок без ИИ: достигнут лимит расходов на упорядочивание (настройка сервера).",
-                }
-                for idx, item in enumerate(order_payload)
-            ]
-            digest.step2_budget_capped = True
-        else:
-            agent_order, measure = self.cost_tracker.measure(
-                lambda: self.workflow.run_ordering(order_payload),
-                source="step2_ordering",
-            )
-            self._save_cost(
-                digest_id=digest.id,
-                step="step_2",
-                agent_name="OrderingAgent",
-                model=AGENT_MODEL_RECOMMENDATIONS["OrderingAgent"],
-                request_label="run_ordering",
-                cost_rub=measure.cost_rub,
-            )
-            digest.step2_budget_capped = False
+        with self._digest_cost_session(
+            digest,
+            step="step_2",
+            agent_name="OrderingAgent",
+            request_label="step_2_ordering",
+            model=AGENT_MODEL_RECOMMENDATIONS["OrderingAgent"],
+        ):
+            spent_step2_before = self._digest_proxyapi_spent_rub(digest)
+            if spent_step2_before >= self.settings.step2_max_cost_rub:
+                logger.warning(
+                    "Шаг 2: порядок без OrderingAgent — достигнут STEP2_MAX_COST_RUB (%s ₽) | digest_id=%s spent=%.4f",
+                    self.settings.step2_max_cost_rub,
+                    digest.id,
+                    spent_step2_before,
+                )
+                agent_order = [
+                    {
+                        "candidate_id": item["candidate_id"],
+                        "output_position": idx + 1,
+                        "ordering_reason": "Порядок без ИИ: достигнут лимит расходов на упорядочивание (настройка сервера).",
+                    }
+                    for idx, item in enumerate(order_payload)
+                ]
+                digest.step2_budget_capped = True
+            else:
+                agent_order = self.workflow.run_ordering(order_payload)
+                digest.step2_budget_capped = False
         for row in selected:
             for ord_item in agent_order:
                 if ord_item["candidate_id"] == row.candidate_id:
@@ -1259,7 +2056,90 @@ class DigestService:
             digest.id,
             [(r.candidate_id, r.output_position) for r in ordered],
         )
+        if self.settings.auto_run_step3_after_order:
+            self._run_step3_after_order(digest.id)
         return ordered
+
+    def run_step_2_order_ai_optimal(self, digest_id: int) -> list[SelectedNews]:
+        """Оптимальный порядок пятёрки через ProxyAPI (gpt-4.1-mini), без CrewAI."""
+        digest = self.get_digest(digest_id)
+        if digest.status != STATUS_SELECTED:
+            raise HTTPException(status_code=400, detail="AI ordering requires selected status")
+        selected = (
+            self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).order_by(SelectedNews.output_position).all()
+        )
+        if len(selected) != 5:
+            raise HTTPException(status_code=400, detail="Need exactly 5 selected news")
+
+        candidate_map = {
+            c.id: c
+            for c in self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).all()
+        }
+        order_input: list[dict[str, Any]] = []
+        for row in selected:
+            c = candidate_map.get(row.candidate_id)
+            if not c:
+                continue
+            order_input.append(
+                {
+                    "candidate_id": row.candidate_id,
+                    "title": (c.title or "")[:500],
+                    "description": (c.description or "")[:800],
+                    "source": (c.source or "")[:120],
+                    "tier": (c.tier or "")[:32],
+                    "total_score": int(c.total_score or 0),
+                    "category": (c.category or "")[:80],
+                }
+            )
+        if len(order_input) != 5:
+            raise HTTPException(status_code=400, detail="Не все выбранные новости найдены в базе")
+
+        with self._digest_cost_session(
+            digest,
+            step="step_2",
+            agent_name="OrderingAgent",
+            request_label="step_2_ai_optimal_order",
+            model=STEP2_AI_ORDER_MODEL,
+        ):
+            spent_step2_before = self._digest_proxyapi_spent_rub(digest)
+            if spent_step2_before >= self.settings.step2_max_cost_rub:
+                digest.step2_budget_capped = True
+                self.db.commit()
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Достигнут лимит расходов на шаг 2 ({self.settings.step2_max_cost_rub:g} ₽). "
+                        "Увеличьте STEP2_MAX_COST_RUB в backend/.env или расставьте порядок вручную."
+                    ),
+                )
+
+            agent_order = self.proxy.suggest_news_order(
+                order_input,
+                digest_type=digest.digest_type or "serious",
+                model=STEP2_AI_ORDER_MODEL,
+            )
+            digest.step2_budget_capped = False
+        for row in selected:
+            for ord_item in agent_order:
+                if int(ord_item["candidate_id"]) == row.candidate_id:
+                    row.output_position = int(ord_item["output_position"])
+                    row.ordering_reason = str(ord_item["ordering_reason"])[:500]
+        self.db.commit()
+        ordered = (
+            self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).order_by(SelectedNews.output_position).all()
+        )
+        logger.info(
+            "Шаг 2: AI-оптимальный порядок | digest_id=%s positions=%s",
+            digest.id,
+            [(r.candidate_id, r.output_position) for r in ordered],
+        )
+        if self.settings.auto_run_step3_after_order:
+            self._run_step3_after_order(digest.id)
+        return ordered
+
+    def _run_step3_after_order(self, digest_id: int) -> dict[str, Any]:
+        logger.info("Шаг 3: автозапуск после сохранения порядка | digest_id=%s", digest_id)
+        return self.run_step_3_analytics(digest_id, "")
 
     def run_step_3_analytics(self, digest_id: int, command: str) -> dict[str, Any]:
         digest = self.get_digest(digest_id)
@@ -1269,8 +2149,8 @@ class DigestService:
                 status_code=400,
                 detail='Запустите аналитику кнопкой ниже или введите команду «готово».',
             )
-        if digest.status != STATUS_SELECTED:
-            raise HTTPException(status_code=400, detail="Step 3 requires selected status")
+        if digest.status not in {STATUS_SELECTED, STATUS_ANALYTICS}:
+            raise HTTPException(status_code=400, detail="Step 3 requires selected or analytics_ready status")
 
         self.db.query(Analytics).filter(Analytics.digest_id == digest.id).delete()
         self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).delete()
@@ -1295,18 +2175,14 @@ class DigestService:
                         "published_at": candidate.published_at,
                     }
                 )
-        result, measure = self.cost_tracker.measure(
-            lambda: self.workflow.run_analytics(payload),
-            source="step3_analytics",
-        )
-        self._save_cost(
-            digest_id=digest.id,
+        with self._digest_cost_session(
+            digest,
             step="step_3",
             agent_name="AnalyticsAgent",
+            request_label="step_3_analytics",
             model=AGENT_MODEL_RECOMMENDATIONS["AnalyticsAgent"],
-            request_label="run_analytics",
-            cost_rub=measure.cost_rub,
-        )
+        ):
+            result = self.workflow.run_analytics(payload)
         for item in result.get("items", []):
             candidate = self.db.query(NewsCandidate).filter(NewsCandidate.id == item["candidate_id"]).first()
             if not candidate:
@@ -1369,16 +2245,15 @@ class DigestService:
         logger.info("Шаг 3: готово | digest_id=%s analytics_rows=%s", digest.id, len(result.get("items", [])))
         return result
 
-    def run_step_4_final(self, digest_id: int, command: str, hook_variant: str | None) -> dict[str, Any]:
-        digest = self.get_digest(digest_id)
-        if command.strip().lower() not in {"ок", "ok"}:
-            raise HTTPException(status_code=400, detail='Для шага 4 нужно ввести команду "Ок"')
-        if digest.status != STATUS_ANALYTICS:
+    def _step4_allow_status(self, digest: Digest) -> None:
+        if digest.status not in {STATUS_ANALYTICS, STATUS_FINAL}:
             raise HTTPException(status_code=400, detail="Step 4 requires analytics_ready")
 
+    def _step4_resolve_hook(self, digest: Digest, hook_variant: str | None) -> str:
         rotation = ["A", "B", "V"]
-        hook = hook_variant if hook_variant in rotation else rotation[digest.id % 3]
-        logger.info("Шаг 4: финальная сборка | digest_id=%s hook=%s", digest.id, hook)
+        return hook_variant if hook_variant in rotation else rotation[digest.id % 3]
+
+    def _step4_selected_payload(self, digest: Digest) -> list[dict[str, Any]]:
         analytics_rows = self.db.query(Analytics).filter(Analytics.digest_id == digest.id).all()
         selected_rows = (
             self.db.query(SelectedNews)
@@ -1386,7 +2261,7 @@ class DigestService:
             .order_by(SelectedNews.output_position.asc())
             .all()
         )
-        selected_payload = []
+        selected_payload: list[dict[str, Any]] = []
         for row in selected_rows:
             candidate = self.db.query(NewsCandidate).filter(NewsCandidate.id == row.candidate_id).first()
             analytics = next((a for a in analytics_rows if a.candidate_id == row.candidate_id), None)
@@ -1400,124 +2275,214 @@ class DigestService:
                     "summary": f"{analytics.essence} {analytics.analysis}",
                 }
             )
+        return selected_payload
 
+    def _step4_hashtags(self, digest: Digest) -> list[str]:
         hashtags_asset = (
-            self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "hashtags").order_by(Asset.id.desc()).first()
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest.id, Asset.type == "hashtags")
+            .order_by(Asset.id.desc())
+            .first()
         )
-        hashtags = hashtags_asset.prompt.split() if hashtags_asset and hashtags_asset.prompt else ["#ИИ", "#AI"]
-        image_prompt, prompt_measure = self.cost_tracker.measure(
-            lambda: self.workflow.run_image_prompt(hook, selected_payload),
-            source="step4_image_prompt",
-        )
-        self._save_cost(
-            digest_id=digest.id,
-            step="step_4",
-            agent_name="ImagePromptAgent",
-            model=AGENT_MODEL_RECOMMENDATIONS["ImagePromptAgent"],
-            request_label="run_image_prompt",
-            cost_rub=prompt_measure.cost_rub,
-        )
-        image_path = self.settings.image_dir / f"digest_{digest.id}.png"
-        _, image_measure = self.cost_tracker.measure(
-            lambda: self.proxy.generate_image(image_prompt, image_path),
-            source="step4_image_generate",
-        )
-        self._save_cost(
-            digest_id=digest.id,
-            step="step_4",
-            agent_name="ImagePromptAgent",
-            model=self.settings.proxyapi_image_model,
-            request_label="generate_image",
-            cost_rub=image_measure.cost_rub,
-        )
-        self.db.add(Asset(digest_id=digest.id, type="image", path=str(image_path), prompt=image_prompt))
+        if hashtags_asset and hashtags_asset.prompt:
+            return hashtags_asset.prompt.split()
+        return ["#ИИ", "#AI"]
 
-        outputs, writer_measure = self.cost_tracker.measure(
-            lambda: self.workflow.run_platform_writer(
-                {
+    def _step4_validate_platforms(self, platforms: list[str]) -> list[str]:
+        allowed = set(STEP4_PLATFORMS)
+        normalized: list[str] = []
+        for raw in platforms:
+            key = str(raw).strip().lower()
+            if key not in allowed:
+                raise HTTPException(status_code=400, detail=f"Неизвестная площадка: {raw}")
+            if key not in normalized:
+                normalized.append(key)
+        if not normalized:
+            raise HTTPException(status_code=400, detail="Укажите хотя бы одну площадку")
+        return normalized
+
+    def _step4_clear_image_variants(self, digest_id: int) -> None:
+        variant_types = [f"image_v{v}" for v in range(1, STEP4_IMAGE_VARIANT_COUNT + 1)]
+        for asset in self.db.query(Asset).filter(Asset.digest_id == digest_id, Asset.type.in_(variant_types)).all():
+            path = Path(asset.path)
+            if path.exists():
+                path.unlink()
+        self.db.query(Asset).filter(Asset.digest_id == digest_id, Asset.type.in_(variant_types)).delete()
+        digest = self.get_digest(digest_id)
+        digest.step4_selected_image_variant = None
+        self.db.commit()
+
+    def run_step_4_generate_images(self, digest_id: int, hook_variant: str | None) -> dict[str, Any]:
+        digest = self.get_digest(digest_id)
+        self._step4_allow_status(digest)
+        if not self.settings.enable_step4_image_generation:
+            raise HTTPException(
+                status_code=503,
+                detail="Генерация обложек временно отключена (ENABLE_STEP4_IMAGE_GENERATION=false).",
+            )
+
+        hook = self._step4_resolve_hook(digest, hook_variant)
+        selected_payload = self._step4_selected_payload(digest)
+        if not selected_payload:
+            raise HTTPException(status_code=400, detail="Нет выбранных новостей с аналитикой для обложки")
+
+        logger.info("Шаг 4: генерация обложек | digest_id=%s hook=%s", digest.id, hook)
+        self._step4_clear_image_variants(digest.id)
+
+        with self._digest_cost_session(
+            digest,
+            step="step_4",
+            agent_name="ImagePromptAgent",
+            request_label="step_4_images",
+            model=self.settings.proxyapi_image_model,
+        ):
+            image_prompt = self.workflow.run_image_prompt(hook, selected_payload)
+            variants: list[dict[str, Any]] = []
+            for variant in range(1, STEP4_IMAGE_VARIANT_COUNT + 1):
+                variant_prompt = f"{image_prompt} Alternate visual composition variant {variant} of {STEP4_IMAGE_VARIANT_COUNT}."
+                image_path = self.settings.image_dir / f"digest_{digest.id}_v{variant}.png"
+                self.proxy.generate_image(variant_prompt, image_path)
+                self.db.add(
+                    Asset(
+                        digest_id=digest.id,
+                        type=f"image_v{variant}",
+                        path=str(image_path),
+                        prompt=variant_prompt,
+                    )
+                )
+                variants.append({"variant": variant, "path": str(image_path)})
+            self.db.commit()
+        logger.info("Шаг 4: обложки готовы | digest_id=%s count=%s", digest.id, len(variants))
+        return {"hook_variant": hook, "variants": variants}
+
+    def run_step_4_select_image(self, digest_id: int, variant: int) -> dict[str, Any]:
+        digest = self.get_digest(digest_id)
+        self._step4_allow_status(digest)
+        if not self.settings.enable_step4_image_generation:
+            raise HTTPException(
+                status_code=503,
+                detail="Выбор обложки недоступен: генерация изображений отключена на сервере.",
+            )
+        if variant < 1 or variant > STEP4_IMAGE_VARIANT_COUNT:
+            raise HTTPException(status_code=400, detail=f"Вариант обложки должен быть от 1 до {STEP4_IMAGE_VARIANT_COUNT}")
+
+        src = self.settings.image_dir / f"digest_{digest_id}_v{variant}.png"
+        if not src.exists():
+            raise HTTPException(status_code=404, detail=f"Обложка варианта {variant} не найдена — сначала сгенерируйте варианты")
+
+        dst = self.settings.image_dir / f"digest_{digest_id}.png"
+        shutil.copy2(src, dst)
+        digest.step4_selected_image_variant = variant
+
+        variant_asset = (
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest.id, Asset.type == f"image_v{variant}")
+            .order_by(Asset.id.desc())
+            .first()
+        )
+        prompt = variant_asset.prompt if variant_asset else ""
+        image_asset = (
+            self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "image").order_by(Asset.id.desc()).first()
+        )
+        if image_asset:
+            image_asset.path = str(dst)
+            image_asset.prompt = prompt
+        else:
+            self.db.add(Asset(digest_id=digest.id, type="image", path=str(dst), prompt=prompt))
+        self.db.commit()
+        logger.info("Шаг 4: выбрана обложка | digest_id=%s variant=%s", digest.id, variant)
+        return {"selected_variant": variant, "image_path": str(dst)}
+
+    def run_step_4_generate_texts(
+        self,
+        digest_id: int,
+        platforms: list[str],
+        hook_variant: str | None,
+    ) -> dict[str, Any]:
+        digest = self.get_digest(digest_id)
+        self._step4_allow_status(digest)
+        platform_keys = self._step4_validate_platforms(platforms)
+
+        hook = self._step4_resolve_hook(digest, hook_variant)
+        selected_payload = self._step4_selected_payload(digest)
+        if not selected_payload:
+            raise HTTPException(status_code=400, detail="Нет выбранных новостей с аналитикой для текстов")
+
+        hashtags = self._step4_hashtags(digest)
+        writer_payload = {
+            "hook_variant": hook,
+            "selected_news": selected_payload,
+            "hashtags": hashtags,
+            "date": digest.date.isoformat(),
+        }
+        logger.info(
+            "Шаг 4: тексты площадок | digest_id=%s hook=%s platforms=%s",
+            digest.id,
+            hook,
+            ",".join(platform_keys),
+        )
+
+        with self._digest_cost_session(
+            digest,
+            step="step_4",
+            agent_name="PlatformWriterAgent",
+            request_label="step_4_texts",
+            model=AGENT_MODEL_RECOMMENDATIONS["PlatformWriterAgent"],
+        ):
+            outputs = self.workflow.run_platform_writer(writer_payload, platforms=platform_keys)
+
+            self.db.query(FinalOutput).filter(
+                FinalOutput.digest_id == digest.id,
+                FinalOutput.platform.in_(platform_keys),
+            ).delete()
+            for platform in platform_keys:
+                content = outputs.get(platform, "")
+                self.db.add(
+                    FinalOutput(
+                        digest_id=digest.id,
+                        platform=platform,
+                        content=content,
+                        character_count=len(content),
+                        qc_status="pending",
+                    )
+                )
+            self.db.commit()
+
+            checks = self.workflow.run_qc(outputs, has_ok=True)
+            self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).delete()
+            failed = False
+            for c in checks:
+                status = str(c.get("status", "pass")).lower()
+                self.db.add(
+                    QualityCheck(
+                        digest_id=digest.id,
+                        check_name=str(c.get("check_name", "QC")),
+                        status=status,
+                        comment=str(c.get("comment", "")),
+                    )
+                )
+                if status not in {"pass", "ok", "success"}:
+                    failed = True
+            self.db.commit()
+
+            if failed:
+                repair_payload = {
                     "hook_variant": hook,
                     "selected_news": selected_payload,
                     "hashtags": hashtags,
+                    "fix_mode": True,
                     "date": digest.date.isoformat(),
                 }
-            ),
-            source="step4_platform_writer",
-        )
-        self._save_cost(
-            digest_id=digest.id,
-            step="step_4",
-            agent_name="PlatformWriterAgent",
-            model=AGENT_MODEL_RECOMMENDATIONS["PlatformWriterAgent"],
-            request_label="run_platform_writer",
-            cost_rub=writer_measure.cost_rub,
-        )
-
-        self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).delete()
-        for platform, content in outputs.items():
-            self.db.add(
-                FinalOutput(
-                    digest_id=digest.id,
-                    platform=platform,
-                    content=content,
-                    character_count=len(content),
-                    qc_status="pending",
-                )
-            )
-        self.db.commit()
-
-        checks, qc_measure = self.cost_tracker.measure(
-            lambda: self.workflow.run_qc(outputs, has_ok=True),
-            source="step4_qc",
-        )
-        self._save_cost(
-            digest_id=digest.id,
-            step="step_4",
-            agent_name="QualityControlAgent",
-            model=AGENT_MODEL_RECOMMENDATIONS["QualityControlAgent"],
-            request_label="run_qc",
-            cost_rub=qc_measure.cost_rub,
-        )
-        self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).delete()
-        failed = False
-        for c in checks:
-            status = str(c.get("status", "pass")).lower()
-            self.db.add(
-                QualityCheck(
-                    digest_id=digest.id,
-                    check_name=str(c.get("check_name", "QC")),
-                    status=status,
-                    comment=str(c.get("comment", "")),
-                )
-            )
-            if status not in {"pass", "ok", "success"}:
-                failed = True
-        self.db.commit()
-
-        if failed:
-            regenerated, repair_measure = self.cost_tracker.measure(
-                lambda: self.workflow.run_platform_writer(
-                    {
-                        "hook_variant": hook,
-                        "selected_news": selected_payload,
-                        "hashtags": hashtags,
-                        "fix_mode": True,
-                    }
-                ),
-                source="step4_platform_writer_repair",
-            )
-            self._save_cost(
-                digest_id=digest.id,
-                step="step_4",
-                agent_name="PlatformWriterAgent",
-                model=AGENT_MODEL_RECOMMENDATIONS["PlatformWriterAgent"],
-                request_label="run_platform_writer_repair",
-                cost_rub=repair_measure.cost_rub,
-            )
-            for row in self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).all():
-                row.content = regenerated.get(row.platform, row.content)
-                row.character_count = len(row.content)
-                row.qc_status = "repaired"
-            self.db.commit()
+                regenerated = self.workflow.run_platform_writer(repair_payload, platforms=platform_keys)
+                for row in (
+                    self.db.query(FinalOutput)
+                    .filter(FinalOutput.digest_id == digest.id, FinalOutput.platform.in_(platform_keys))
+                    .all()
+                ):
+                    row.content = regenerated.get(row.platform, row.content)
+                    row.character_count = len(row.content)
+                    row.qc_status = "repaired"
+                self.db.commit()
 
         digest.status = STATUS_FINAL
         digest.current_step = STATUS_FINAL
@@ -1525,15 +2490,31 @@ class DigestService:
 
         docx_path = self.settings.docx_dir / f"digest_{digest.id}.docx"
         build_docx(self.db, digest, docx_path)
+        self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "docx").delete()
         self.db.add(Asset(digest_id=digest.id, type="docx", path=str(docx_path), prompt="final export"))
         self.db.commit()
-        logger.info(
-            "Шаг 4: завершено | digest_id=%s image=%s docx=%s",
-            digest.id,
-            image_path.name,
-            docx_path.name,
-        )
-        return {"hook_variant": hook, "image_path": str(image_path), "docx_path": str(docx_path)}
+        logger.info("Шаг 4: тексты готовы | digest_id=%s docx=%s", digest.id, docx_path.name)
+        return {"hook_variant": hook, "platforms": platform_keys, "docx_path": str(docx_path)}
+
+    def run_step_4_final(self, digest_id: int, hook_variant: str | None) -> dict[str, Any]:
+        """Совместимость: обложки → выбор варианта 1 → все площадки (обложки — если включены)."""
+        digest = self.get_digest(digest_id)
+        hook = self._step4_resolve_hook(digest, hook_variant)
+        texts = self.run_step_4_generate_texts(digest_id, list(STEP4_PLATFORMS), hook_variant)
+        out: dict[str, Any] = {
+            "hook_variant": hook,
+            "docx_path": texts["docx_path"],
+            "platforms": texts["platforms"],
+            "variants": [],
+            "image_path": None,
+        }
+        if self.settings.enable_step4_image_generation:
+            images = self.run_step_4_generate_images(digest_id, hook_variant)
+            selected = self.run_step_4_select_image(digest_id, 1)
+            out["hook_variant"] = images["hook_variant"]
+            out["image_path"] = selected["image_path"]
+            out["variants"] = images["variants"]
+        return out
 
     def _check_url(self, url: str) -> bool:
         if not url.startswith("http"):
@@ -1613,15 +2594,7 @@ class DigestService:
                     model=model,
                 )
 
-            translated, measure = self.cost_tracker.measure(do, source="step1_manual_title_translate")
-            self._save_cost(
-                digest_id=digest_id,
-                step="step_1",
-                agent_name="ScoringAgent",
-                model=model,
-                request_label="manual_headline_translate_ru",
-                cost_rub=measure.cost_rub,
-            )
+            translated = do()
             line = translated.strip().splitlines()[0].strip().strip("'\"«»„“")
             if len(line) >= 6:
                 return line[:500]
@@ -1630,7 +2603,7 @@ class DigestService:
             logger.warning("Перевод заголовка пропущен (ошибка API) | url=%s", url[:100], exc_info=True)
             return t[:500]
 
-    def _build_manual_candidates(self, digest_id: int, manual_urls: list[str], now_msk: str) -> list[dict[str, Any]]:
+    def _build_manual_candidates(self, digest: Digest, manual_urls: list[str], now_msk: str) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for idx, url in enumerate(manual_urls, start=1):
             bundle = _fetch_article_page_bundle(url)
@@ -1643,7 +2616,7 @@ class DigestService:
             host = _host_from_url(stored)
             manual_reject: str | None = None
             if raw_headline:
-                title = self._ensure_russian_candidate_title(digest_id, stored, raw_headline)
+                title = self._ensure_russian_candidate_title(digest.id, stored, raw_headline)
                 if _editorial_headline_rejected(title) or _editorial_headline_rejected(str(raw_headline)):
                     manual_reject = "headline_low_quality"
                     raw_headline = None
@@ -1683,8 +2656,19 @@ class DigestService:
                 )
                 logger.warning("Ручной URL: заголовок не извлечён | url=%s", stored[:120])
             # Для ручных URL используем тот же результат GET, что и для LLM-кандидатов (без отдельного HEAD).
+            pub_fields: dict[str, Any] = {}
+            _apply_bundle_published_at(pub_fields, bundle if bundle.get("ok") else {})
+            published_at = str(pub_fields.get("published_at") or PUBLISHED_AT_UNDEFINED)
+            if not manual_reject and _published_at_before_digest_window(digest, published_at, stored):
+                manual_reject = "published_before_window"
+                raw_headline = None
+                title = f"Статья по ссылке ({host})"
+                desc = (
+                    f"Дата публикации материала раньше допустимого окна (с {digest_earliest_news_date(digest).isoformat()}). "
+                    "Укажите более свежую статью."
+                )
             link_ok = bool(bundle.get("ok"))
-            headline_editorial_ok = bool(link_ok and raw_headline)
+            headline_editorial_ok = bool(link_ok and raw_headline and not manual_reject)
             page_verified = headline_editorial_ok and link_ok
             comment = "MANUAL_REQUIRED: добавлено пользователем"
             if manual_reject:
@@ -1698,7 +2682,7 @@ class DigestService:
                     "url": stored[:1000],
                     "source": host,
                     "tier": "Tier-2",
-                    "published_at": now_msk,
+                    "published_at": published_at[:100],
                     "category": "manual",
                     "description": desc,
                     "significance_score": 3,
@@ -1729,7 +2713,7 @@ class DigestService:
             "url": url[:1000],
             "source": host,
             "tier": tier,
-            "published_at": now_msk,
+            "published_at": "",
             "category": "search",
             "description": "Кандидат из веб-поиска; заголовок подтянут со страницы после проверки.",
             "significance_score": 2,
@@ -1749,7 +2733,7 @@ class DigestService:
     def _prefilter_llm_candidates_fetchable(
         self, digest_id: int, rows: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Отсекаем URL, которые LLM придумал: страница не открывается по HTTP."""
+        """Отсекаем URL, которые LLM придумал: страница не открывается по HTTP (с разворотом лент)."""
         kept: list[dict[str, Any]] = []
         dropped: list[dict[str, Any]] = []
         for row in rows:
@@ -1759,9 +2743,20 @@ class DigestService:
                 _append_reject_reason(item, "invalid_url")
                 dropped.append(item)
                 continue
-            bundle = _fetch_article_page_bundle(u)
-            if not bundle.get("ok"):
+            if url_suspected_hallucinated(u):
                 _append_reject_reason(item, "llm_hallucinated_url")
+                item["link_status"] = False
+                dropped.append(item)
+                continue
+            resolved_ok = False
+            for resolved_url, bundle in _expand_listing_url_candidates(u, max_children=4):
+                if not bundle.get("ok"):
+                    continue
+                item["url"] = resolved_url[:1000]
+                resolved_ok = True
+                break
+            if not resolved_ok:
+                _append_reject_reason(item, "http_unreachable")
                 item["link_status"] = False
                 dropped.append(item)
                 continue
@@ -1769,9 +2764,80 @@ class DigestService:
         return kept, dropped
 
     def _step1_search_query(self, digest: Digest) -> str:
+        earliest = digest_earliest_news_date(digest)
+        days = int(digest.news_window_days or 3)
+        kind = _normalize_news_window_day_kind(digest.news_window_day_kind)
+        kind_ru = "рабочих" if kind == "working" else "календарных"
+        window_hint = (
+            f"Только материалы с датой публикации не ранее {earliest.isoformat()} "
+            f"(окно: {days} {kind_ru} дней от даты выпуска {digest.date}). "
+        )
         if (digest.digest_type or "serious") == "serious":
-            return "искусственный интеллект нейросети машинное обучение новости последние 48 часов"
-        return "AI artificial intelligence neural networks machine learning news last 48 hours"
+            return (
+                window_hint
+                + "искусственный интеллект нейросети машинное обучение новости свежие"
+            )
+        return (
+            window_hint
+            + "AI artificial intelligence neural networks machine learning news recent"
+        )
+
+    def _step1_run_web_supplement_rounds(
+        self,
+        digest: Digest,
+        *,
+        verified_pool: list[dict[str, Any]],
+        seen_fp: set[str],
+        excluded_urls: list[str],
+        now_msk: str,
+        snapshot_preview_row: Any,
+        append_verified: Any,
+        register_reject: Any,
+        stop_at: int,
+        max_rounds: int,
+    ) -> None:
+        """Добор через ProxyAPI/SerpAPI/Tavily (без CrewAI), пока не набран stop_at подтверждённых."""
+        sup_round = 0
+        while len(verified_pool) < stop_at and sup_round < max_rounds:
+            sup_round += 1
+            need = stop_at - len(verified_pool)
+            if need <= 0:
+                break
+            spent_step1 = self._digest_proxyapi_spent_rub(digest)
+            if spent_step1 >= self.settings.step1_max_cost_rub:
+                logger.warning(
+                    "Шаг 1: добор web_search остановлен — лимит step_1_max_cost_rub | digest_id=%s verified=%s",
+                    digest.id,
+                    len(verified_pool),
+                )
+                break
+            extra = self._step1_fetch_supplementary_dicts(digest, seen_fp, excluded_urls, now_msk, need)
+            if not extra:
+                logger.warning(
+                    "Шаг 1: добор web_search без новых URL | digest_id=%s round=%s",
+                    digest.id,
+                    sup_round,
+                )
+                continue
+            for item in extra:
+                raw_u = str(item.get("url") or "").strip()
+                if not raw_u.startswith("http") or url_suspected_hallucinated(raw_u):
+                    continue
+                for resolved_url, bundle in _expand_listing_url_candidates(raw_u, max_children=6):
+                    if _url_fingerprint(resolved_url) in seen_fp:
+                        continue
+                    work = dict(item)
+                    work["url"] = resolved_url
+                    work["title"] = ""
+                    work["headline_editorial_ok"] = False
+                    work["link_status"] = False
+                    self._verify_llm_candidate_dict(digest, work, prefetched_bundle=bundle)
+                    snapshot_preview_row(work)
+                    if work.get("headline_editorial_ok") and work.get("link_status"):
+                        append_verified(work)
+                    else:
+                        excluded_urls.append(resolved_url[:800])
+                        register_reject(work)
 
     def _collect_search_verified_candidates(
         self,
@@ -1780,44 +2846,59 @@ class DigestService:
         now_msk: str,
         seen_fp: set[str],
         limit: int,
+        on_row: Any | None = None,
     ) -> list[dict[str, Any]]:
         """Реальные URL из ProxyAPI web_search / SerpAPI / Tavily — до LLM-цепочки."""
         query = self._step1_search_query(digest)
-        urls, measure = self.cost_tracker.measure(
-            lambda: fetch_article_urls_from_search(
-                self.settings,
-                query,
-                limit=max(limit * 3, 18),
-                proxy=self.proxy,
-            ),
-            source="step1_web_search",
+        urls = fetch_article_urls_from_search(
+            self.settings,
+            query,
+            limit=max(limit * 3, 18),
+            proxy=self.proxy,
         )
-        if measure.cost_rub is not None:
-            self._save_cost(
-                digest_id=digest_id,
-                step="step_1",
-                agent_name="WebSearch",
-                model=self.settings.proxyapi_web_search_model,
-                request_label="proxyapi_web_search_urls",
-                cost_rub=measure.cost_rub,
-            )
+        return self._ingest_step1_urls_with_listing_expansion(
+            digest, urls, now_msk, seen_fp, limit=limit, seq_start=1, on_row=on_row
+        )
+
+    def _ingest_step1_urls_with_listing_expansion(
+        self,
+        digest: Digest,
+        urls: list[str],
+        now_msk: str,
+        seen_fp: set[str],
+        *,
+        limit: int,
+        seq_start: int = 1,
+        max_children_per_listing: int = 8,
+        on_row: Any | None = None,
+    ) -> list[dict[str, Any]]:
+        """Проверяет URL; страницы-ленты разворачивает в отдельные статьи."""
         verified: list[dict[str, Any]] = []
-        seq = 1
+        seq = seq_start
+        visited: set[str] = set()
         for u in urls:
-            fp = _url_fingerprint(u)
-            if not fp or fp in seen_fp:
-                continue
-            item = self._skeleton_dict_from_search_url(u, now_msk, seq)
-            self._verify_llm_candidate_dict(digest_id, item)
-            if item.get("headline_editorial_ok") and item.get("link_status"):
-                seen_fp.add(fp)
-                verified.append(item)
-                seq += 1
             if len(verified) >= limit:
                 break
+            for resolved_url, bundle in _expand_listing_url_candidates(u, max_children=max_children_per_listing):
+                fp = _url_fingerprint(resolved_url)
+                if not fp or fp in seen_fp or fp in visited:
+                    continue
+                visited.add(fp)
+                item = self._skeleton_dict_from_search_url(resolved_url, now_msk, seq)
+                self._verify_llm_candidate_dict(digest, item, prefetched_bundle=bundle)
+                if on_row is not None:
+                    on_row(item)
+                if item.get("headline_editorial_ok") and item.get("link_status"):
+                    seen_fp.add(fp)
+                    verified.append(item)
+                    seq += 1
+                if len(verified) >= limit:
+                    break
         return verified
 
-    def _verify_llm_candidate_dict(self, digest_id: int, item: dict[str, Any]) -> None:
+    def _verify_llm_candidate_dict(
+        self, digest: Digest, item: dict[str, Any], prefetched_bundle: dict[str, Any] | None = None
+    ) -> None:
         """Нормализация URL и заголовка по HTML.
 
         headline_editorial_ok — читаемый редакционный заголовок (можно выбирать в топ-5).
@@ -1828,7 +2909,7 @@ class DigestService:
             return
         item["headline_editorial_ok"] = False
         item["page_verified"] = False
-        item["link_status"] = bool(item.get("link_status", False))
+        item["link_status"] = False
         original_url = str(item.get("url") or "").strip()
         if _is_placeholder_candidate_dict(item):
             item["link_status"] = False
@@ -1839,6 +2920,14 @@ class DigestService:
             item["link_status"] = False
             _append_reject_reason(item, "invalid_url")
             return
+        if url_suspected_hallucinated(u):
+            item["link_status"] = False
+            _append_reject_reason(item, "llm_hallucinated_url")
+            return
+        if is_topic_pool_page_url(u) or is_listing_page_url(u):
+            item["link_status"] = False
+            _append_reject_reason(item, "news_listing_page")
+            return
         tier, is_aggregator, reliability_status = _classify_source_policy(u)
         item["tier"] = tier
         item["is_aggregator"] = is_aggregator
@@ -1847,87 +2936,121 @@ class DigestService:
             item["link_status"] = False
             _append_reject_reason(item, "aggregator_source")
             return
-        bundle = _fetch_article_page_bundle(u)
+        bundle = prefetched_bundle if prefetched_bundle is not None else _fetch_article_page_bundle(u)
         if not bundle.get("ok"):
             item["link_status"] = False
             _append_reject_reason(item, "http_unreachable")
             return
         stored = str(bundle.get("final_url") or bundle.get("display_url") or u).strip()
         _append_url_audit(item, "http_verify", original_url, stored)
-        orig_fp = _url_fingerprint(original_url)
-        stor_fp = _url_fingerprint(stored)
-        if orig_fp != stor_fp or _is_site_homepage_url(stored):
+        if _redirect_should_reject(original_url, stored, bundle):
             _append_reject_reason(item, "url_redirect_mismatch")
             item["link_status"] = False
             return
         item["url"] = stored[:1000]
-        # HTML уже успешно загружен в bundle — отдельный HEAD часто даёт ложный отказ (403/405).
+        if is_topic_pool_page_url(stored) or is_listing_page_url(stored):
+            item["link_status"] = False
+            _append_reject_reason(item, "news_listing_page")
+            return
+        if bundle.get("is_listing_page"):
+            item["link_status"] = False
+            _append_reject_reason(item, "news_listing_page")
+            return
+        # Страница открылась по HTTP — ссылка рабочая (отдельный HEAD не делаем: даёт ложные 403/405).
         item["link_status"] = True
-        if not bool(bundle.get("article_markers")) and not bool(bundle.get("soft_article_signals")):
+        if not _page_is_article_like(bundle):
+            item["link_status"] = False
             _append_reject_reason(item, "no_article_markers")
             return
         h = bundle.get("headline")
         if not isinstance(h, str) or len(h.strip()) < 8:
+            item["link_status"] = False
             _append_reject_reason(item, "non_article_page")
             return
         if not _ai_digest_topic_matches(str(bundle.get("topic_corpus") or ""), h):
+            item["link_status"] = False
             _append_reject_reason(item, "off_topic_not_ai")
             return
-        # Раньше требовали headline_strict (совпадение URL с og:url / JSON-LD). У многих статей og:title и h1 есть,
-        # а og:url отсутствует или ведёт на другой вариант URL — из-за этого отваливались все кандидаты при живых ссылках.
-        final_title = self._ensure_russian_candidate_title(digest_id, stored, h)[:500]
+        final_title = self._ensure_russian_candidate_title(digest.id, stored, h)[:500]
         if _editorial_headline_rejected(final_title) or _editorial_headline_rejected(h):
+            item["link_status"] = False
             _append_reject_reason(item, "headline_low_quality")
+            return
+        _apply_bundle_published_at(item, bundle)
+        if _published_at_before_digest_window(digest, str(item.get("published_at") or ""), stored):
+            item["link_status"] = False
+            _append_reject_reason(item, "published_before_window")
             return
         item["title"] = final_title
         item["headline_editorial_ok"] = True
-        item["page_verified"] = bool(item.get("link_status", False)) and bool(item["headline_editorial_ok"])
+        item["page_verified"] = True
 
     def _filter_score_url_mutations(
         self,
         verify_rows: list[dict[str, Any]],
         scored_rows: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        verify_url_by_num: dict[int, str] = {}
+        """Скоринг не может менять URL: баллы с scored_rows, идентичность — из verify."""
+        score_only_fields = (
+            "significance_score",
+            "novelty_score",
+            "impact_score",
+            "total_score",
+            "reliability_status",
+            "tier",
+            "description",
+            "verification_comment",
+            "is_aggregator",
+            "is_duplicate",
+            "is_foreign_agent",
+        )
+        verify_by_num: dict[int, dict[str, Any]] = {}
         verify_fp_set: set[str] = set()
         for row in verify_rows:
-            url = str(row.get("url") or "").strip()
+            base = dict(row)
+            url = str(base.get("url") or "").strip()
             fp = _url_fingerprint(url)
             if fp:
                 verify_fp_set.add(fp)
             try:
-                num = int(row.get("original_number"))
+                num = int(base.get("original_number"))
             except Exception:
                 continue
             if url.startswith("http") and num > 0:
-                verify_url_by_num[num] = url
+                verify_by_num[num] = base
 
         accepted: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         for row in scored_rows:
             item = dict(row)
             score_url = str(item.get("url") or "").strip()
-            score_fp = _url_fingerprint(score_url)
-            expected_url = ""
-            number_ok = False
             try:
                 number = int(item.get("original_number"))
-                if number in verify_url_by_num:
-                    expected_url = verify_url_by_num[number]
-                    number_ok = True
             except Exception:
-                number_ok = False
-            if number_ok:
-                if score_fp and _url_fingerprint(expected_url) == score_fp:
-                    accepted.append(item)
-                else:
-                    _append_reject_reason(item, "url_mutated_between_agents")
-                    _append_url_audit(item, "score_guard", expected_url or "<missing>", score_url or "<missing>")
-                    item["link_status"] = False
-                    rejected.append(item)
+                number = -1
+            base = verify_by_num.get(number) if number > 0 else None
+            if base is not None:
+                merged = dict(base)
+                for key in score_only_fields:
+                    if key in item and item[key] is not None:
+                        merged[key] = item[key]
+                verify_url = str(base.get("url") or "").strip()
+                if score_url and verify_url and _url_fingerprint(score_url) != _url_fingerprint(verify_url):
+                    _append_url_audit(merged, "score_url_ignored", verify_url, score_url)
+                accepted.append(merged)
                 continue
+            score_fp = _url_fingerprint(score_url)
             if score_fp and score_fp in verify_fp_set:
-                accepted.append(item)
+                base_by_fp = next(
+                    (v for v in verify_by_num.values() if _url_fingerprint(str(v.get("url") or "")) == score_fp),
+                    None,
+                )
+                if base_by_fp is not None:
+                    merged = dict(base_by_fp)
+                    for key in score_only_fields:
+                        if key in item and item[key] is not None:
+                            merged[key] = item[key]
+                    accepted.append(merged)
                 continue
             _append_reject_reason(item, "url_mutated_between_agents")
             _append_url_audit(item, "score_guard", "<not_in_verify>", score_url or "<missing>")
@@ -1944,24 +3067,12 @@ class DigestService:
         need_hint: int,
     ) -> list[dict[str, Any]]:
         query = self._step1_search_query(digest)
-        urls, measure = self.cost_tracker.measure(
-            lambda: fetch_article_urls_from_search(
-                self.settings,
-                query,
-                limit=max(need_hint * 3, 14),
-                proxy=self.proxy,
-            ),
-            source="step1_web_search_supplement",
+        urls = fetch_article_urls_from_search(
+            self.settings,
+            query,
+            limit=max(need_hint * 3, 14),
+            proxy=self.proxy,
         )
-        if measure.cost_rub is not None:
-            self._save_cost(
-                digest_id=digest.id,
-                step="step_1",
-                agent_name="WebSearch",
-                model=self.settings.proxyapi_web_search_model,
-                request_label="proxyapi_web_search_supplement",
-                cost_rub=measure.cost_rub,
-            )
         out: list[dict[str, Any]] = []
         seq = 900
         for u in urls:
@@ -1976,7 +3087,7 @@ class DigestService:
             return out
         if not self.settings.enable_web_fetch:
             return []
-        spent = self._digest_step_llm_cost_sum(digest.id, "step_1")
+        spent = self._digest_proxyapi_spent_rub(digest)
         if spent >= self.settings.step1_max_cost_rub:
             logger.warning(
                 "Шаг 1: LLM-refill пропущен — достигнут STEP1_MAX_COST_RUB | digest_id=%s spent=%.4f",
@@ -1984,21 +3095,10 @@ class DigestService:
                 spent,
             )
             return []
-        refill_raw, measure = self.cost_tracker.measure(
-            lambda: self.workflow.run_candidates_refill(
-                digest.digest_type or "serious",
-                now_msk,
-                excluded_urls[-55:],
-            ),
-            source="step1_refill",
-        )
-        self._save_cost(
-            digest_id=digest.id,
-            step="step_1",
-            agent_name="NewsResearchAgent",
-            model=AGENT_MODEL_RECOMMENDATIONS["NewsResearchAgent"],
-            request_label="run_candidates_refill",
-            cost_rub=measure.cost_rub,
+        refill_raw = self.workflow.run_candidates_refill(
+            digest.digest_type or "serious",
+            now_msk,
+            excluded_urls[-55:],
         )
         return [x for x in refill_raw if isinstance(x, dict)]
 

@@ -1,12 +1,18 @@
 import json
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
+from datetime import datetime, time, timezone
+
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.database import get_db
-from app.models import Analytics, Asset, FinalOutput, LlmCostRecord, NewsCandidate, QualityCheck, SelectedNews
+from app.models import Analytics, Asset, Digest, FinalOutput, LlmCostRecord, NewsCandidate, QualityCheck, SelectedNews
+from app.services.cost_labels import enrich_llm_cost_row
+from app.services.cost_tracker import proxyapi_spent_today_rub
 from app.schemas import (
     CandidateOut,
     CommandRequest,
@@ -18,6 +24,10 @@ from app.schemas import (
     Step0Request,
     Step0Response,
     Step1RunRequest,
+    Step4GenerateImagesRequest,
+    Step4GenerateTextsRequest,
+    Step4SelectImageRequest,
+    ImageVariantOut,
 )
 from app.services.digest_service import DigestService
 
@@ -83,6 +93,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     hashtags = []
     image_path = None
     docx_path = None
+    image_variants: list[ImageVariantOut] = []
     rejected_reasons_summary: dict[str, int] = {}
     for a in assets:
         if a.type == "hashtags":
@@ -91,6 +102,14 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
             image_path = a.path
         if a.type == "docx":
             docx_path = a.path
+        if a.type.startswith("image_v"):
+            suffix = a.type[7:]
+            if suffix.isdigit():
+                variant_num = int(suffix)
+                if 1 <= variant_num <= 4:
+                    image_variants.append(
+                        ImageVariantOut(variant=variant_num, available=bool(a.path and Path(a.path).exists()))
+                    )
         if a.type == "step1_rejected_reasons":
             try:
                 raw = json.loads(a.prompt or "{}")
@@ -98,7 +117,30 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
                     rejected_reasons_summary = {str(k): int(v) for k, v in raw.items()}
             except Exception:
                 pass
-    total_cost_rub = round(sum([x.cost_rub or 0.0 for x in llm_costs]), 6)
+    image_variants.sort(key=lambda x: x.variant)
+    digest_cost = service.digest_proxyapi_cost_rub(digest)
+    total_cost_rub = round(
+        digest_cost if digest_cost is not None else sum(x.cost_rub or 0.0 for x in llm_costs),
+        4,
+    )
+    try:
+        from zoneinfo import ZoneInfo
+
+        msk = ZoneInfo("Europe/Moscow")
+        start_msk = datetime.combine(datetime.now(msk).date(), time.min, tzinfo=msk)
+        day_start = start_msk.astimezone(timezone.utc).replace(tzinfo=None)
+    except Exception:
+        day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    tracked_spend_today_rub = round(
+        float(
+            db.query(func.coalesce(func.sum(LlmCostRecord.cost_rub), 0.0))
+            .filter(LlmCostRecord.created_at >= day_start)
+            .scalar()
+            or 0.0
+        ),
+        4,
+    )
+    spent_today_proxy = proxyapi_spent_today_rub(db, service.cost_tracker)
     candidates_are_demo_fallback = bool(candidates) and all(_candidate_row_is_demo_placeholder(c) for c in candidates)
     budget_notices = service.build_budget_notices(digest)
     return DigestDetail(
@@ -132,19 +174,26 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         checks=[{"check_name": c.check_name, "status": c.status, "comment": c.comment} for c in checks],
         hashtags=hashtags,
         image_path=image_path,
+        image_variants=image_variants,
+        step4_selected_image_variant=digest.step4_selected_image_variant,
         docx_path=docx_path,
         llm_costs=[
-            {
-                "step": r.step,
-                "agent_name": r.agent_name,
-                "model": r.model,
-                "request_label": r.request_label,
-                "cost_rub": r.cost_rub,
-                "created_at": r.created_at,
-            }
+            enrich_llm_cost_row(
+                {
+                    "step": r.step,
+                    "agent_name": r.agent_name,
+                    "model": r.model,
+                    "request_label": r.request_label,
+                    "cost_rub": r.cost_rub,
+                    "created_at": r.created_at,
+                }
+            )
             for r in llm_costs
         ],
         total_cost_rub=total_cost_rub,
+        tracked_spend_today_rub=tracked_spend_today_rub,
+        proxyapi_spent_today_rub=spent_today_proxy,
+        enable_step4_image_generation=get_settings().enable_step4_image_generation,
         model_recommendations=service.get_model_recommendations(),
     )
 
@@ -152,14 +201,25 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
 @router.post("/{digest_id}/step0", response_model=Step0Response)
 def run_step0(digest_id: int, payload: Step0Request, db: Session = Depends(get_db)) -> Step0Response:
     service = DigestService(db)
-    digest = service.run_step_0(digest_id, payload.digest_type)
-    return Step0Response(digest_id=digest.id, digest_type=digest.digest_type or "serious", default_applied=payload.digest_type is None)
+    digest = service.run_step_0(
+        digest_id,
+        payload.digest_type,
+        news_window_days=payload.news_window_days,
+        news_window_day_kind=payload.news_window_day_kind,
+    )
+    return Step0Response(
+        digest_id=digest.id,
+        digest_type=digest.digest_type or "serious",
+        default_applied=payload.digest_type is None,
+        news_window_days=digest.news_window_days,
+        news_window_day_kind=digest.news_window_day_kind,  # type: ignore[arg-type]
+    )
 
 
 @router.post("/{digest_id}/step1/run", response_model=list[CandidateOut])
 def run_step1(digest_id: int, payload: Step1RunRequest, db: Session = Depends(get_db)) -> list[CandidateOut]:
     service = DigestService(db)
-    rows = service.run_step_1(digest_id, payload.manual_urls)
+    rows = service.run_step_1(digest_id, payload.manual_urls, rebuild=payload.rebuild)
     return [CandidateOut.model_validate(r) for r in rows]
 
 
@@ -187,18 +247,63 @@ def order_news(digest_id: int, payload: OrderRequest, db: Session = Depends(get_
     }
 
 
+@router.post("/{digest_id}/step2/order/ai-optimal")
+def order_news_ai_optimal(digest_id: int, db: Session = Depends(get_db)) -> dict:
+    """Оптимальный порядок пятёрки по мнению ИИ (ProxyAPI gpt-4.1-mini, без Crew)."""
+    service = DigestService(db)
+    rows = service.run_step_2_order_ai_optimal(digest_id)
+    candidate_map = {
+        c.id: c
+        for c in db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest_id).all()
+    }
+    return {
+        "ordered": [
+            {
+                "candidate_id": r.candidate_id,
+                "output_position": r.output_position,
+                "ordering_reason": r.ordering_reason,
+                "original_number": r.original_number,
+                "title": (candidate_map[r.candidate_id].title if r.candidate_id in candidate_map else ""),
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.post("/{digest_id}/step3/confirm-ready")
 def confirm_ready(digest_id: int, payload: CommandRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
     data = service.run_step_3_analytics(digest_id, payload.command)
-    return {"message": 'Напишите "Ок" для перехода к Шагу 4', "overall_analysis": data.get("overall_analysis", "")}
+    return {"message": "Аналитика готова — переходите к шагу 4", "overall_analysis": data.get("overall_analysis", "")}
+
+
+@router.post("/{digest_id}/step4/generate-images")
+def step4_generate_images(digest_id: int, payload: Step4GenerateImagesRequest, db: Session = Depends(get_db)) -> dict:
+    service = DigestService(db)
+    return service.run_step_4_generate_images(digest_id, payload.hook_variant)
+
+
+@router.post("/{digest_id}/step4/select-image")
+def step4_select_image(digest_id: int, payload: Step4SelectImageRequest, db: Session = Depends(get_db)) -> dict:
+    service = DigestService(db)
+    return service.run_step_4_select_image(digest_id, payload.variant)
+
+
+@router.post("/{digest_id}/step4/generate-texts")
+def step4_generate_texts(digest_id: int, payload: Step4GenerateTextsRequest, db: Session = Depends(get_db)) -> dict:
+    service = DigestService(db)
+    return service.run_step_4_generate_texts(
+        digest_id,
+        payload.platforms,
+        payload.hook_variant,
+    )
 
 
 @router.post("/{digest_id}/step4/confirm-final")
 def confirm_final(digest_id: int, payload: CommandRequest, db: Session = Depends(get_db)) -> dict:
+    """Устаревший монолитный шаг 4: 4 обложки, выбор v1, все площадки."""
     service = DigestService(db)
-    data = service.run_step_4_final(digest_id, payload.command, payload.hook_variant)
-    return data
+    return service.run_step_4_final(digest_id, payload.hook_variant)
 
 
 @router.get("/{digest_id}/final")
@@ -220,10 +325,18 @@ def download_docx(digest_id: int, db: Session = Depends(get_db)) -> FileResponse
 
 
 @router.get("/{digest_id}/image")
-def download_image(digest_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def download_image(
+    digest_id: int,
+    variant: int | None = Query(default=None, ge=1, le=4),
+    db: Session = Depends(get_db),
+) -> FileResponse:
     service = DigestService(db)
     service.get_digest(digest_id)
-    asset = db.query(Asset).filter(Asset.digest_id == digest_id, Asset.type == "image").order_by(Asset.id.desc()).first()
+    asset_type = f"image_v{variant}" if variant else "image"
+    asset = (
+        db.query(Asset).filter(Asset.digest_id == digest_id, Asset.type == asset_type).order_by(Asset.id.desc()).first()
+    )
     if not asset or not Path(asset.path).exists():
         raise HTTPException(status_code=404, detail="Image not found")
-    return FileResponse(path=asset.path, filename=f"digest_{digest_id}.png")
+    suffix = f"_v{variant}" if variant else ""
+    return FileResponse(path=asset.path, filename=f"digest_{digest_id}{suffix}.png")

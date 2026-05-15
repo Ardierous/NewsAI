@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -19,6 +19,15 @@ class Digest(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     step1_budget_capped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     step2_budget_capped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    news_window_days: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    news_window_day_kind: Mapped[str] = mapped_column(String(16), default="working", nullable=False)
+    step4_selected_image_variant: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    proxyapi_balance_session_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_budget_used_session_start: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_balance_before: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_balance_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_budget_used_before: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_budget_used_after: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     candidates: Mapped[list["NewsCandidate"]] = relationship(
         "NewsCandidate", back_populates="digest", cascade="all, delete-orphan"
@@ -135,6 +144,18 @@ class QualityCheck(Base):
     comment: Mapped[str] = mapped_column(Text, default="")
 
     digest: Mapped["Digest"] = relationship("Digest", back_populates="quality_checks")
+
+
+class ProxyapiSpendDay(Base):
+    """Снимок баланса ProxyAPI на границе суток (МСК) для «трат за сегодня»."""
+
+    __tablename__ = "proxyapi_spend_days"
+
+    day: Mapped[date] = mapped_column(Date, primary_key=True)
+    opening_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    opening_budget_used: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_budget_used: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class LlmCostRecord(Base):

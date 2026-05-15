@@ -1,0 +1,18 @@
+---
+description: Нерабочие ссылки / серые плашки на шаге 1 — читать runbook перед правками verify
+globs: backend/app/services/digest_service.py,backend/app/services/news_search.py,backend/app/crew/workflow.py,frontend/components/DigestWizard.tsx,backend/tests/test_step1*.py
+alwaysApply: false
+---
+
+# Шаг 1: верификация ссылок
+
+При задачах про **битые ссылки**, **url_redirect_mismatch**, **мало зелёных чипов**, **502 step1** — сначала открой и следуй:
+
+**[docs/STEP1_LINKS_RUNBOOK.md](../../docs/STEP1_LINKS_RUNBOOK.md)**
+
+Краткие инварианты:
+
+- Источник истины — `_fetch_article_page_bundle` + `_verify_llm_candidate_dict`, не URL от CrewAI.
+- Редирект с поискового URL на статью с заголовком — **разрешён** (`_redirect_should_reject`).
+- ScoringAgent **не меняет** `url` (`_filter_score_url_mutations` берёт URL из verify).
+- После правок: `python -m pytest tests/test_step1_link_validation_smoke.py tests/test_step1_regression_pipeline.py -q`

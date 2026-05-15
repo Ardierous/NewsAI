@@ -16,6 +16,8 @@ class DigestItem(BaseModel):
     date: date
     digest_type: str | None
     digest_type_via_default: bool = False
+    news_window_days: int = 3
+    news_window_day_kind: Literal["calendar", "working"] = "working"
     status: str
     current_step: str
     created_at: datetime
@@ -26,16 +28,22 @@ class DigestItem(BaseModel):
 
 class Step0Request(BaseModel):
     digest_type: Literal["serious", "curious"] | None = None
+    news_window_days: int = Field(default=3, ge=1, le=90)
+    news_window_day_kind: Literal["calendar", "working"] = "working"
 
 
 class Step0Response(BaseModel):
     digest_id: int
     digest_type: str
     default_applied: bool
+    news_window_days: int
+    news_window_day_kind: Literal["calendar", "working"]
 
 
 class Step1RunRequest(BaseModel):
     manual_urls: list[str] = Field(default_factory=list)
+    """Полная пересборка пула после шагов 2–4 (сброс выбора, порядка, аналитики, финала)."""
+    rebuild: bool = False
 
 
 class CandidateOut(BaseModel):
@@ -75,6 +83,24 @@ class CommandRequest(BaseModel):
     hook_variant: Literal["A", "B", "V"] | None = None
 
 
+class Step4GenerateImagesRequest(BaseModel):
+    hook_variant: Literal["A", "B", "V"] | None = None
+
+
+class Step4SelectImageRequest(BaseModel):
+    variant: int = Field(ge=1, le=4)
+
+
+class Step4GenerateTextsRequest(BaseModel):
+    platforms: list[str] = Field(min_length=1)
+    hook_variant: Literal["A", "B", "V"] | None = None
+
+
+class ImageVariantOut(BaseModel):
+    variant: int
+    available: bool = True
+
+
 class SelectedNewsOut(BaseModel):
     candidate_id: int
     original_number: int
@@ -111,9 +137,12 @@ class FinalOutputOut(BaseModel):
 
 class LlmCostRecordOut(BaseModel):
     step: str
+    step_title_ru: str = ""
     agent_name: str
+    agent_title_ru: str = ""
     model: str
     request_label: str
+    operation_title_ru: str = ""
     cost_rub: float | None
     created_at: datetime
 
@@ -138,7 +167,14 @@ class DigestDetail(BaseModel):
     checks: list[QualityCheckOut]
     hashtags: list[str]
     image_path: str | None
+    image_variants: list[ImageVariantOut] = Field(default_factory=list)
+    step4_selected_image_variant: int | None = None
     docx_path: str | None
     llm_costs: list[LlmCostRecordOut]
     total_cost_rub: float
+    """Сумма cost_rub по всем выпускам за календарный день (МСК) — учёт приложения."""
+    tracked_spend_today_rub: float
+    """Траты за день по балансу ProxyAPI (открытие суток → текущий баланс / budget.used)."""
+    proxyapi_spent_today_rub: float | None = None
+    enable_step4_image_generation: bool = False
     model_recommendations: list[AgentModelRecommendationOut]

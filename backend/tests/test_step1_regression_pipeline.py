@@ -8,8 +8,31 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Asset, Digest, NewsCandidate
-from app.services.digest_service import DigestService, STATUS_STEP0, STATUS_STEP1
+from app.models import Analytics, Asset, Digest, NewsCandidate, SelectedNews
+from app.services import digest_service as ds
+from app.services.digest_service import (
+    DigestService,
+    STATUS_ANALYTICS,
+    STATUS_SELECTED,
+    STATUS_STEP0,
+    STATUS_STEP1,
+)
+
+
+def _fake_expand_listing(url: str, max_children: int = 10) -> list[tuple[str, dict]]:
+    u = url.strip()
+    bundle = {
+        "ok": True,
+        "is_listing_page": False,
+        "final_url": u,
+        "display_url": u,
+        "article_markers": True,
+        "soft_article_signals": True,
+        "headline": "Нейросеть и искусственный интеллект: тест",
+        "topic_corpus": "искусственный интеллект нейросети",
+        "headline_strict": True,
+    }
+    return [(u, bundle)]
 
 
 def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Digest]:
@@ -28,7 +51,11 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     service.settings.step1_max_cost_rub = 9999.0
 
     seed_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
-    monkeypatch.setattr(service.cost_tracker, "measure", lambda fn, source: (fn(), SimpleNamespace(cost_rub=0.0)))
+    monkeypatch.setattr(
+        service.cost_tracker,
+        "measure",
+        lambda fn, source, **kwargs: (fn(), SimpleNamespace(cost_rub=0.0)),
+    )
     monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: seed_rows)
     monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: [dict(x) for x in research_rows])
     monkeypatch.setattr(service, "_step1_fetch_supplementary_dicts", lambda *args, **kwargs: [])
@@ -36,6 +63,7 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
         service, "_prefilter_llm_candidates_fetchable", lambda _digest_id, rows: (rows, [])
     )
     monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(ds, "_expand_listing_url_candidates", _fake_expand_listing)
     return service, digest
 
 
@@ -45,7 +73,7 @@ def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):
     score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
-    def fake_verify(_digest_id: int, item: dict) -> None:
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = False
         item["link_status"] = False
         item["verification_comment"] = "REJECT_REASON:off_topic_not_ai"
@@ -78,7 +106,7 @@ def test_step1_success_sets_status_and_candidates(monkeypatch: pytest.MonkeyPatc
     score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
-    def fake_verify(_digest_id: int, item: dict) -> None:
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
         item["link_status"] = True
         item["is_aggregator"] = False
@@ -105,18 +133,19 @@ def test_step1_success_sets_status_and_candidates(monkeypatch: pytest.MonkeyPatc
     assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 5
 
 
-def test_step1_rejects_urls_mutated_between_verify_and_score(monkeypatch: pytest.MonkeyPatch):
+def test_step1_keeps_verify_url_when_score_mutates_url(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
     verify_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
     score_rows = [dict(x) for x in verify_rows]
     score_rows[-1]["url"] = "https://broken.example.net/new-path"
+    score_rows[-1]["total_score"] = 99
 
     monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: verify_rows)
     monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: verify_rows)
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
-    def fake_verify(_digest_id: int, item: dict) -> None:
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
         item["link_status"] = True
         item["is_aggregator"] = False
@@ -135,13 +164,104 @@ def test_step1_rejects_urls_mutated_between_verify_and_score(monkeypatch: pytest
     monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
 
     rows = service.run_step_1(digest.id, [])
-    assert len(rows) == 5
-    saved = (
-        service.db.query(Asset)
-        .filter(Asset.digest_id == digest.id, Asset.type == "step1_rejected_reasons")
-        .order_by(Asset.id.desc())
-        .first()
+    assert len(rows) == 6
+    assert rows[-1].url.endswith("/news/5")
+    assert "broken.example.net" not in rows[-1].url
+
+
+def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["is_aggregator"] = False
+        item["verification_comment"] = ""
+        item["title"] = f"ИИ: {item.get('title', 'Новость')}"
+        item["source"] = "Example"
+        item["published_at"] = "2026-05-10T09:00:00+03:00"
+        item["category"] = "technology"
+        item["description"] = "Описание"
+        item["significance_score"] = 2
+        item["novelty_score"] = 2
+        item["impact_score"] = 2
+        item["total_score"] = 6
+        item["reliability_status"] = "✅ подтверждено"
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+
+    first = service.run_step_1(digest.id, [])
+    assert len(first) >= 5
+    digest.status = STATUS_SELECTED
+    digest.current_step = STATUS_SELECTED
+    service.db.add(
+        SelectedNews(
+            digest_id=digest.id,
+            candidate_id=first[0].id,
+            original_number=1,
+            output_position=1,
+            ordering_reason="test",
+        )
     )
-    assert saved is not None
-    stats = json.loads(saved.prompt or "{}")
-    assert stats.get("url_mutated_between_agents") == 1
+    service.db.add(
+        Analytics(
+            digest_id=digest.id,
+            candidate_id=first[0].id,
+            essence="e",
+            comment="c",
+            analysis="a",
+            source_url=first[0].url,
+            source_name=first[0].source,
+            published_at=first[0].published_at,
+        )
+    )
+    service.db.commit()
+
+    with pytest.raises(HTTPException) as ex:
+        service.run_step_1(digest.id, [], rebuild=False)
+    assert ex.value.status_code == 400
+    assert "rebuild=true" in str(ex.value.detail)
+
+    rows = service.run_step_1(digest.id, [], rebuild=True)
+    service.db.refresh(digest)
+    assert digest.status == STATUS_STEP1
+    assert service.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).count() == 0
+    assert service.db.query(Analytics).filter(Analytics.digest_id == digest.id).count() == 0
+    assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 5
+    assert len(rows) >= 5
+
+
+def test_step1_rebuild_from_analytics_ready(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_ANALYTICS
+    digest.current_step = STATUS_ANALYTICS
+    service.db.commit()
+
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["is_aggregator"] = False
+        item["verification_comment"] = ""
+        item["title"] = f"ИИ: {item.get('title', 'Новость')}"
+        item["source"] = "Example"
+        item["published_at"] = "2026-05-11T12:00:00+03:00"
+        item["category"] = "technology"
+        item["description"] = "Описание"
+        item["significance_score"] = 2
+        item["novelty_score"] = 2
+        item["impact_score"] = 2
+        item["total_score"] = 6
+        item["reliability_status"] = "✅ подтверждено"
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+
+    rows = service.run_step_1(digest.id, [], rebuild=True)
+    service.db.refresh(digest)
+    assert digest.status == STATUS_STEP1
+    assert len(rows) >= 5

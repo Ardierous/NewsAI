@@ -6,6 +6,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from crewai import Crew, Process, Task
+from crewai.types.usage_metrics import UsageMetrics
 
 from app.crew.agents import create_agents
 from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS
@@ -106,6 +107,12 @@ class CrewWorkflow:
 
     def __post_init__(self) -> None:
         self.agents = create_agents(self.contract_prompt)
+        self.last_crew_usage: UsageMetrics | None = None
+
+    def _kickoff(self, crew: Crew) -> str:
+        output = crew.kickoff()
+        self.last_crew_usage = getattr(output, "token_usage", None)
+        return str(output)
 
     def _with_contract(self, text: str) -> str:
         return f"Контракт поведения (обязательно):\n{self.contract_prompt}\n\nЗадача:\n{text}"
@@ -140,7 +147,7 @@ class CrewWorkflow:
             agent=self.agents.news_research,
         )
         research_crew = Crew(agents=[self.agents.news_research], tasks=[research_task], process=Process.sequential, verbose=False)
-        raw = str(research_crew.kickoff())
+        raw = self._kickoff(research_crew)
         return _extract_candidate_list(raw)[:15]
 
     def run_candidates_refill(self, digest_type: str, now_msk: str, excluded_urls: list[str]) -> list[dict[str, Any]]:
@@ -167,7 +174,7 @@ class CrewWorkflow:
             agent=self.agents.news_research,
         )
         research_crew = Crew(agents=[self.agents.news_research], tasks=[research_task], process=Process.sequential, verbose=False)
-        raw = str(research_crew.kickoff())
+        raw = self._kickoff(research_crew)
         return _extract_candidate_list(raw)[:15]
 
     def run_candidates_verify(self, research_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -188,7 +195,7 @@ class CrewWorkflow:
         verify_crew = Crew(
             agents=[self.agents.source_verification], tasks=[verify_task], process=Process.sequential, verbose=False
         )
-        raw = str(verify_crew.kickoff())
+        raw = self._kickoff(verify_crew)
         return _extract_candidate_list(raw)[:15]
 
     def run_candidates_score(self, verify_rows: list[dict[str, Any]], now_msk: str) -> list[dict[str, Any]]:
@@ -205,7 +212,7 @@ class CrewWorkflow:
             agent=self.agents.scoring,
         )
         score_crew = Crew(agents=[self.agents.scoring], tasks=[score_task], process=Process.sequential, verbose=False)
-        output = str(score_crew.kickoff())
+        output = self._kickoff(score_crew)
         parsed = _extract_candidate_list(output)
         if len(parsed) >= 5:
             return parsed[:10]
@@ -225,7 +232,7 @@ class CrewWorkflow:
             agent=self.agents.ordering,
         )
         crew = Crew(agents=[self.agents.ordering], tasks=[task], process=Process.sequential, verbose=False)
-        parsed = _extract_json(str(crew.kickoff()), [])
+        parsed = _extract_json(self._kickoff(crew), [])
         if isinstance(parsed, list) and len(parsed) == 5:
             return parsed
         return [
@@ -248,7 +255,7 @@ class CrewWorkflow:
             agent=self.agents.analytics,
         )
         crew = Crew(agents=[self.agents.analytics], tasks=[task], process=Process.sequential, verbose=False)
-        parsed = _extract_json(str(crew.kickoff()), {})
+        parsed = _extract_json(self._kickoff(crew), {})
         if isinstance(parsed, dict) and parsed.get("items"):
             return parsed
         return {
@@ -280,12 +287,14 @@ class CrewWorkflow:
             agent=self.agents.image_prompt,
         )
         crew = Crew(agents=[self.agents.image_prompt], tasks=[task], process=Process.sequential, verbose=False)
-        prompt = str(crew.kickoff()).strip()
+        prompt = self._kickoff(crew).strip()
         if len(prompt) > 20:
             return prompt
         return "Abstract futuristic AI newsroom, violet and deep blue gradient, dynamic data streams, cinematic horizontal composition, ultra detailed, no text, no logos, no people."
 
-    def run_platform_writer(self, payload: dict[str, Any]) -> dict[str, str]:
+    def run_platform_writer(self, payload: dict[str, Any], platforms: list[str] | None = None) -> dict[str, str]:
+        target = list(platforms) if platforms else ["telegram", "max", "vk", "dzen"]
+        keys_str = ",".join(target)
         extra_rules = (
             "Дополнительно к контракту: в конце КАЖДОГО из четырёх блоков добавь одну строку подписки "
             f"(для telegram/max/dzen — markdown как пример: {_SUBSCRIPTION_MD_LINE}; "
@@ -299,19 +308,27 @@ class CrewWorkflow:
         )
         task = Task(
             description=self._with_contract(
-                "Верни JSON объект с ключами telegram,max,vk,dzen. "
+                f"Верни JSON объект ТОЛЬКО с ключами {keys_str}. "
                 "Строго соблюдай форматы платформ из контракта. "
                 + extra_rules
                 + f"Вход:{payload}"
             ),
-            expected_output="JSON объект 4 платформ",
+            expected_output=f"JSON объект платформ: {keys_str}",
             agent=self.agents.platform_writer,
         )
         crew = Crew(agents=[self.agents.platform_writer], tasks=[task], process=Process.sequential, verbose=False)
-        parsed = _extract_json(str(crew.kickoff()), {})
-        if isinstance(parsed, dict) and {"telegram", "max", "vk", "dzen"} <= parsed.keys():
-            return {k: str(v) for k, v in parsed.items()}
-        return self._fallback_platforms(payload)
+        parsed = _extract_json(self._kickoff(crew), {})
+        fallback_all = self._fallback_platforms(payload)
+        if isinstance(parsed, dict):
+            result: dict[str, str] = {}
+            for key in target:
+                if key in parsed:
+                    result[key] = str(parsed[key])
+                elif key in fallback_all:
+                    result[key] = fallback_all[key]
+            if result:
+                return result
+        return {k: fallback_all[k] for k in target if k in fallback_all}
 
     def run_qc(self, outputs: dict[str, str], has_ok: bool) -> list[dict[str, str]]:
         task = Task(
@@ -326,7 +343,7 @@ class CrewWorkflow:
             agent=self.agents.quality_control,
         )
         crew = Crew(agents=[self.agents.quality_control], tasks=[task], process=Process.sequential, verbose=False)
-        parsed = _extract_json(str(crew.kickoff()), [])
+        parsed = _extract_json(self._kickoff(crew), [])
         if isinstance(parsed, list) and parsed:
             return parsed
         return [

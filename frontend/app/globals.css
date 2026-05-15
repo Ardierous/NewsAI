@@ -36,6 +36,24 @@ button {
   padding: 10px 14px;
 }
 
+/* Вторичное действие, но явно кликабельное (не путать с :disabled) */
+button.btn-rebuild {
+  background: linear-gradient(180deg, #1e3a5f 0%, #172554 100%);
+  border: 2px solid #38bdf8;
+  color: #f0f9ff;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.15);
+}
+
+button.btn-rebuild:hover:not(:disabled) {
+  background: linear-gradient(180deg, #2563eb 0%, #1e40af 100%);
+  border-color: #7dd3fc;
+}
+
+button.btn-rebuild:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
 button:disabled {
   background: #475569;
   cursor: not-allowed;
@@ -48,6 +66,40 @@ input, textarea, select {
   border: 1px solid #334155;
   background: #0f172a;
   color: #fff;
+}
+
+input[type="radio"],
+input[type="checkbox"] {
+  width: auto;
+  padding: 0;
+  flex-shrink: 0;
+}
+
+.wizard-radio-group {
+  border: none;
+  padding: 0;
+  margin: 0 0 12px;
+}
+
+.wizard-radio-group legend {
+  font-size: 0.95rem;
+  margin-bottom: 8px;
+  padding: 0;
+}
+
+.wizard-radio-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  cursor: pointer;
+  width: fit-content;
+  line-height: 1.35;
+}
+
+.wizard-radio-option input[type="radio"] {
+  margin: 0;
+  align-self: center;
 }
 
 .grid {
@@ -275,6 +327,41 @@ input, textarea, select {
 
 .step-progress .async-progress-bar--indeterminate {
   height: 100%;
+}
+
+/* Панель статуса длительной операции у карточки шага (шаг 3) */
+.wizard-step-status {
+  margin: 12px 0 14px;
+  padding: 14px 16px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(30, 41, 59, 0.95) 0%, rgba(15, 23, 42, 0.92) 100%);
+  border: 1px solid #475569;
+  box-shadow: inset 0 1px 0 rgba(148, 163, 184, 0.08);
+}
+
+.wizard-step-status-headline {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #e2e8f0;
+  margin-bottom: 8px;
+}
+
+.wizard-step-status-phase {
+  font-size: 0.95rem;
+  color: #a5b4fc;
+  line-height: 1.4;
+  margin-bottom: 8px;
+}
+
+.wizard-step-status-meta {
+  font-size: 0.82rem;
+  color: #94a3b8;
+  line-height: 1.35;
+  margin-bottom: 12px;
+}
+
+.wizard-step-status-track {
+  height: 7px;
 }
 
 /* Памятка мастера: внешний блок по умолчанию свёрнут; внутри — аккордеоны по шагам */

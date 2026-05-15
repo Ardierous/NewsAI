@@ -124,14 +124,14 @@ export function DigestHintsAccordion() {
 
         <Acc title="Шаг 3 — аналитика и шаг 4 — финал">
           <p style={{ ...li, marginTop: 0 }}>
-            Шаг 3: развёрнутая аналитика по каждой из пяти новостей + хэштеги (кнопка без ввода «готово» — пустая команда на
-            сервере допустима). Шаг 4: финальные тексты платформ, картинка, QC; в поле — подтверждение <strong>Ок</strong> по
-            контракту (<code style={c}>digest_contract.txt</code>).
+            Шаг 3: развёрнутая аналитика по каждой из пяти новостей + хэштеги (достаточно кнопки). Шаг 4: обложки (4 варианта),
+            выбор одной, тексты по отмеченным площадкам и QC — всё запускается кнопками без ввода «Ок» (
+            <code style={c}>digest_contract.txt</code>).
           </p>
           <div style={dev}>
             <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step3/confirm-ready</code> →{" "}
-            <code style={c}>run_step_3_analytics</code>; <code style={c}>POST …/step4/confirm-final</code> → <code style={c}>run_step_4_final</code>. Тела:{" "}
-            <code style={c}>CommandRequest</code> в <code style={c}>schemas.py</code>. Итоговые блоки и ассеты пишутся в БД и отдаются
+            <code style={c}>run_step_3_analytics</code>; шаг 4: <code style={c}>generate-images</code>, <code style={c}>select-image</code>,{" "}
+            <code style={c}>generate-texts</code> (см. <code style={c}>schemas.py</code>). Итоговые блоки и ассеты пишутся в БД и отдаются
             тем же <code style={c}>GET /digests/{"{id}"}</code> и ссылками на <code style={c}>/docx</code> / изображение в{" "}
             <code style={c}>routes_digests.py</code>.
           </div>

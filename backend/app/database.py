@@ -46,6 +46,54 @@ def ensure_digest_schema_migrations() -> None:
             if "step2_budget_capped" not in names:
                 conn.execute(text("ALTER TABLE digests ADD COLUMN step2_budget_capped INTEGER NOT NULL DEFAULT 0"))
                 conn.commit()
+            if "news_window_days" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN news_window_days INTEGER NOT NULL DEFAULT 3"))
+                conn.commit()
+            if "news_window_day_kind" not in names:
+                conn.execute(
+                    text("ALTER TABLE digests ADD COLUMN news_window_day_kind VARCHAR(16) NOT NULL DEFAULT 'working'")
+                )
+                conn.commit()
+            if "step4_selected_image_variant" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN step4_selected_image_variant INTEGER"))
+                conn.commit()
+            rows = conn.execute(text("PRAGMA table_info(digests)")).fetchall()
+            names = {row[1] for row in rows}
+            if "proxyapi_balance_session_start" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_balance_session_start REAL"))
+                conn.commit()
+            if "proxyapi_budget_used_session_start" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_session_start REAL"))
+                conn.commit()
+            if "proxyapi_balance_before" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_balance_before REAL"))
+                conn.commit()
+            if "proxyapi_balance_after" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_balance_after REAL"))
+                conn.commit()
+            if "proxyapi_budget_used_before" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_before REAL"))
+                conn.commit()
+            if "proxyapi_budget_used_after" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_after REAL"))
+                conn.commit()
+            if "proxyapi_spend_days" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE proxyapi_spend_days (
+                            day DATE PRIMARY KEY,
+                            opening_balance REAL,
+                            last_balance REAL,
+                            opening_budget_used REAL,
+                            last_budget_used REAL
+                        )
+                        """
+                    )
+                )
+                conn.commit()
         return
     from sqlalchemy import inspect
 
@@ -85,6 +133,59 @@ def ensure_digest_schema_migrations() -> None:
     if "step2_budget_capped" not in cols:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE digests ADD COLUMN step2_budget_capped BOOLEAN NOT NULL DEFAULT false"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "news_window_days" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN news_window_days INTEGER NOT NULL DEFAULT 3"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "news_window_day_kind" not in cols:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE digests ADD COLUMN news_window_day_kind VARCHAR(16) NOT NULL DEFAULT 'working'")
+            )
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "step4_selected_image_variant" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN step4_selected_image_variant INTEGER"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "proxyapi_balance_session_start" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_balance_session_start DOUBLE PRECISION"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "proxyapi_budget_used_session_start" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_session_start DOUBLE PRECISION"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "proxyapi_balance_before" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_balance_before DOUBLE PRECISION"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "proxyapi_balance_after" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_balance_after DOUBLE PRECISION"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "proxyapi_budget_used_before" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_before DOUBLE PRECISION"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "proxyapi_budget_used_after" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_after DOUBLE PRECISION"))
+    if not insp.has_table("proxyapi_spend_days"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE proxyapi_spend_days (
+                        day DATE PRIMARY KEY,
+                        opening_balance DOUBLE PRECISION,
+                        last_balance DOUBLE PRECISION,
+                        opening_budget_used DOUBLE PRECISION,
+                        last_budget_used DOUBLE PRECISION
+                    )
+                    """
+                )
+            )
 
 
 def get_db() -> Generator:

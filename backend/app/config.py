@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     step1_max_cost_rub: float = 50.0
     # step_2 ordering: при суммарном расходе шага >= лимита OrderingAgent не вызывается.
     step2_max_cost_rub: float = 50.0
+  # После «Применить порядок» / AI-порядка автоматически запускать шаг 3 (аналитика).
+  auto_run_step3_after_order: bool = True
+  # Генерация обложек на шаге 4 (gpt-image через ProxyAPI).
+  enable_step4_image_generation: bool = False
 
     log_level: str = "INFO"
     log_dir: Path = BASE_DIR / "logs"

@@ -18,6 +18,9 @@ PRICING_RUB: dict[str, ModelPricing] = {
 
 
 # Минимально достаточные рекомендации для текущего продукта (цель: полноценный дайджест с экономией).
+# Прямой вызов ProxyAPI (без Crew) для оптимального порядка пятёрки на шаге 2.
+STEP2_AI_ORDER_MODEL = "gpt-4.1-mini"
+
 AGENT_MODEL_RECOMMENDATIONS: dict[str, str] = {
     "NewsResearchAgent": "gpt-4.1-mini",
     "SourceVerificationAgent": "gpt-4.1-mini",

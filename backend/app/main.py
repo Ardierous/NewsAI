@@ -39,6 +39,17 @@ async def lifespan(_: FastAPI):
     logger.info("Старт приложения: создание таблиц БД и планировщика")
     Base.metadata.create_all(bind=engine)
     ensure_digest_schema_migrations()
+    try:
+        from app.database import SessionLocal
+        from app.services.cost_tracker import ProxyApiCostTracker, touch_proxyapi_spend_day
+
+        db = SessionLocal()
+        try:
+            touch_proxyapi_spend_day(db, ProxyApiCostTracker().get_balance_snapshot())
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("Не удалось инициализировать снимок баланса ProxyAPI за день", exc_info=True)
     scheduler.add_job(scheduled_digest_generation, "cron", hour=8, minute=0, id="daily_digest_job", replace_existing=True)
     scheduler.start()
     yield
