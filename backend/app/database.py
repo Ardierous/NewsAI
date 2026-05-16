@@ -94,6 +94,87 @@ def ensure_digest_schema_migrations() -> None:
                     )
                 )
                 conn.commit()
+            if "step1_discovered_news" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE step1_discovered_news (
+                            id INTEGER PRIMARY KEY,
+                            digest_id INTEGER NOT NULL,
+                            source_stage VARCHAR(40) NOT NULL DEFAULT 'unknown',
+                            title VARCHAR(500) NOT NULL,
+                            url VARCHAR(1000) NOT NULL,
+                            source VARCHAR(255) NOT NULL DEFAULT '',
+                            published_at VARCHAR(100) NOT NULL DEFAULT '',
+                            headline_editorial_ok INTEGER NOT NULL DEFAULT 0,
+                            link_status INTEGER NOT NULL DEFAULT 0,
+                            page_verified INTEGER NOT NULL DEFAULT 0,
+                            reject_codes TEXT NOT NULL DEFAULT '',
+                            verification_comment TEXT NOT NULL DEFAULT '',
+                            manual_score INTEGER,
+                            manual_reason VARCHAR(64),
+                            manual_reason_other TEXT,
+                            rated_at DATETIME,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            FOREIGN KEY(digest_id) REFERENCES digests(id) ON DELETE CASCADE
+                        )
+                        """
+                    )
+                )
+                conn.commit()
+            if "step1_discovery_runs" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE step1_discovery_runs (
+                            id INTEGER PRIMARY KEY,
+                            digest_id INTEGER NOT NULL,
+                            run_number INTEGER NOT NULL,
+                            started_at DATETIME NOT NULL,
+                            pool_formed_at DATETIME,
+                            news_count INTEGER NOT NULL DEFAULT 0,
+                            FOREIGN KEY(digest_id) REFERENCES digests(id) ON DELETE CASCADE
+                        )
+                        """
+                    )
+                )
+                conn.commit()
+            rows_sd = conn.execute(text("PRAGMA table_info(step1_discovered_news)")).fetchall()
+            sd_names = {row[1] for row in rows_sd}
+            if sd_names and "discovery_run_id" not in sd_names:
+                conn.execute(text("ALTER TABLE step1_discovered_news ADD COLUMN discovery_run_id INTEGER"))
+                conn.commit()
+            if "step1_manual_rating_log" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE step1_manual_rating_log (
+                            id INTEGER PRIMARY KEY,
+                            discovery_run_id INTEGER NOT NULL,
+                            digest_id INTEGER NOT NULL,
+                            pool_date DATE NOT NULL,
+                            run_number INTEGER NOT NULL,
+                            discovered_news_id INTEGER,
+                            title VARCHAR(500) NOT NULL,
+                            url VARCHAR(1000) NOT NULL,
+                            published_at VARCHAR(100) NOT NULL DEFAULT '',
+                            manual_score INTEGER NOT NULL,
+                            manual_reason VARCHAR(64),
+                            manual_reason_other TEXT,
+                            rated_at DATETIME NOT NULL,
+                            FOREIGN KEY(discovery_run_id) REFERENCES step1_discovery_runs(id) ON DELETE CASCADE,
+                            FOREIGN KEY(digest_id) REFERENCES digests(id) ON DELETE CASCADE
+                        )
+                        """
+                    )
+                )
+                conn.commit()
         return
     from sqlalchemy import inspect
 
@@ -182,6 +263,82 @@ def ensure_digest_schema_migrations() -> None:
                         last_balance DOUBLE PRECISION,
                         opening_budget_used DOUBLE PRECISION,
                         last_budget_used DOUBLE PRECISION
+                    )
+                    """
+                )
+            )
+    if not insp.has_table("step1_discovered_news"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE step1_discovered_news (
+                        id SERIAL PRIMARY KEY,
+                        digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                        source_stage VARCHAR(40) NOT NULL DEFAULT 'unknown',
+                        title VARCHAR(500) NOT NULL,
+                        url VARCHAR(1000) NOT NULL,
+                        source VARCHAR(255) NOT NULL DEFAULT '',
+                        published_at VARCHAR(100) NOT NULL DEFAULT '',
+                        headline_editorial_ok BOOLEAN NOT NULL DEFAULT false,
+                        link_status BOOLEAN NOT NULL DEFAULT false,
+                        page_verified BOOLEAN NOT NULL DEFAULT false,
+                        reject_codes TEXT NOT NULL DEFAULT '',
+                        verification_comment TEXT NOT NULL DEFAULT '',
+                        manual_score INTEGER,
+                        manual_reason VARCHAR(64),
+                        manual_reason_other TEXT,
+                        rated_at TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+    if not insp.has_table("step1_discovery_runs"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE step1_discovery_runs (
+                        id SERIAL PRIMARY KEY,
+                        digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                        run_number INTEGER NOT NULL,
+                        started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        pool_formed_at TIMESTAMP,
+                        news_count INTEGER NOT NULL DEFAULT 0
+                    )
+                    """
+                )
+            )
+    if insp.has_table("step1_discovered_news"):
+        sd_cols = {c["name"] for c in insp.get_columns("step1_discovered_news")}
+        if "discovery_run_id" not in sd_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "ALTER TABLE step1_discovered_news "
+                        "ADD COLUMN discovery_run_id INTEGER REFERENCES step1_discovery_runs(id) ON DELETE SET NULL"
+                    )
+                )
+    if not insp.has_table("step1_manual_rating_log"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE step1_manual_rating_log (
+                        id SERIAL PRIMARY KEY,
+                        discovery_run_id INTEGER NOT NULL REFERENCES step1_discovery_runs(id) ON DELETE CASCADE,
+                        digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                        pool_date DATE NOT NULL,
+                        run_number INTEGER NOT NULL,
+                        discovered_news_id INTEGER,
+                        title VARCHAR(500) NOT NULL,
+                        url VARCHAR(1000) NOT NULL,
+                        published_at VARCHAR(100) NOT NULL DEFAULT '',
+                        manual_score INTEGER NOT NULL,
+                        manual_reason VARCHAR(64),
+                        manual_reason_other TEXT,
+                        rated_at TIMESTAMP NOT NULL DEFAULT NOW()
                     )
                     """
                 )

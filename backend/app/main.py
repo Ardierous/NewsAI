@@ -50,6 +50,17 @@ async def lifespan(_: FastAPI):
             db.close()
     except Exception:
         logger.warning("Не удалось инициализировать снимок баланса ProxyAPI за день", exc_info=True)
+    try:
+        from app.database import SessionLocal
+        from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
+
+        db = SessionLocal()
+        try:
+            sync_step1_manual_ratings_export(db, settings.step1_manual_ratings_path)
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("Не удалось собрать файл ручных оценок шага 1 при старте", exc_info=True)
     scheduler.add_job(scheduled_digest_generation, "cron", hour=8, minute=0, id="daily_digest_job", replace_existing=True)
     scheduler.start()
     yield
@@ -84,7 +95,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     logger.exception("Необработанная ошибка | %s %s", request.method, request.url.path)
-    return JSONResponse(status_code=500, content={"detail": "Internal server error"})
+    detail = str(exc).strip() or "Внутренняя ошибка сервера"
+    if len(detail) > 500:
+        detail = detail[:497] + "..."
+    return JSONResponse(status_code=500, content={"detail": detail})
 
 
 @app.get("/health")

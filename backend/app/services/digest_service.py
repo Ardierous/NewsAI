@@ -19,8 +19,22 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS, PRICING_RUB, STEP2_AI_ORDER_MODEL
-from app.crew.workflow import CrewWorkflow, current_msk_iso
-from app.models import Analytics, Asset, Digest, FinalOutput, LlmCostRecord, NewsCandidate, QualityCheck, SelectedNews
+from app.crew.workflow import CrewWorkflow, complete_analytics_result, current_msk_iso
+from app.services.platform_assembly import digest_docx_filename, format_digest_date_ru
+from app.models import (
+    Analytics,
+    Asset,
+    Digest,
+    FinalOutput,
+    LlmCostRecord,
+    NewsCandidate,
+    QualityCheck,
+    SelectedNews,
+    Step1DiscoveredNews,
+    Step1DiscoveryRun,
+    Step1ManualRatingLog,
+)
+from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 from app.proxyapi_client import ProxyApiClient
 from app.services.cost_tracker import ProxyApiCostTracker, record_today_balance, proxyapi_spent_today_rub
 from app.services.export_service import build_docx
@@ -48,6 +62,20 @@ STEP1_TARGET_VERIFIED = 10
 STEP1_MIN_VERIFIED = 5
 STEP1_SUPPLEMENT_MAX_ROUNDS = 5
 STEP1_PRE_CREW_SUPPLEMENT_ROUNDS = 3
+
+ASSET_PROXYAPI_BUDGET_ALERT = "step1_proxyapi_budget_exceeded"
+PROXYAPI_BUDGET_USER_MESSAGE = (
+    "Исчерпан бюджет API-ключа ProxyAPI (ошибка 402). "
+    "Пополните счёт в личном кабинете proxyapi.ru "
+    "или измените ограничения бюджета ключа в настройках ProxyAPI."
+)
+STEP1_DISCOVERED_REASON_CODES = {
+    "published_out_of_range",
+    "http_unreachable",
+    "url_redirect_mismatch",
+    "off_topic_not_ai",
+    "other",
+}
 
 REJECT_REASON_PREFIX = "REJECT_REASON:"
 AGGREGATOR_HOST_MARKERS = (
@@ -1378,9 +1406,75 @@ class DigestService:
         live = self._digest_proxyapi_spent_rub(digest)
         return round(live, 4) if live > 0 else None
 
+    def _proxyapi_budget_exceeded(self) -> bool:
+        return getattr(self.proxy, "last_error_kind", None) == "budget_exceeded"
+
+    def _proxyapi_budget_depleted_from_api(self) -> bool:
+        snap = self.cost_tracker.get_balance_snapshot()
+        if snap.budget_limit is None or snap.budget_used is None:
+            return False
+        return float(snap.budget_used) >= float(snap.budget_limit) - 1e-6
+
+    def _persist_proxyapi_budget_alert(self, digest_id: int) -> None:
+        self.db.query(Asset).filter(
+            Asset.digest_id == digest_id,
+            Asset.type == ASSET_PROXYAPI_BUDGET_ALERT,
+        ).delete()
+        self.db.add(
+            Asset(
+                digest_id=digest_id,
+                type=ASSET_PROXYAPI_BUDGET_ALERT,
+                path="",
+                prompt=PROXYAPI_BUDGET_USER_MESSAGE,
+            )
+        )
+        self.db.commit()
+
+    def _clear_proxyapi_budget_alert(self, digest_id: int) -> None:
+        self.db.query(Asset).filter(
+            Asset.digest_id == digest_id,
+            Asset.type == ASSET_PROXYAPI_BUDGET_ALERT,
+        ).delete()
+
+    def _raise_proxyapi_budget_exceeded(self, digest_id: int) -> None:
+        logger.warning("Шаг 1: исчерпан бюджет ключа ProxyAPI | digest_id=%s", digest_id)
+        self._persist_proxyapi_budget_alert(digest_id)
+        raise HTTPException(status_code=402, detail=PROXYAPI_BUDGET_USER_MESSAGE)
+
+    def digest_proxyapi_budget_exceeded(self, digest_id: int) -> bool:
+        row = (
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest_id, Asset.type == ASSET_PROXYAPI_BUDGET_ALERT)
+            .first()
+        )
+        return row is not None
+
+    def proxyapi_budget_alert_message(self, digest_id: int) -> str | None:
+        row = (
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest_id, Asset.type == ASSET_PROXYAPI_BUDGET_ALERT)
+            .first()
+        )
+        if row and (row.prompt or "").strip():
+            return row.prompt.strip()
+        return PROXYAPI_BUDGET_USER_MESSAGE if row else None
+
+    def digest_proxyapi_budget_blocked_message(self, digest_id: int) -> str | None:
+        saved = self.proxyapi_budget_alert_message(digest_id)
+        if saved:
+            return saved
+        if self._proxyapi_budget_depleted_from_api():
+            return PROXYAPI_BUDGET_USER_MESSAGE
+        return None
+
     def build_budget_notices(self, digest: Digest) -> list[str]:
         """Человекочитаемые предупреждения о лимите расходов для UI."""
         notices: list[str] = []
+        budget_msg = self.proxyapi_budget_alert_message(digest.id)
+        if budget_msg:
+            notices.insert(0, budget_msg)
+        elif self._proxyapi_budget_depleted_from_api():
+            notices.insert(0, PROXYAPI_BUDGET_USER_MESSAGE)
         if digest.step1_budget_capped:
             spent = self.digest_proxyapi_cost_rub(digest) or self._digest_proxyapi_spent_rub(digest)
             lim = self.settings.step1_max_cost_rub
@@ -1575,6 +1669,189 @@ class DigestService:
             self.db.add(entity)
         self.db.commit()
 
+    def _start_step1_discovery_run(self, digest: Digest) -> Step1DiscoveryRun:
+        last = (
+            self.db.query(Step1DiscoveryRun)
+            .filter(Step1DiscoveryRun.digest_id == digest.id)
+            .order_by(Step1DiscoveryRun.run_number.desc())
+            .first()
+        )
+        run_number = (last.run_number + 1) if last else 1
+        run = Step1DiscoveryRun(
+            digest_id=digest.id,
+            run_number=run_number,
+            started_at=datetime.utcnow(),
+        )
+        self.db.add(run)
+        self.db.commit()
+        self.db.refresh(run)
+        return run
+
+    def _digest_pool_date(self, digest: Digest) -> date:
+        raw = digest.date
+        if isinstance(raw, datetime):
+            return raw.date()
+        return raw
+
+    def _persist_step1_discovered_news(
+        self,
+        digest_id: int,
+        discovery_run_id: int,
+        rows_by_fp: dict[str, dict[str, Any]],
+    ) -> None:
+        if not rows_by_fp:
+            return
+        prev_rows = (
+            self.db.query(Step1DiscoveredNews)
+            .filter(Step1DiscoveredNews.digest_id == digest_id)
+            .all()
+        )
+        prev_eval_by_url = {
+            str(row.url).strip().lower(): (
+                row.manual_score,
+                row.manual_reason,
+                row.manual_reason_other,
+                row.rated_at,
+            )
+            for row in prev_rows
+        }
+        run = self.db.query(Step1DiscoveryRun).filter(Step1DiscoveryRun.id == discovery_run_id).first()
+        if run is None:
+            return
+        self.db.query(Step1DiscoveredNews).filter(Step1DiscoveredNews.digest_id == digest_id).delete()
+        ordered = sorted(rows_by_fp.values(), key=lambda x: int(x.get("original_number") or 999999))
+        seen: set[str] = set()
+        saved = 0
+        for item in ordered[:300]:
+            url = str(item.get("url") or "").strip()
+            if not url.startswith("http"):
+                continue
+            key = url.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            title = str(item.get("title") or "").strip()
+            if len(title) < 4:
+                title = f"Страница: {_host_from_url(url)}"
+            reject_codes = _reject_reason_codes(str(item.get("verification_comment") or ""))
+            prev = prev_eval_by_url.get(key)
+            saved += 1
+            self.db.add(
+                Step1DiscoveredNews(
+                    digest_id=digest_id,
+                    discovery_run_id=discovery_run_id,
+                    source_stage=str(item.get("source_stage") or "step1"),
+                    title=title[:500],
+                    url=url[:1000],
+                    source=str(item.get("source") or _host_from_url(url))[:255],
+                    published_at=str(item.get("published_at") or PUBLISHED_AT_UNDEFINED)[:100],
+                    headline_editorial_ok=bool(item.get("headline_editorial_ok", False)),
+                    link_status=bool(item.get("link_status", False)),
+                    page_verified=bool(item.get("headline_editorial_ok", False)) and bool(item.get("link_status", False)),
+                    reject_codes=",".join(reject_codes),
+                    verification_comment=str(item.get("verification_comment") or ""),
+                    manual_score=prev[0] if prev else None,
+                    manual_reason=prev[1] if prev else None,
+                    manual_reason_other=prev[2] if prev else None,
+                    rated_at=prev[3] if prev else None,
+                )
+            )
+        run.pool_formed_at = datetime.utcnow()
+        run.news_count = saved
+        self.db.commit()
+        try:
+            sync_step1_manual_ratings_export(self.db, self.settings.step1_manual_ratings_path)
+        except Exception:
+            logger.exception("Не удалось обновить файл ручных оценок шага 1")
+
+    def _append_manual_rating_log(self, row: Step1DiscoveredNews, digest: Digest) -> None:
+        if row.discovery_run_id is None:
+            return
+        run = self.db.query(Step1DiscoveryRun).filter(Step1DiscoveryRun.id == row.discovery_run_id).first()
+        if run is None:
+            return
+        pool_date = self._digest_pool_date(digest)
+        url_key = str(row.url).strip().lower()
+        run_logs = (
+            self.db.query(Step1ManualRatingLog)
+            .filter(Step1ManualRatingLog.discovery_run_id == run.id)
+            .all()
+        )
+        existing = next((x for x in run_logs if str(x.url).strip().lower() == url_key), None)
+        if existing is not None:
+            existing.discovered_news_id = row.id
+            existing.title = row.title
+            existing.published_at = row.published_at
+            existing.manual_score = int(row.manual_score or 0)
+            existing.manual_reason = row.manual_reason
+            existing.manual_reason_other = row.manual_reason_other
+            existing.rated_at = row.rated_at or datetime.utcnow()
+        else:
+            self.db.add(
+                Step1ManualRatingLog(
+                    discovery_run_id=run.id,
+                    digest_id=digest.id,
+                    pool_date=pool_date,
+                    run_number=run.run_number,
+                    discovered_news_id=row.id,
+                    title=row.title,
+                    url=row.url,
+                    published_at=row.published_at,
+                    manual_score=int(row.manual_score or 0),
+                    manual_reason=row.manual_reason,
+                    manual_reason_other=row.manual_reason_other,
+                    rated_at=row.rated_at or datetime.utcnow(),
+                )
+            )
+        self.db.commit()
+
+    def save_step1_discovered_feedback(
+        self,
+        *,
+        digest_id: int,
+        news_id: int,
+        score: int,
+        reason: str | None,
+        reason_other: str | None,
+    ) -> Step1DiscoveredNews:
+        row = (
+            self.db.query(Step1DiscoveredNews)
+            .filter(
+                Step1DiscoveredNews.id == news_id,
+                Step1DiscoveredNews.digest_id == digest_id,
+            )
+            .first()
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Новость из полного пула не найдена.")
+        if score not in (1, 2, 3):
+            raise HTTPException(status_code=400, detail="Оценка должна быть от 1 до 3.")
+        clean_reason = (reason or "").strip() or None
+        clean_other = (reason_other or "").strip() or None
+        if score < 3:
+            if clean_reason not in STEP1_DISCOVERED_REASON_CODES:
+                raise HTTPException(status_code=400, detail="Для оценок ниже 3 укажите причину из списка.")
+            if clean_reason == "other" and not clean_other:
+                raise HTTPException(status_code=400, detail="Для причины «другое» заполните пояснение.")
+        else:
+            clean_reason = None
+            clean_other = None
+        if clean_reason != "other":
+            clean_other = None
+        row.manual_score = score
+        row.manual_reason = clean_reason
+        row.manual_reason_other = clean_other
+        row.rated_at = datetime.utcnow()
+        digest = self.get_digest(digest_id)
+        self.db.commit()
+        self.db.refresh(row)
+        self._append_manual_rating_log(row, digest)
+        try:
+            sync_step1_manual_ratings_export(self.db, self.settings.step1_manual_ratings_path)
+        except Exception:
+            logger.exception("Не удалось обновить файл ручных оценок шага 1")
+        return row
+
     def run_step_1(self, digest_id: int, manual_urls: list[str], *, rebuild: bool = False) -> list[NewsCandidate]:
         digest = self.get_digest(digest_id)
         if digest.status == STATUS_DRAFT:
@@ -1625,8 +1902,16 @@ class DigestService:
                 digest.id,
                 len(normalized_manual_urls),
             )
-        self._snapshot_proxyapi_before(digest, reset=(rebuild or past_step1))
+        discovered_by_fp: dict[str, dict[str, Any]] = {}
+        discovery_run = self._start_step1_discovery_run(digest)
         try:
+            self._snapshot_proxyapi_before(digest, reset=(rebuild or past_step1))
+            if (
+                self.settings.enable_web_fetch
+                and not normalized_manual_urls
+                and self.digest_proxyapi_budget_exceeded(digest.id)
+            ):
+                self._raise_proxyapi_budget_exceeded(digest.id)
             now_msk = current_msk_iso()
             candidates: list[dict[str, Any]] = []
             verify_candidates: list[dict[str, Any]] = []
@@ -1638,7 +1923,11 @@ class DigestService:
             def snapshot_preview_row(row: dict[str, Any]) -> None:
                 fp = _url_fingerprint(str(row.get("url", "")).strip())
                 if fp:
-                    preview_by_fp[fp] = dict(row)
+                    snap = dict(row)
+                    if not snap.get("source_stage"):
+                        snap["source_stage"] = "step1"
+                    preview_by_fp[fp] = snap
+                    discovered_by_fp[fp] = dict(snap)
     
             manual_candidates = self._build_manual_candidates(digest, normalized_manual_urls, now_msk)
             failed_manual = [str(x["url"])[:220] for x in manual_candidates if not x.get("page_verified")]
@@ -1700,16 +1989,26 @@ class DigestService:
                 append_verified(m)
     
             if self.settings.enable_web_fetch and len(verified_pool) < STEP1_TARGET_VERIFIED:
-                for item in self._collect_search_verified_candidates(
-                    digest.id,
-                    digest,
-                    now_msk,
-                    seen_fp,
-                    limit=max(STEP1_TARGET_VERIFIED, STEP1_MIN_VERIFIED * 2),
-                    on_row=snapshot_preview_row,
-                ):
-                    append_verified(item)
-    
+                try:
+                    for item in self._collect_search_verified_candidates(
+                        digest.id,
+                        digest,
+                        now_msk,
+                        seen_fp,
+                        limit=max(STEP1_TARGET_VERIFIED, STEP1_MIN_VERIFIED * 2),
+                        on_row=snapshot_preview_row,
+                    ):
+                        append_verified(item)
+                except Exception:
+                    web_flow_available = False
+                    logger.exception("Шаг 1: сбор URL через веб-поиск не выполнен")
+            if (
+                self._proxyapi_budget_exceeded()
+                and len(verified_pool) < STEP1_MIN_VERIFIED
+                and not normalized_manual_urls
+            ):
+                self._raise_proxyapi_budget_exceeded(digest.id)
+
             if self.settings.enable_web_fetch and len(verified_pool) < STEP1_MIN_VERIFIED:
                 self._step1_run_web_supplement_rounds(
                     digest,
@@ -1745,6 +2044,8 @@ class DigestService:
                 except Exception:
                     web_flow_available = False
                     logger.exception("Шаг 1: веб-поиск недоступен, переключение на ручные ссылки")
+                    if self._proxyapi_budget_exceeded() and not normalized_manual_urls:
+                        self._raise_proxyapi_budget_exceeded(digest.id)
                     if not normalized_manual_urls:
                         raise HTTPException(
                             status_code=400,
@@ -1845,6 +2146,8 @@ class DigestService:
                         " Проверьте PROXYAPI_API_KEY и веб-поиск (PROXYAPI_WEB_SEARCH_ENABLED=true) "
                         "или добавьте SERPAPI_API_KEY / TAVILY_API_KEY в backend/.env."
                     )
+                if self._proxyapi_budget_exceeded() or self.digest_proxyapi_budget_exceeded(digest.id):
+                    self._raise_proxyapi_budget_exceeded(digest.id)
                 raise HTTPException(
                     status_code=502,
                     detail=(
@@ -1856,6 +2159,8 @@ class DigestService:
                     ),
                 )
     
+            self._clear_proxyapi_budget_alert(digest.id)
+
             # Кандидатов удаляем только перед успешной записью: промежуточные commit не должны оставлять пустой список при 502.
             self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
     
@@ -1914,6 +2219,8 @@ class DigestService:
             return entities
 
         finally:
+            if discovered_by_fp:
+                self._persist_step1_discovered_news(digest.id, discovery_run.id, discovered_by_fp)
             self.db.refresh(digest)
             self._snapshot_proxyapi_after(digest)
             self._record_proxyapi_step_cost(
@@ -2183,6 +2490,14 @@ class DigestService:
             model=AGENT_MODEL_RECOMMENDATIONS["AnalyticsAgent"],
         ):
             result = self.workflow.run_analytics(payload)
+        result = complete_analytics_result(result, payload)
+        if len(result.get("items", [])) != len(payload):
+            logger.warning(
+                "Шаг 3: после нормализации аналитики ожидалось %s блоков, получено %s | digest_id=%s",
+                len(payload),
+                len(result.get("items", [])),
+                digest.id,
+            )
         for item in result.get("items", []):
             candidate = self.db.query(NewsCandidate).filter(NewsCandidate.id == item["candidate_id"]).first()
             if not candidate:
@@ -2238,6 +2553,17 @@ class DigestService:
             prompt=" ".join(tags),
         )
         self.db.add(hashtag_asset)
+        overall = str(result.get("overall_analysis") or "").strip()
+        if overall:
+            self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "overall_analysis").delete()
+            self.db.add(
+                Asset(
+                    digest_id=digest.id,
+                    type="overall_analysis",
+                    path="",
+                    prompt=overall,
+                )
+            )
 
         digest.status = STATUS_ANALYTICS
         digest.current_step = STATUS_ANALYTICS
@@ -2267,15 +2593,32 @@ class DigestService:
             analytics = next((a for a in analytics_rows if a.candidate_id == row.candidate_id), None)
             if not candidate or not analytics:
                 continue
+            essence = str(analytics.essence or "").strip()
+            comment = str(analytics.comment or "").strip()
+            analysis = str(analytics.analysis or "").strip()
             selected_payload.append(
                 {
                     "title": candidate.title,
                     "url": candidate.url,
                     "source": candidate.source,
-                    "summary": f"{analytics.essence} {analytics.analysis}",
+                    "essence": essence,
+                    "comment": comment,
+                    "summary_short": f"{essence} {comment}".strip(),
+                    "summary": f"{essence} {analysis}".strip(),
                 }
             )
         return selected_payload
+
+    def _step4_overall_analysis(self, digest: Digest) -> str:
+        asset = (
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest.id, Asset.type == "overall_analysis")
+            .order_by(Asset.id.desc())
+            .first()
+        )
+        if asset and asset.prompt:
+            return asset.prompt.strip()
+        return ""
 
     def _step4_hashtags(self, digest: Digest) -> list[str]:
         hashtags_asset = (
@@ -2413,7 +2756,8 @@ class DigestService:
             "hook_variant": hook,
             "selected_news": selected_payload,
             "hashtags": hashtags,
-            "date": digest.date.isoformat(),
+            "date": format_digest_date_ru(digest.date),
+            "overall_analysis": self._step4_overall_analysis(digest),
         }
         logger.info(
             "Шаг 4: тексты площадок | digest_id=%s hook=%s platforms=%s",
@@ -2471,7 +2815,8 @@ class DigestService:
                     "selected_news": selected_payload,
                     "hashtags": hashtags,
                     "fix_mode": True,
-                    "date": digest.date.isoformat(),
+                    "date": format_digest_date_ru(digest.date),
+                    "overall_analysis": self._step4_overall_analysis(digest),
                 }
                 regenerated = self.workflow.run_platform_writer(repair_payload, platforms=platform_keys)
                 for row in (
@@ -2488,7 +2833,8 @@ class DigestService:
         digest.current_step = STATUS_FINAL
         self.db.commit()
 
-        docx_path = self.settings.docx_dir / f"digest_{digest.id}.docx"
+        docx_name = digest_docx_filename(digest.date, digest.id)
+        docx_path = self.settings.docx_dir / docx_name
         build_docx(self.db, digest, docx_path)
         self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "docx").delete()
         self.db.add(Asset(digest_id=digest.id, type="docx", path=str(docx_path), prompt="final export"))

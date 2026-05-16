@@ -46,6 +46,12 @@ class Step1RunRequest(BaseModel):
     rebuild: bool = False
 
 
+class Step1DiscoveredFeedbackRequest(BaseModel):
+    score: int = Field(ge=1, le=3)
+    reason: Literal["published_out_of_range", "http_unreachable", "url_redirect_mismatch", "off_topic_not_ai", "other"] | None = None
+    reason_other: str | None = None
+
+
 class CandidateOut(BaseModel):
     id: int
     original_number: int
@@ -112,6 +118,24 @@ class SelectedNewsOut(BaseModel):
     total_score: int
 
 
+class Step1DiscoveredNewsOut(BaseModel):
+    id: int
+    title: str
+    url: str
+    source: str
+    published_at: str
+    source_stage: str
+    link_status: bool = False
+    headline_editorial_ok: bool = False
+    page_verified: bool = False
+    reject_codes: list[str] = Field(default_factory=list)
+    verification_comment: str = ""
+    manual_score: int | None = None
+    manual_reason: str | None = None
+    manual_reason_other: str | None = None
+    rated_at: datetime | None = None
+
+
 class AnalyticsItemOut(BaseModel):
     candidate_id: int
     source_name: str
@@ -158,8 +182,11 @@ class AgentModelRecommendationOut(BaseModel):
 class DigestDetail(BaseModel):
     digest: DigestItem
     candidates: list[CandidateOut]
+    discovered_news: list[Step1DiscoveredNewsOut] = Field(default_factory=list)
     candidates_are_demo_fallback: bool = False
     budget_notices: list[str] = Field(default_factory=list)
+    proxyapi_budget_exceeded: bool = False
+    proxyapi_budget_message: str | None = None
     rejected_reasons_summary: dict[str, int] = Field(default_factory=dict)
     selected: list[SelectedNewsOut]
     analytics: list[AnalyticsItemOut]

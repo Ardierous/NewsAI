@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AsyncProgress, StepProgressBar } from "./AsyncProgress";
 import {
   WizardStepStatus,
+  getStep1PhaseText,
   getStep3PhaseText,
   getStep4ImagesPhaseText,
   getStep4PhaseText,
@@ -14,6 +15,7 @@ import {
   type Step3ProgressMode,
 } from "./WizardStepStatus";
 import { DigestHintsAccordion } from "./DigestHintsAccordion";
+import { isProxyapiBudgetError, ProxyapiBudgetAlert } from "./ProxyapiBudgetAlert";
 import { api, assetUrl } from "../lib/api";
 
 const PLATFORM_ORDER = ["telegram", "max", "vk", "dzen"] as const;
@@ -133,6 +135,14 @@ const REJECT_REASON_LABELS: Record<string, string> = {
   unknown_reject: "точная причина в данных не указана",
 };
 
+const MANUAL_SCORE_REASON_OPTIONS: { value: string; label: string }[] = [
+  { value: "published_out_of_range", label: "дата не в диапазоне" },
+  { value: "http_unreachable", label: "ссылка не открылась" },
+  { value: "url_redirect_mismatch", label: "ссылка открылась на другую страницу" },
+  { value: "off_topic_not_ai", label: "не про ИИ" },
+  { value: "other", label: "другое" },
+];
+
 /** Свёрнутый блок «зачем / как устроено» — мелкий summary и тело. */
 function WizardWhy({ summary = "Подробнее: зачем так и как устроено", children }: { summary?: string; children: ReactNode }) {
   return (
@@ -175,6 +185,8 @@ async function copyPlainTextToClipboard(text: string): Promise<void> {
 type Props = { digestId: number };
 
 type RunningStepKey = "init" | "0" | "1" | "2pick" | "2order" | "3" | "4" | "4img" | "4txt";
+type ManualScoreReason = "published_out_of_range" | "http_unreachable" | "url_redirect_mismatch" | "off_topic_not_ai" | "other";
+type DiscoveredDraft = { score: "" | "1" | "2" | "3"; reason: "" | ManualScoreReason; reasonOther: string };
 
 /** Соответствие текста прогресса карточке шага (для полосы у шага). */
 function parseRunningStepFromLabel(label: string): RunningStepKey | null {
@@ -212,15 +224,25 @@ export function DigestWizard({ digestId }: Props) {
   const [draggedId, setDraggedId] = useState<number | null>(null);
   const [copyStatus, setCopyStatus] = useState<Record<string, "idle" | "ok" | "err">>({});
   const copyTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const step1CardRef = useRef<HTMLDivElement | null>(null);
   const step2CardRef = useRef<HTMLDivElement | null>(null);
   const step3CardRef = useRef<HTMLDivElement | null>(null);
   const step4CardRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToStep2Ref = useRef(false);
   const step3ModeRef = useRef<Step3ProgressMode>("analytics");
+  const [step1Elapsed, setStep1Elapsed] = useState(0);
   const [step3Elapsed, setStep3Elapsed] = useState(0);
   const [step4Elapsed, setStep4Elapsed] = useState(0);
   const [newsWindowDays, setNewsWindowDays] = useState(3);
   const [newsWindowDayKind, setNewsWindowDayKind] = useState<"calendar" | "working">("working");
+  const [showAllFoundNews, setShowAllFoundNews] = useState(false);
+  const [discoveredDrafts, setDiscoveredDrafts] = useState<Record<number, DiscoveredDraft>>({});
+  const [discoveredSaveState, setDiscoveredSaveState] = useState<
+    Record<number, { saving?: boolean; ok?: boolean; error?: string; exportPath?: string }>
+  >({});
+  const [ratingsExportPath, setRatingsExportPath] = useState("");
+  const [ratingsDownloadBusy, setRatingsDownloadBusy] = useState(false);
+  const [ratingsDownloadError, setRatingsDownloadError] = useState("");
 
   const sortedOutputs = useMemo(() => {
     const list = [...(digest?.outputs || [])];
@@ -260,7 +282,7 @@ export function DigestWizard({ digestId }: Props) {
   }, []);
 
   const loadDigest = useCallback(
-    async (opts?: { skipProgress?: boolean; label?: string }) => {
+    async (opts?: { skipProgress?: boolean; label?: string; preserveError?: boolean }) => {
       if (opts?.label) {
         setProgressLabel(opts.label);
         const rk = parseRunningStepFromLabel(opts.label);
@@ -268,7 +290,7 @@ export function DigestWizard({ digestId }: Props) {
       }
       if (!opts?.skipProgress) setLoading(true);
       try {
-        setError("");
+        if (!opts?.preserveError) setError("");
         const data = await api.getDigest(digestId);
         setDigest(data);
         if (data.selected?.length) {
@@ -354,6 +376,13 @@ export function DigestWizard({ digestId }: Props) {
     () => [...(digest?.candidates || [])].sort((a, b) => a.original_number - b.original_number),
     [digest],
   );
+  const discoveredNewsSorted = useMemo(
+    () =>
+      [...(digest?.discovered_news || [])].sort((a: any, b: any) =>
+        String(a.published_at || "").localeCompare(String(b.published_at || "")),
+      ),
+    [digest?.discovered_news],
+  );
 
   const hasCandidatePool = candidatesSorted.length > 0;
   /** Пересборка: когда пул уже есть, выпуск на шаге 1+ или прошёл выбор (повтор после 502 / обновление ленты). */
@@ -362,6 +391,25 @@ export function DigestWizard({ digestId }: Props) {
     (hasCandidatePool ||
       digestStatus === "step_1_candidates" ||
       pastStep2ForRebuild);
+
+  useEffect(() => {
+    const rows = digest?.discovered_news as any[] | undefined;
+    if (!rows) return;
+    const next: Record<number, DiscoveredDraft> = {};
+    for (const row of rows) {
+      const scoreRaw = row?.manual_score;
+      const score = scoreRaw === 1 || scoreRaw === 2 || scoreRaw === 3 ? String(scoreRaw) as "1" | "2" | "3" : "";
+      const reasonRaw = String(row?.manual_reason || "") as ManualScoreReason | "";
+      const reason = MANUAL_SCORE_REASON_OPTIONS.some((x) => x.value === reasonRaw) ? reasonRaw : "";
+      next[Number(row.id)] = {
+        score,
+        reason,
+        reasonOther: String(row?.manual_reason_other || ""),
+      };
+    }
+    setDiscoveredDrafts(next);
+    setDiscoveredSaveState({});
+  }, [digest?.discovered_news]);
 
   const toggleSelected = (id: number) => {
     const row = candidatesSorted.find((x: any) => x.id === id);
@@ -372,6 +420,79 @@ export function DigestWizard({ digestId }: Props) {
       return [...prev, id];
     });
   };
+
+  const updateDiscoveredDraft = useCallback((newsId: number, patch: Partial<DiscoveredDraft>) => {
+    setDiscoveredDrafts((prev) => {
+      const base: DiscoveredDraft = prev[newsId] ?? { score: "", reason: "", reasonOther: "" };
+      const next = { ...base, ...patch };
+      if (next.score === "3") {
+        next.reason = "";
+        next.reasonOther = "";
+      }
+      if (next.reason !== "other") {
+        next.reasonOther = "";
+      }
+      return { ...prev, [newsId]: next };
+    });
+    setDiscoveredSaveState((prev) => ({ ...prev, [newsId]: { ...prev[newsId], ok: false, error: "" } }));
+  }, []);
+
+  const saveDiscoveredFeedback = useCallback(
+    async (newsId: number) => {
+      const draft = discoveredDrafts[newsId] ?? { score: "", reason: "", reasonOther: "" };
+      if (draft.score !== "1" && draft.score !== "2" && draft.score !== "3") {
+        setDiscoveredSaveState((prev) => ({ ...prev, [newsId]: { saving: false, ok: false, error: "Выберите оценку 1–3." } }));
+        return;
+      }
+      if ((draft.score === "1" || draft.score === "2") && !draft.reason) {
+        setDiscoveredSaveState((prev) => ({
+          ...prev,
+          [newsId]: { saving: false, ok: false, error: "Для оценки ниже 3 выберите причину." },
+        }));
+        return;
+      }
+      if (draft.reason === "other" && draft.reasonOther.trim().length < 3) {
+        setDiscoveredSaveState((prev) => ({
+          ...prev,
+          [newsId]: { saving: false, ok: false, error: "Для причины «другое» добавьте комментарий (минимум 3 символа)." },
+        }));
+        return;
+      }
+      setDiscoveredSaveState((prev) => ({ ...prev, [newsId]: { saving: true, ok: false, error: "" } }));
+      try {
+        const saved = await api.saveStep1DiscoveredFeedback(digestId, newsId, {
+          score: Number(draft.score) as 1 | 2 | 3,
+          reason: draft.score === "3" ? undefined : (draft.reason || undefined),
+          reason_other: draft.reason === "other" ? draft.reasonOther.trim() : undefined,
+        });
+        const exportPath = typeof saved?.ratings_export_path === "string" ? saved.ratings_export_path : "";
+        if (exportPath) setRatingsExportPath(exportPath);
+        setDiscoveredSaveState((prev) => ({
+          ...prev,
+          [newsId]: { saving: false, ok: true, error: "", exportPath },
+        }));
+        await loadDigest({ skipProgress: true, preserveError: true });
+      } catch (e) {
+        setDiscoveredSaveState((prev) => ({
+          ...prev,
+          [newsId]: { saving: false, ok: false, error: (e as Error).message || "Не удалось сохранить оценку." },
+        }));
+      }
+    },
+    [digestId, discoveredDrafts, loadDigest],
+  );
+
+  const downloadManualRatings = useCallback(async () => {
+    setRatingsDownloadBusy(true);
+    setRatingsDownloadError("");
+    try {
+      await api.downloadStep1ManualRatings();
+    } catch (e) {
+      setRatingsDownloadError((e as Error).message || "Не удалось скачать файл оценок.");
+    } finally {
+      setRatingsDownloadBusy(false);
+    }
+  }, []);
 
   const manualUrlList = useMemo(
     () =>
@@ -388,6 +509,13 @@ export function DigestWizard({ digestId }: Props) {
     }
     const rk = parseRunningStepFromLabel(label);
     if (rk !== null) setRunningStepKey(rk);
+    if (rk === "1") {
+      setStep1Elapsed(0);
+      requestAnimationFrame(() => {
+        step1CardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        step2CardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    }
     if (rk === "3") {
       step3ModeRef.current =
         label.includes("2–3") || label.includes("2-3") ? "combined" : "analytics";
@@ -421,12 +549,13 @@ export function DigestWizard({ digestId }: Props) {
       }
     } catch (e) {
       pendingScrollToStep2Ref.current = false;
-      setError((e as Error).message);
+      const errMsg = (e as Error).message;
       try {
-        await loadDigest({ skipProgress: true });
+        await loadDigest({ skipProgress: true, preserveError: true });
       } catch {
         /* игнорируем вторичную ошибку загрузки */
       }
+      setError(errMsg);
     } finally {
       setLoading(false);
       setProgressLabel("");
@@ -474,12 +603,26 @@ export function DigestWizard({ digestId }: Props) {
     return candidatesSorted.length > 0 && candidatesSorted.every((c: any) => looksLikeDemoCandidate(c));
   }, [digest?.candidates_are_demo_fallback, candidatesSorted]);
 
-  const step1CollectionInProgress = loading && progressLabel.includes("Шаг 1:");
+  const step1CollectionInProgress = loading && runningStepKey === "1";
 
   const step3InProgress = loading && runningStepKey === "3";
   const step4InProgress = loading && (runningStepKey === "4" || runningStepKey === "4img" || runningStepKey === "4txt");
   const step4ImagesInProgress = loading && runningStepKey === "4img";
   const step4TextsInProgress = loading && runningStepKey === "4txt";
+
+  const step1PhaseText = step1CollectionInProgress ? getStep1PhaseText(step1Elapsed) : "";
+
+  useEffect(() => {
+    if (!step1CollectionInProgress) {
+      setStep1Elapsed(0);
+      return;
+    }
+    const start = Date.now();
+    const id = setInterval(() => {
+      setStep1Elapsed(Math.floor((Date.now() - start) / 1000));
+    }, 1000);
+    return () => clearInterval(id);
+  }, [step1CollectionInProgress]);
 
   useEffect(() => {
     if (!step3InProgress) {
@@ -532,6 +675,9 @@ export function DigestWizard({ digestId }: Props) {
     step3ModeRef.current === "combined" ? "Шаг 2–3: порядок и аналитика" : "Шаг 3: аналитика";
 
   const asyncProgressLabel = useMemo(() => {
+    if (step1CollectionInProgress && step1PhaseText) {
+      return `Шаг 1 — ${step1PhaseText}`;
+    }
     if (step3InProgress && step3PhaseText) {
       return `${step3StatusHeadline} — ${step3PhaseText}`;
     }
@@ -540,6 +686,8 @@ export function DigestWizard({ digestId }: Props) {
     }
     return progressLabel;
   }, [
+    step1CollectionInProgress,
+    step1PhaseText,
     step3InProgress,
     step3PhaseText,
     step3StatusHeadline,
@@ -548,6 +696,20 @@ export function DigestWizard({ digestId }: Props) {
     step4StatusHeadline,
     progressLabel,
   ]);
+
+  const step1PoolBlocksRerun = hasCandidatePool && digestStatus === "step_1_candidates";
+
+  const proxyapiBudgetText = useMemo(() => {
+    if (digest?.proxyapi_budget_message) return String(digest.proxyapi_budget_message);
+    if (error && isProxyapiBudgetError(error)) return error;
+    return null;
+  }, [digest?.proxyapi_budget_message, error]);
+
+  const budgetNoticesWithoutProxyapi = useMemo(() => {
+    const list = digest?.budget_notices ?? [];
+    if (!proxyapiBudgetText) return list;
+    return list.filter((msg: string) => !isProxyapiBudgetError(msg));
+  }, [digest?.budget_notices, proxyapiBudgetText]);
 
   const handleSelectImageVariant = useCallback(
     async (variant: number) => {
@@ -665,9 +827,16 @@ export function DigestWizard({ digestId }: Props) {
         </p>
       </div>
 
-      {error && <div className="card">{error}</div>}
+      {proxyapiBudgetText ? <ProxyapiBudgetAlert message={proxyapiBudgetText} /> : null}
 
-      {digest?.budget_notices && digest.budget_notices.length > 0 ? (
+      {error && !proxyapiBudgetText ? (
+        <div className="card" role="alert" style={{ borderColor: "#f87171", color: "#fecaca" }}>
+          <h3 style={{ marginTop: 0, fontSize: "1.05rem", color: "#fca5a5" }}>Ошибка</h3>
+          <p style={{ margin: 0, lineHeight: 1.55 }}>{error}</p>
+        </div>
+      ) : null}
+
+      {budgetNoticesWithoutProxyapi.length > 0 ? (
         <div
           className="card"
           role="status"
@@ -689,8 +858,8 @@ export function DigestWizard({ digestId }: Props) {
             </p>
           </WizardWhy>
           <ul style={{ margin: "0 0 0 1.2rem", padding: 0, lineHeight: 1.55, fontSize: "0.95rem" }}>
-            {digest.budget_notices.map((msg: string, i: number) => (
-              <li key={i} style={{ marginBottom: i < digest.budget_notices!.length - 1 ? 10 : 0 }}>
+            {budgetNoticesWithoutProxyapi.map((msg: string, i: number) => (
+              <li key={i} style={{ marginBottom: i < budgetNoticesWithoutProxyapi.length - 1 ? 10 : 0 }}>
                 {msg}
               </li>
             ))}
@@ -837,7 +1006,7 @@ export function DigestWizard({ digestId }: Props) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" ref={step1CardRef}>
         <h3>Шаг 1 — кандидаты</h3>
         <StepProgressBar active={runningStepKey === "1"} />
         <ul className="wizard-hint-do-list">
@@ -868,6 +1037,15 @@ export function DigestWizard({ digestId }: Props) {
             Сначала выполните шаг 0 — пока статус <code>draft</code>, сервер не примет запуск сбора.
           </p>
         ) : null}
+        {step1CollectionInProgress ? (
+          <WizardStepStatus
+            headline="Идёт сбор кандидатов"
+            phase={step1PhaseText}
+            elapsedSec={step1Elapsed}
+            hint="Обычно 1–5 минут. Список появится в блоке «Шаг 2» ниже. Не закрывайте вкладку."
+          />
+        ) : null}
+        {proxyapiBudgetText ? <ProxyapiBudgetAlert message={proxyapiBudgetText} compact /> : null}
         <textarea
           rows={4}
           placeholder="Необязательно: важные URL (каждый с новой строки). Эти материалы должны попасть в итоговые 5 новостей — проверьте, что ссылки открываются и ведут на статьи про ИИ."
@@ -877,7 +1055,7 @@ export function DigestWizard({ digestId }: Props) {
         <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
           <button
             type="button"
-            disabled={!canRunStep1 || loading || (hasCandidatePool && digestStatus === "step_1_candidates")}
+            disabled={!canRunStep1 || loading || step1PoolBlocksRerun}
             title={
               !canRunStep1
                 ? isDraft
@@ -885,7 +1063,7 @@ export function DigestWizard({ digestId }: Props) {
                   : pastStep2ForRebuild
                     ? "Пересборка пула — в шаге 2, когда виден список кандидатов"
                     : "Сбор недоступен для текущего статуса"
-                : hasCandidatePool && digestStatus === "step_1_candidates"
+                : step1PoolBlocksRerun
                   ? "Пул уже собран — пересоберите в шаге 2"
                   : "Запуск поиска, проверки страниц и скоринга (обычно 1–5 мин)"
             }
@@ -893,7 +1071,28 @@ export function DigestWizard({ digestId }: Props) {
           >
             Запустить сбор кандидатов → результат в «Шаг 2» ниже
           </button>
+          <button
+            type="button"
+            disabled={discoveredNewsSorted.length === 0}
+            title="Открыть полный пул новостей, найденных на шаге 1, для ручной оценки отбраковки"
+            onClick={() => setShowAllFoundNews(true)}
+          >
+            Все найденные новости ({discoveredNewsSorted.length})
+          </button>
+          <button
+            type="button"
+            disabled={ratingsDownloadBusy}
+            title="Скачать JSON со всеми ручными оценками по всем выпускам (дата пула → запуск → оценки)"
+            onClick={() => void downloadManualRatings()}
+          >
+            {ratingsDownloadBusy ? "Скачивание…" : "Скачать"}
+          </button>
         </div>
+        {ratingsDownloadError ? (
+          <p className="wizard-hint-do" style={{ marginTop: 8, color: "#fca5a5" }}>
+            {ratingsDownloadError}
+          </p>
+        ) : null}
         {showRebuildPoolButton && hasCandidatePool ? (
           <p className="wizard-hint-do" style={{ marginTop: 10, fontSize: "0.92rem" }}>
             Список кандидатов уже в блоке <strong>«Шаг 2»</strong> ниже. Чтобы обновить ленту — кнопка{" "}
@@ -901,6 +1100,138 @@ export function DigestWizard({ digestId }: Props) {
           </p>
         ) : null}
       </div>
+
+      {showAllFoundNews ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="card"
+          style={{
+            position: "fixed",
+            inset: 20,
+            zIndex: 60,
+            overflow: "auto",
+            background: "rgba(15, 23, 42, 0.98)",
+            borderColor: "#334155",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <h3 style={{ margin: 0 }}>Все найденные новости ({discoveredNewsSorted.length})</h3>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                disabled={ratingsDownloadBusy}
+                title="JSON со всеми ручными оценками по всем выпускам"
+                onClick={() => void downloadManualRatings()}
+              >
+                {ratingsDownloadBusy ? "Скачивание…" : "Скачать"}
+              </button>
+              <button type="button" onClick={() => setShowAllFoundNews(false)}>
+                Закрыть
+              </button>
+            </div>
+          </div>
+          <p className="wizard-hint-do" style={{ marginTop: 0 }}>
+            Оценивайте пригодность новости по шкале 1–3. Для оценок ниже 3 выберите причину — эти данные сохраняются для
+            последующей калибровки поиска и фильтрации. Кнопка «Скачать» выгружает все оценки по всем выпускам, не только
+            текущий пул.
+          </p>
+          {ratingsDownloadError ? (
+            <p className="wizard-hint-do" style={{ marginTop: 0, color: "#fca5a5" }}>
+              {ratingsDownloadError}
+            </p>
+          ) : null}
+          {ratingsExportPath ? (
+            <p className="wizard-hint-do" style={{ marginTop: 0, fontSize: "0.9rem" }}>
+              Файл оценок: <code style={{ color: "#e2e8f0" }}>{ratingsExportPath}</code>
+            </p>
+          ) : null}
+          <div style={{ display: "grid", gap: 10 }}>
+            {discoveredNewsSorted.map((row: any) => {
+              const draft = discoveredDrafts[row.id] ?? { score: "", reason: "", reasonOther: "" };
+              const state = discoveredSaveState[row.id] ?? {};
+              const showReason = draft.score === "1" || draft.score === "2";
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(360px, 2.3fr) minmax(320px, 1fr)",
+                    gap: 12,
+                    border: "1px solid #334155",
+                    borderRadius: 8,
+                    padding: 12,
+                    background: "rgba(30, 41, 59, 0.45)",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontSize: "0.8rem", color: "#94a3b8", marginBottom: 4 }}>
+                      {formatNewsPublishedAt(row.published_at)} · {row.source || "источник не указан"}
+                    </div>
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>{row.title}</div>
+                    <a href={row.url} target="_blank" rel="noopener noreferrer" style={{ wordBreak: "break-all" }}>
+                      {row.url}
+                    </a>
+                  </div>
+                  <div style={{ display: "grid", gap: 8 }}>
+                    <label style={{ display: "grid", gap: 4 }}>
+                      <span style={{ fontSize: "0.86rem", color: "#cbd5e1" }}>Оценка пригодности</span>
+                      <select
+                        value={draft.score}
+                        onChange={(e) =>
+                          updateDiscoveredDraft(row.id, {
+                            score: e.target.value as "" | "1" | "2" | "3",
+                          })
+                        }
+                      >
+                        <option value="">— выберите —</option>
+                        <option value="3">3 — подходит</option>
+                        <option value="2">2 — спорно</option>
+                        <option value="1">1 — не подходит</option>
+                      </select>
+                    </label>
+                    {showReason ? (
+                      <label style={{ display: "grid", gap: 4 }}>
+                        <span style={{ fontSize: "0.86rem", color: "#cbd5e1" }}>Причина оценки ниже 3</span>
+                        <select
+                          value={draft.reason}
+                          onChange={(e) =>
+                            updateDiscoveredDraft(row.id, {
+                              reason: e.target.value as "" | ManualScoreReason,
+                            })
+                          }
+                        >
+                          <option value="">— выберите причину —</option>
+                          {MANUAL_SCORE_REASON_OPTIONS.map((opt) => (
+                            <option key={opt.value} value={opt.value}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    {draft.reason === "other" ? (
+                      <textarea
+                        rows={2}
+                        placeholder="Кратко опишите причину"
+                        value={draft.reasonOther}
+                        onChange={(e) => updateDiscoveredDraft(row.id, { reasonOther: e.target.value })}
+                      />
+                    ) : null}
+                    <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                      <button type="button" disabled={state.saving} onClick={() => void saveDiscoveredFeedback(row.id)}>
+                        {state.saving ? "Сохраняем..." : "Сохранить оценку"}
+                      </button>
+                      {state.ok ? <span style={{ color: "#4ade80", fontSize: "0.86rem" }}>Сохранено</span> : null}
+                    </div>
+                    {state.error ? <div style={{ color: "#fca5a5", fontSize: "0.85rem" }}>{state.error}</div> : null}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
 
       {showStep2Section && (
         <div className="card" ref={step2CardRef}>
@@ -943,11 +1274,14 @@ export function DigestWizard({ digestId }: Props) {
               Идёт сбор и проверка кандидатов (обычно 1–5 минут). Списки появятся здесь сразу после завершения — не уходите со
               страницы, при необходимости прокрутите к этому блоку.
             </p>
+          ) : proxyapiBudgetText ? (
+            <ProxyapiBudgetAlert message={proxyapiBudgetText} compact />
           ) : !canSelect && candidatesSorted.length === 0 && digestStatus !== "draft" ? (
             <p className="wizard-hint-wait">
               Список появится здесь после <strong>успешного</strong> шага 1 (в шапке статус <code>step_1_candidates</code>).
-              Чекбоксы станут активны вместе со строками. Если выше показана ошибка (например 502) — исправьте URL или .env и
-              нажмите <strong>«Пересобрать пул кандидатов»</strong> (когда список уже есть) или снова запустите сбор в шаге 1.
+              Чекбоксы станут активны вместе со строками. Если выше красное предупреждение про бюджет ключа ProxyAPI —
+              пополните счёт или измените лимит бюджета ключа в личном кабинете; при другой ошибке исправьте настройки и
+              запустите сбор снова.
             </p>
           ) : null}
           {canSelect && candidatesSorted.length > 0 ? (

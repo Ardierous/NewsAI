@@ -1,0 +1,417 @@
+{
+  "updated_at": "2026-05-16 13:34:18 МСК",
+  "pool_dates": [
+    {
+      "pool_date": "2026-05-16",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-05-16 11:01:51 МСК",
+          "pool_formed_at": "2026-05-16 11:01:51 МСК",
+          "digest_id": 5,
+          "discovery_run_id": 1,
+          "news_in_pool": 36,
+          "ratings_count": 36,
+          "ratings": [
+            {
+              "rated_at": "2026-05-16 11:03:01 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: trends.rbc.ru",
+              "url": "https://trends.rbc.ru/trends/industry/6384647c9a794723d7a12f58",
+              "published_at": "2022-11-28T13:35:18+03:00",
+              "discovered_news_id": 33
+            },
+            {
+              "rated_at": "2026-05-16 11:03:31 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "Википедию не использовать",
+              "title": "Страница: ru.wikipedia.org",
+              "url": "https://ru.wikipedia.org/wiki/Alice_AI",
+              "published_at": "2023-05-17T17:41:59+03:00",
+              "discovered_news_id": 28
+            },
+            {
+              "rated_at": "2026-05-16 11:03:48 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "Википедию не использовать",
+              "title": "Страница: ru.wikipedia.org",
+              "url": "https://ru.wikipedia.org/wiki/%D0%98%D1%81%D0%BA%D1%83%D1%81%D1%81%D1%82%D0%B2%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9_%D0%B8%D0%BD%D1%82%D0%B5%D0%BB%D0%BB%D0%B5%D0%BA%D1%82_%D0%B8_%D0%B0%D0%B2%D1%82%D0%BE%D1%80%D1%81%D0%BA%D0%BE%D0%B5_%D0%BF%D1%80%D0%B0%D0%B2%D0%BE",
+              "published_at": "2024-03-11T15:41:16+03:00",
+              "discovered_news_id": 31
+            },
+            {
+              "rated_at": "2026-05-16 11:04:27 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: 3dnews.ru",
+              "url": "https://3dnews.ru/1114100/praktikum-po-iirisovaniyu-chast-dvenadtsataya-bistroe-prototipirovanie-s-flux1-dev",
+              "published_at": "2024-11-26T00:00:00+03:00",
+              "discovered_news_id": 27
+            },
+            {
+              "rated_at": "2026-05-16 11:04:38 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "Википедию не использовать",
+              "title": "Страница: ru.wikipedia.org",
+              "url": "https://ru.wikipedia.org/wiki/Claude",
+              "published_at": "2024-12-24T11:47:00+03:00",
+              "discovered_news_id": 35
+            },
+            {
+              "rated_at": "2026-05-16 11:05:12 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: braintools.ru",
+              "url": "https://www.braintools.ru/article/11591",
+              "published_at": "2025-01-27T00:00:00+03:00",
+              "discovered_news_id": 29
+            },
+            {
+              "rated_at": "2026-05-16 11:05:41 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: gazeta.ru",
+              "url": "https://www.gazeta.ru/amp/science/news/2025/05/19/25819214.shtml",
+              "published_at": "2025-05-19T15:12:27+03:00",
+              "discovered_news_id": 32
+            },
+            {
+              "rated_at": "2026-05-16 11:06:18 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: comnews.ru",
+              "url": "https://www.comnews.ru/content/243471/2026-01-28/2026-w05/1008/iskusstvennyy-intellekt-i-infrastrukturnye-resheniya-it-otrasl-opredelila-klyuchevye-trendy-2026-g",
+              "published_at": "2026-01-28T00:00:00+03:00",
+              "discovered_news_id": 26
+            },
+            {
+              "rated_at": "2026-05-16 11:07:24 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: braintools.ru",
+              "url": "https://www.braintools.ru/article/27568",
+              "published_at": "2026-03-23T00:00:00+03:00",
+              "discovered_news_id": 25
+            },
+            {
+              "rated_at": "2026-05-16 11:07:32 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: braintools.ru",
+              "url": "https://www.braintools.ru/article/27965",
+              "published_at": "2026-03-30T00:00:00+03:00",
+              "discovered_news_id": 30
+            },
+            {
+              "rated_at": "2026-05-16 11:07:55 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: garant.ru",
+              "url": "https://www.garant.ru/news/2054978/",
+              "published_at": "2026-04-13T10:46:00+03:00",
+              "discovered_news_id": 13
+            },
+            {
+              "rated_at": "2026-05-16 11:08:29 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: trends.rbc.ru",
+              "url": "https://trends.rbc.ru/trends/industry/69e87e5f9a7947ca488a8d90",
+              "published_at": "2026-04-22T13:29:39+03:00",
+              "discovered_news_id": 12
+            },
+            {
+              "rated_at": "2026-05-16 11:08:50 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: 1tv.ru",
+              "url": "https://www.1tv.ru/news/2026-04-26/540448",
+              "published_at": "2026-04-26T22:40:00+03:00",
+              "discovered_news_id": 11
+            },
+            {
+              "rated_at": "2026-05-16 11:09:16 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: lenta.ru",
+              "url": "https://lenta.ru/news/2026/04/27/v-rossii-nauchili-neyroseti-orientirovatsya-vo-vremeni/",
+              "published_at": "2026-04-27T12:19:00+03:00",
+              "discovered_news_id": 14
+            },
+            {
+              "rated_at": "2026-05-16 11:09:43 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: neuro-ai.ru",
+              "url": "https://neuro-ai.ru/news/sber-na-iclr-2026-chetyre-nauchnye-raboty-po-analizu-teksta-ustoichivomu-obucheniyu-modelirovaniyu-i.html",
+              "published_at": "2026-04-30T20:45:00+03:00",
+              "discovered_news_id": 16
+            },
+            {
+              "rated_at": "2026-05-16 11:12:21 МСК",
+              "score": 2,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "Заголовок не распарсен",
+              "title": "Страница: neuro-ai.ru",
+              "url": "https://neuro-ai.ru/articles/openai-nashla-narushenie-politiki-bezopasnosti-v-obuchenii-neskolkih-gpt-5-modelei.html",
+              "published_at": "2026-05-09T08:01:20+03:00",
+              "discovered_news_id": 17
+            },
+            {
+              "rated_at": "2026-05-16 11:12:33 МСК",
+              "score": 2,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "Заголовок не распарсен",
+              "title": "Страница: neuro-ai.ru",
+              "url": "https://neuro-ai.ru/articles/principy-rabotayut-luchshe-primerov-kak-anthropic-dovela-agentnoe-nesootvetstvie-claude-do-nulja.html",
+              "published_at": "2026-05-09T07:01:40+03:00",
+              "discovered_news_id": 18
+            },
+            {
+              "rated_at": "2026-05-16 11:12:50 МСК",
+              "score": 2,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "Заголовок не распарсен",
+              "title": "Страница: neuro-ai.ru",
+              "url": "https://neuro-ai.ru/news/anthropic-zablokirovala-sotni-rossiiskih-akkauntov-claude-bez-publichnogo-objasnenija.html",
+              "published_at": "2026-05-09T23:35:00+03:00",
+              "discovered_news_id": 4
+            },
+            {
+              "rated_at": "2026-05-16 11:13:08 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "ITGlobal запустил корпоративный шлюз к 50+ LLM",
+              "url": "https://neuro-ai.ru/news/itglobal-zapustil-korporativnyi-shlyuz-k-50-llm-dannye-ostayutsja-v-rossii.html",
+              "published_at": "2026-05-11T00:55:00+03:00",
+              "discovered_news_id": 3
+            },
+            {
+              "rated_at": "2026-05-16 11:13:29 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Как нейросети и AI-агенты помогают геймерам исправлять NAT type strict, лаги и блокировку портов",
+              "url": "https://neuro-ai.ru/articles/kak-neiroseti-i-ai-agenty-pomogayut-geimeram-ispravljat-nat-type-strict-lagi-i-blokirovku-portov.html",
+              "published_at": "2026-05-11T21:39:49+03:00",
+              "discovered_news_id": 2
+            },
+            {
+              "rated_at": "2026-05-16 11:13:56 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Как Perplexity запускает Qwen на Blackwell и почему большие модели всё сильнее зависят от архитектуры стойки",
+              "url": "https://neuro-ai.ru/articles/kak-perplexity-zapuskaet-qwen-na-blackwell-i-pochemu-bolshie-modeli-vsyo-silnee-zavisjat-ot-arhitekt.html",
+              "published_at": "2026-05-12T21:23:21+03:00",
+              "discovered_news_id": 1
+            },
+            {
+              "rated_at": "2026-05-16 11:14:18 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Минздрав внедряет ИИ для анализа медкарт и снижения бумажной нагрузки на врачей",
+              "url": "https://neuro-ai.ru/news/minzdrav-vnedrjaet-ii-dlja-analiza-medkart-i-snizhenija-bumazhnoi-nagruzki-na-vrachei.html",
+              "published_at": "2026-05-12T22:45:00+03:00",
+              "discovered_news_id": 5
+            },
+            {
+              "rated_at": "2026-05-16 11:14:40 МСК",
+              "score": 1,
+              "reason_code": "http_unreachable",
+              "reason_label": "ссылка не открылась",
+              "reason_other": null,
+              "title": "Страница не найдена",
+              "url": "https://www.comnews.ru/technologies/2026/05/14/emozii-iskusstvennogo-intellekta-mogut-vliyat-na-informacionnuyu-bezopasnost-i-reputaciyu-biznesa",
+              "published_at": "2026-05-14T00:00:00+03:00",
+              "discovered_news_id": 10
+            },
+            {
+              "rated_at": "2026-05-16 11:14:52 МСК",
+              "score": 1,
+              "reason_code": "http_unreachable",
+              "reason_label": "ссылка не открылась",
+              "reason_other": null,
+              "title": "Страница не найдена",
+              "url": "https://www.comnews.ru/technologies/2026/05/14/iskusstvennyy-intellekt-emocii-vliyayut-na-informacionnuyu-bezopasnost-i-reputaciyu-biznesa-2026-05-14-1234567.html",
+              "published_at": "2026-05-14T00:00:00+03:00",
+              "discovered_news_id": 15
+            },
+            {
+              "rated_at": "2026-05-16 11:15:10 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "AMD EPYC захватили рекордные 46,2 % рынка серверных процессоров",
+              "url": "https://3dnews.ru/1141728/amd-epyc-zahvatili-rekordnie-462-rinka-servernih-protsessorov-vsyo-blagodarya-iiagentam",
+              "published_at": "2026-05-14T13:46:00+03:00",
+              "discovered_news_id": 23
+            },
+            {
+              "rated_at": "2026-05-16 11:16:15 МСК",
+              "score": 2,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "Заголовок должен отражать тематику ИИ",
+              "title": "«Несчастны все, кроме руководства»: в Meta✴ рекордно упал моральный дух, несмотря на рекордные прибыли",
+              "url": "https://3dnews.ru/1141743/ii-otnyal-u-sotrudnikov-meta-i-dengi-i-pokoy-pribyl-dostigla-27-mlrd-no-kompaniya-sokrashchaet-shtat-i-urezaet-zarplaty",
+              "published_at": "2026-05-14T18:04:00+03:00",
+              "discovered_news_id": 19
+            },
+            {
+              "rated_at": "2026-05-16 11:18:00 МСК",
+              "score": 2,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "В целом подходит, т.к. тематика вычислительных мощностей близко к ИИ",
+              "title": "Китай создал фотонный квантовый компьютер, который суперкомпьютерам не догнать даже за время жизни Вселенной",
+              "url": "https://3dnews.ru/1141770/kitay-sozdal-fotonniy-kvantoviy-kompyuter-kotoriy-superkompyuteram-ne-dognat-dage-za-vremya-gizni-vselennoy",
+              "published_at": "2026-05-15T10:23:00+03:00",
+              "discovered_news_id": 21
+            },
+            {
+              "rated_at": "2026-05-16 11:18:24 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Разработка ученых РФ почти вдвое ускорит адаптацию роботов к реальным условиям",
+              "url": "https://news.rambler.ru/tech/56449976-razrabotka-uchenyh-rf-pochti-vdvoe-uskorit-adaptatsiyu-robotov-k-realnym-usloviyam/amp/",
+              "published_at": "2026-05-15T16:12:20+03:00",
+              "discovered_news_id": 24
+            },
+            {
+              "rated_at": "2026-05-16 11:18:46 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "OpenAI перестраивается вокруг ИИ-агентов в рамках подготовки к IPO",
+              "url": "https://3dnews.ru/1141822/openai-perestraivaetsya-vokrug-iiagentov-v-ramkah-podgotovki-k-ipo-chatgpt-i-codex-obedinyat-v-edinuyu-platformu",
+              "published_at": "2026-05-16T00:36:00+03:00",
+              "discovered_news_id": 20
+            },
+            {
+              "rated_at": "2026-05-16 11:19:07 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "ArXiv запретила учёным загружать статьи, сгенерированные нейросетями",
+              "url": "https://3dnews.ru/1141826/arxiv-zapretila-uchyonim-zagrugat-stati-sgenerirovannie-neyrosetyami-za-eto-predusmotren-ban-na-odin-god",
+              "published_at": "2026-05-16T08:17:00+03:00",
+              "discovered_news_id": 22
+            },
+            {
+              "rated_at": "2026-05-16 11:19:48 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "ссылка на файл, а не на страницу с новостью, заголовок не сформирован",
+              "title": "Страница: arxiv.org",
+              "url": "https://arxiv.org/src/2203.04159",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 6
+            },
+            {
+              "rated_at": "2026-05-16 11:20:28 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "ссылка на файл, а не на страницу с новостью, заголовок не сформирован",
+              "title": "Страница: arxiv.org",
+              "url": "https://arxiv.org/pdf/1705.08807",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 7
+            },
+            {
+              "rated_at": "2026-05-16 11:20:57 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "ссылка на файл, а не на страницу с новостью, заголовок не сформирован",
+              "title": "Страница: arxiv.org",
+              "url": "https://arxiv.org/pdf/2104.05314",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 8
+            },
+            {
+              "rated_at": "2026-05-16 11:21:43 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Компьютерные науки > Машинное обучение",
+              "url": "https://arxiv.org/abs/1905.11946",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 9
+            },
+            {
+              "rated_at": "2026-05-16 11:22:09 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "ссылка на файл, а не на страницу с новостью, заголовок не сформирован",
+              "title": "Страница: arxiv.org",
+              "url": "https://arxiv.org/pdf/2203.04159",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 34
+            },
+            {
+              "rated_at": "2026-05-16 11:22:39 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Компьютерные науки > Искусственный интеллект",
+              "url": "https://arxiv.org/abs/1705.08807",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 36
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -155,7 +155,11 @@ def fetch_article_urls_from_search(
     Порядок: ProxyAPI web_search → SerpAPI (google_news) → Tavily.
     """
     if settings.enable_web_fetch and settings.proxyapi_web_search_enabled and proxy is not None:
-        urls = proxy.search_news_article_urls(query, limit=limit)
+        try:
+            urls = proxy.search_news_article_urls(query, limit=limit)
+        except Exception:
+            logger.warning("ProxyAPI web_search: ошибка запроса", exc_info=True)
+            urls = []
         if urls:
             logger.info("ProxyAPI web_search: получено URL | count=%s", len(urls))
             return urls

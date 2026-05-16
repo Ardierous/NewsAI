@@ -1,5 +1,5 @@
 import json
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Analytics, Asset, Digest, NewsCandidate, SelectedNews
+from app.models import Analytics, Asset, Digest, NewsCandidate, SelectedNews, Step1DiscoveredNews, Step1ManualRatingLog
 from app.services import digest_service as ds
 from app.services.digest_service import (
     DigestService,
@@ -17,6 +17,7 @@ from app.services.digest_service import (
     STATUS_STEP0,
     STATUS_STEP1,
 )
+from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 
 
 def _fake_expand_listing(url: str, max_children: int = 10) -> list[tuple[str, dict]]:
@@ -65,6 +66,18 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: [])
     monkeypatch.setattr(ds, "_expand_listing_url_candidates", _fake_expand_listing)
     return service, digest
+
+
+def test_step1_raises_402_when_proxyapi_budget_exceeded(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    service.proxy.last_error_kind = "budget_exceeded"
+
+    with pytest.raises(HTTPException) as ex:
+        service.run_step_1(digest.id, [])
+
+    assert ex.value.status_code == 402
+    assert "402" in str(ex.value.detail)
+    assert service.digest_proxyapi_budget_exceeded(digest.id)
 
 
 def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):
@@ -131,6 +144,102 @@ def test_step1_success_sets_status_and_candidates(monkeypatch: pytest.MonkeyPatc
     assert digest.status == STATUS_STEP1
     assert digest.current_step == STATUS_STEP1
     assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 5
+    assert service.db.query(Step1DiscoveredNews).filter(Step1DiscoveredNews.digest_id == digest.id).count() >= 5
+
+
+def test_step1_discovered_feedback_saved(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["is_aggregator"] = False
+        item["verification_comment"] = ""
+        item["title"] = f"ИИ: {item.get('title', 'Новость')}"
+        item["source"] = "Example"
+        item["published_at"] = "2026-05-14T12:00:00"
+        item["category"] = "technology"
+        item["description"] = "Описание"
+        item["significance_score"] = 2
+        item["novelty_score"] = 2
+        item["impact_score"] = 2
+        item["total_score"] = 6
+        item["reliability_status"] = "✅ подтверждено"
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+    service.run_step_1(digest.id, [])
+    row = (
+        service.db.query(Step1DiscoveredNews)
+        .filter(Step1DiscoveredNews.digest_id == digest.id)
+        .order_by(Step1DiscoveredNews.id.asc())
+        .first()
+    )
+    assert row is not None
+    updated = service.save_step1_discovered_feedback(
+        digest_id=digest.id,
+        news_id=row.id,
+        score=1,
+        reason="off_topic_not_ai",
+        reason_other="",
+    )
+    assert updated.manual_score == 1
+    assert updated.manual_reason == "off_topic_not_ai"
+    assert service.db.query(Step1ManualRatingLog).filter(Step1ManualRatingLog.digest_id == digest.id).count() == 1
+    assert service.settings.step1_manual_ratings_path.exists()
+    payload = json.loads(service.settings.step1_manual_ratings_path.read_text(encoding="utf-8"))
+    assert payload["pool_dates"]
+    assert payload["pool_dates"][0]["runs"][0]["ratings"][0]["rated_at"]
+
+
+def test_step1_manual_ratings_backfill_all_digests(tmp_path):
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    testing_session = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = testing_session()
+    export_path = tmp_path / "ratings.json"
+
+    d1 = Digest(date=date(2026, 5, 14), status=STATUS_STEP1, current_step=STATUS_STEP1, digest_type="serious")
+    d2 = Digest(date=date(2026, 5, 15), status=STATUS_STEP1, current_step=STATUS_STEP1, digest_type="serious")
+    db.add_all([d1, d2])
+    db.commit()
+    db.refresh(d1)
+    db.refresh(d2)
+
+    db.add_all(
+        [
+            Step1DiscoveredNews(
+                digest_id=d1.id,
+                title="Старая оценка 1",
+                url="https://example.com/a",
+                source="Example",
+                manual_score=2,
+                manual_reason="off_topic_not_ai",
+                rated_at=datetime(2026, 5, 14, 12, 0, 0),
+            ),
+            Step1DiscoveredNews(
+                digest_id=d2.id,
+                title="Старая оценка 2",
+                url="https://example.com/b",
+                source="Example",
+                manual_score=1,
+                manual_reason="http_unreachable",
+                rated_at=datetime(2026, 5, 15, 12, 0, 0),
+            ),
+        ]
+    )
+    db.commit()
+    assert db.query(Step1ManualRatingLog).count() == 0
+
+    sync_step1_manual_ratings_export(db, export_path)
+    assert db.query(Step1ManualRatingLog).count() == 2
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    pool_dates = {x["pool_date"] for x in payload["pool_dates"]}
+    assert pool_dates == {"2026-05-14", "2026-05-15"}
+    total_ratings = sum(len(run["ratings"]) for block in payload["pool_dates"] for run in block["runs"])
+    assert total_ratings == 2
 
 
 def test_step1_keeps_verify_url_when_score_mutates_url(monkeypatch: pytest.MonkeyPatch):

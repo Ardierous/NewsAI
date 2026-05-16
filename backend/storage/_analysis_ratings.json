@@ -1,0 +1,176 @@
+{
+  "candidates": [
+    {
+      "num": 1,
+      "total": 6,
+      "link_status": true,
+      "title": "«Несчастны все, кроме руководства»: в Meta✴ рекордно упал моральный дух, несмотря на рекордные прибыли",
+      "url": "https://3dnews.ru/1141743/ii-otnyal-u-sotrudnikov-meta-i-dengi-i-pokoy-pribyl-dostigla-27-mlrd-no-kompaniya-sokrashchaet-shtat-i-urezaet-zarplaty",
+      "manual_score": 2,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 2,
+      "total": 6,
+      "link_status": true,
+      "title": "OpenAI перестраивается вокруг ИИ-агентов в рамках подготовки к IPO",
+      "url": "https://3dnews.ru/1141822/openai-perestraivaetsya-vokrug-iiagentov-v-ramkah-podgotovki-k-ipo-chatgpt-i-codex-obedinyat-v-edinuyu-platformu",
+      "manual_score": 3,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 3,
+      "total": 6,
+      "link_status": true,
+      "title": "Китай создал фотонный квантовый компьютер, который суперкомпьютерам не догнать даже за время жизни Вселенной",
+      "url": "https://3dnews.ru/1141770/kitay-sozdal-fotonniy-kvantoviy-kompyuter-kotoriy-superkompyuteram-ne-dognat-dage-za-vremya-gizni-vselennoy",
+      "manual_score": 2,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 4,
+      "total": 6,
+      "link_status": true,
+      "title": "ArXiv запретила учёным загружать статьи, сгенерированные нейросетями",
+      "url": "https://3dnews.ru/1141826/arxiv-zapretila-uchyonim-zagrugat-stati-sgenerirovannie-neyrosetyami-za-eto-predusmotren-ban-na-odin-god",
+      "manual_score": 3,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 5,
+      "total": 6,
+      "link_status": true,
+      "title": "AMD EPYC захватили рекордные 46,2 % рынка серверных процессоров",
+      "url": "https://3dnews.ru/1141728/amd-epyc-zahvatili-rekordnie-462-rinka-servernih-protsessorov-vsyo-blagodarya-iiagentam",
+      "manual_score": 3,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 6,
+      "total": 6,
+      "link_status": true,
+      "title": "Разработка ученых РФ почти вдвое ускорит адаптацию роботов к реальным условиям",
+      "url": "https://news.rambler.ru/tech/56449976-razrabotka-uchenyh-rf-pochti-vdvoe-uskorit-adaptatsiyu-robotov-k-realnym-usloviyam/amp/",
+      "manual_score": 3,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 7,
+      "total": 6,
+      "link_status": true,
+      "title": "Страница не найдена",
+      "url": "https://www.comnews.ru/technologies/2026/05/14/emozii-iskusstvennogo-intellekta-mogut-vliyat-na-informacionnuyu-bezopasnost-i-reputaciyu-biznesa",
+      "manual_score": 1,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 8,
+      "total": 6,
+      "link_status": true,
+      "title": "Компьютерные науки > Искусственный интеллект",
+      "url": "https://arxiv.org/abs/1705.08807",
+      "manual_score": 1,
+      "page_verified": true,
+      "reject_codes": ""
+    },
+    {
+      "num": 9,
+      "total": 6,
+      "link_status": true,
+      "title": "Страница не найдена",
+      "url": "https://www.comnews.ru/technologies/2026/05/14/iskusstvennyy-intellekt-emocii-vliyayut-na-informacionnuyu-bezopasnost-i-reputaciyu-biznesa-2026-05-14-1234567.html",
+      "manual_score": 1,
+      "page_verified": true,
+      "reject_codes": ""
+    }
+  ],
+  "score3": [
+    {
+      "id": 1,
+      "in_step2": false,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "Как Perplexity запускает Qwen на Blackwell и почему большие модели всё сильнее зависят от архитектуры стойки",
+      "url": "https://neuro-ai.ru/articles/kak-perplexity-zapuskaet-qwen-na-blackwell-i-pochemu-bolshie-modeli-vsyo-silnee-zavisjat-ot-arhitekt.html"
+    },
+    {
+      "id": 2,
+      "in_step2": false,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "Как нейросети и AI-агенты помогают геймерам исправлять NAT type strict, лаги и блокировку портов",
+      "url": "https://neuro-ai.ru/articles/kak-neiroseti-i-ai-agenty-pomogayut-geimeram-ispravljat-nat-type-strict-lagi-i-blokirovku-portov.html"
+    },
+    {
+      "id": 3,
+      "in_step2": false,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "ITGlobal запустил корпоративный шлюз к 50+ LLM",
+      "url": "https://neuro-ai.ru/news/itglobal-zapustil-korporativnyi-shlyuz-k-50-llm-dannye-ostayutsja-v-rossii.html"
+    },
+    {
+      "id": 5,
+      "in_step2": false,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "Минздрав внедряет ИИ для анализа медкарт и снижения бумажной нагрузки на врачей",
+      "url": "https://neuro-ai.ru/news/minzdrav-vnedrjaet-ii-dlja-analiza-medkart-i-snizhenija-bumazhnoi-nagruzki-na-vrachei.html"
+    },
+    {
+      "id": 20,
+      "in_step2": true,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "OpenAI перестраивается вокруг ИИ-агентов в рамках подготовки к IPO",
+      "url": "https://3dnews.ru/1141822/openai-perestraivaetsya-vokrug-iiagentov-v-ramkah-podgotovki-k-ipo-chatgpt-i-codex-obedinyat-v-edinuyu-platformu"
+    },
+    {
+      "id": 22,
+      "in_step2": true,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "ArXiv запретила учёным загружать статьи, сгенерированные нейросетями",
+      "url": "https://3dnews.ru/1141826/arxiv-zapretila-uchyonim-zagrugat-stati-sgenerirovannie-neyrosetyami-za-eto-predusmotren-ban-na-odin-god"
+    },
+    {
+      "id": 23,
+      "in_step2": true,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "AMD EPYC захватили рекордные 46,2 % рынка серверных процессоров",
+      "url": "https://3dnews.ru/1141728/amd-epyc-zahvatili-rekordnie-462-rinka-servernih-protsessorov-vsyo-blagodarya-iiagentam"
+    },
+    {
+      "id": 24,
+      "in_step2": true,
+      "page_verified": true,
+      "link_status": true,
+      "headline_editorial_ok": true,
+      "reject_codes": "",
+      "title": "Разработка ученых РФ почти вдвое ускорит адаптацию роботов к реальным условиям",
+      "url": "https://news.rambler.ru/tech/56449976-razrabotka-uchenyh-rf-pochti-vdvoe-uskorit-adaptatsiyu-robotov-k-realnym-usloviyam/amp/"
+    }
+  ]
+}

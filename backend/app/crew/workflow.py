@@ -10,6 +10,7 @@ from crewai.types.usage_metrics import UsageMetrics
 
 from app.crew.agents import create_agents
 from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS
+from app.services.platform_assembly import assemble_platform_outputs, subscription_md_inline
 
 
 def _strip_markdown_json_fence(raw: str) -> str:
@@ -48,57 +49,76 @@ def _extract_candidate_list(raw: str) -> list[dict[str, Any]]:
     return [x for x in parsed if isinstance(x, dict)]
 
 
-_SUBSCRIPTION_MD_LINE = (
-    "👉 Подпишитесь на ExTellect: [Telegram](https://t.me/extellect) • [ВКонтакте](https://vk.com/extellect) • "
-    "[MAX](https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY) • [Дзен](https://dzen.ru/extellect) • "
-    "[Boosty](https://boosty.to/extellect)"
-)
-
-_SUBSCRIPTION_VK_BLOCK = """———
-👉 Подпишитесь на ExTellect:
-Telegram: https://t.me/extellect
-ВКонтакте: https://vk.com/extellect
-MAX: https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY
-Дзен: https://dzen.ru/extellect
-Boosty: https://boosty.to/extellect"""
+def _fallback_analytics_item(news: dict[str, Any]) -> dict[str, Any]:
+    title = str(news.get("title") or "Новость")
+    return {
+        "candidate_id": int(news["candidate_id"]),
+        "essence": f"Ключевая суть: {title}",
+        "comment": "Это важно для рынка ИИ, потому что меняет скорость внедрения технологий.",
+        "analysis": (
+            "Событие повлияет на конкуренцию и распределение ресурсов; "
+            "выиграют команды, которые быстрее адаптируют продукты."
+        ),
+    }
 
 
-def _normalize_hashtag_tokens(tags: list[Any], minimum: int, maximum: int) -> str:
-    seen: list[str] = []
-    for t in tags:
-        s = str(t).strip()
-        if not s:
+def complete_analytics_result(result: dict[str, Any], selected_news: list[dict[str, Any]]) -> dict[str, Any]:
+    """Гарантирует ровно по одному блоку аналитики на каждую выбранную новость."""
+    expected = [int(x["candidate_id"]) for x in selected_news]
+    news_by_id = {int(x["candidate_id"]): x for x in selected_news}
+    items = result.get("items")
+    if not isinstance(items, list):
+        items = []
+    by_id: dict[int, dict[str, Any]] = {}
+    for row in items:
+        if not isinstance(row, dict):
             continue
-        if not s.startswith("#"):
-            s = f"#{s}"
-        if s not in seen:
-            seen.append(s)
-    defaults = ["#ИИновости", "#нейросети", "#инновации", "#AI", "#технологии", "#машинноеОбучение"]
-    for d in defaults:
-        if len(seen) >= minimum:
-            break
-        if d not in seen:
-            seen.append(d)
-    return " ".join(seen[:maximum])
-
-
-def _fallback_dzen_paragraphs(item: dict[str, Any]) -> str:
-    title = item["title"]
-    url = item["url"]
-    source = item.get("source") or "Источник"
-    summary = str(item.get("summary", "")).strip()
-    block = (
-        f"[{title}]({url})\n\n"
-        f"{summary}\n\n"
-        "Если по-простому, событие отражает сдвиги на рынке искусственного интеллекта и меняет расстановку сил между участниками экосистемы.\n\n"
-        "По сути, важно понять горизонт влияния на продукты, регулирование и инвестиционные потоки в сегменте ИИ.\n\n"
-        "Что это значит для читателя: стоит сверять сигналы с практикой внедрения и не принимать решения только по заголовку.\n\n"
-        f"Читать подробнее: {source} — {url}"
-    )
-    pad = " Дополнительный контекст помогает оценить устойчивость тренда и переносимость практик на смежные отрасли."
-    while len(block) < 400:
-        block += pad
-    return block
+        try:
+            cid = int(row.get("candidate_id"))
+        except (TypeError, ValueError):
+            continue
+        if cid not in news_by_id:
+            continue
+        by_id[cid] = {
+            "candidate_id": cid,
+            "essence": str(row.get("essence") or "").strip(),
+            "comment": str(row.get("comment") or "").strip(),
+            "analysis": str(row.get("analysis") or "").strip(),
+        }
+    complete_items: list[dict[str, Any]] = []
+    for cid in expected:
+        news = news_by_id[cid]
+        if cid in by_id:
+            fb = _fallback_analytics_item(news)
+            complete_items.append(
+                {
+                    "candidate_id": cid,
+                    "essence": by_id[cid]["essence"] or fb["essence"],
+                    "comment": by_id[cid]["comment"] or fb["comment"],
+                    "analysis": by_id[cid]["analysis"] or fb["analysis"],
+                }
+            )
+        else:
+            complete_items.append(_fallback_analytics_item(news))
+    out = dict(result)
+    out["items"] = complete_items
+    if not str(out.get("overall_analysis") or "").strip():
+        out["overall_analysis"] = (
+            "Выпуск показывает ускорение прикладного ИИ, усиление конкуренции за вычисления "
+            "и смещение ценности к продуктам с явной монетизацией."
+        )
+    raw_tags = out.get("hashtags", [])
+    if isinstance(raw_tags, str):
+        out["hashtags"] = [x for x in raw_tags.split() if x]
+    elif not isinstance(raw_tags, list) or not raw_tags:
+        out["hashtags"] = ["#ИИ", "#AI", "#ExTellect", "#Технологии", "#Аналитика"]
+    checks = out.get("self_check", [])
+    if not isinstance(checks, list) or not checks:
+        out["self_check"] = [
+            {"check_name": "Нет сносок", "status": "pass", "comment": "Ок"},
+            {"check_name": "Нет слова инсайт", "status": "pass", "comment": "Ок"},
+        ]
+    return out
 
 
 @dataclass
@@ -257,24 +277,16 @@ class CrewWorkflow:
         crew = Crew(agents=[self.agents.analytics], tasks=[task], process=Process.sequential, verbose=False)
         parsed = _extract_json(self._kickoff(crew), {})
         if isinstance(parsed, dict) and parsed.get("items"):
-            return parsed
-        return {
-            "items": [
-                {
-                    "candidate_id": item["candidate_id"],
-                    "essence": f"Ключевая суть: {item['title']}",
-                    "comment": "Это важно для рынка ИИ, потому что меняет скорость внедрения.",
-                    "analysis": "Приведет к перераспределению бюджета и усилению конкуренции; выиграют быстрые команды.",
-                }
-                for item in selected_news
-            ],
-            "overall_analysis": "Выпуск показывает ускорение прикладного ИИ, усиление конкуренции за вычисления и смещение ценности к продуктам с явной монетизацией.",
-            "hashtags": ["#ИИ", "#AI", "#ExTellect", "#Технологии", "#Аналитика"],
-            "self_check": [
-                {"check_name": "Нет сносок", "status": "pass", "comment": "Ок"},
-                {"check_name": "Нет слова инсайт", "status": "pass", "comment": "Ок"},
-            ],
-        }
+            return complete_analytics_result(parsed, selected_news)
+        return complete_analytics_result(
+            {
+                "items": [_fallback_analytics_item(item) for item in selected_news],
+                "overall_analysis": "",
+                "hashtags": [],
+                "self_check": [],
+            },
+            selected_news,
+        )
 
     def run_image_prompt(self, hook_variant: str, selected_news: list[dict[str, Any]]) -> str:
         task = Task(
@@ -296,15 +308,12 @@ class CrewWorkflow:
         target = list(platforms) if platforms else ["telegram", "max", "vk", "dzen"]
         keys_str = ",".join(target)
         extra_rules = (
-            "Дополнительно к контракту: в конце КАЖДОГО из четырёх блоков добавь одну строку подписки "
-            f"(для telegram/max/dzen — markdown как пример: {_SUBSCRIPTION_MD_LINE}; "
-            "для vk — только plain text URL построчно как в редакционной шпаргалке v9, без ** и без [текст](url)). "
-            "Хэштеги: в telegram и max — 4–6 штук в одной строке после подписи; в vk и dzen — 3–5 в конце. "
-            "MAX: отдельная вёрстка, не копируй telegram; между новостями пустая строка, затем три точки ..., затем пустая строка; "
-            "каждая новость одним абзацем после строки ➤ [Заголовок](url). "
-            "Telegram: заголовок выпуска **⚡Пять актуальных новостей про ИИ | <дата>**, лид 1–2 предложения, новости ➤ [Заголовок](url) + 2–3 предложения; ссылки только в заголовках новостей. "
-            "Дзен: вступление 2–3 предложения, у каждой новости минимум 4 абзаца и ≥400 символов, строка «Читать подробнее: Источник — URL». "
-            "Верни только JSON."
+            "Дополнительно к контракту: итоговую вёрстку собирает сервер — верни JSON с полями "
+            "telegram_lead, max_lead, dzen_intro (короткие вводные 1–2 предложения для TG/MAX/Дзен). "
+            f"Подпись в финале будет в одну строку, пример: {subscription_md_inline()!r}. "
+            "Хэштеги: в telegram и max — 4–6; в vk и dzen — 3–5. "
+            "MAX: между новостями разделитель «...» на отдельной строке. "
+            "Верни только JSON с ключами платформ и полями telegram_lead, max_lead, dzen_intro."
         )
         task = Task(
             description=self._with_contract(
@@ -318,17 +327,18 @@ class CrewWorkflow:
         )
         crew = Crew(agents=[self.agents.platform_writer], tasks=[task], process=Process.sequential, verbose=False)
         parsed = _extract_json(self._kickoff(crew), {})
-        fallback_all = self._fallback_platforms(payload)
+        assembly_payload = dict(payload)
         if isinstance(parsed, dict):
-            result: dict[str, str] = {}
-            for key in target:
-                if key in parsed:
-                    result[key] = str(parsed[key])
-                elif key in fallback_all:
-                    result[key] = fallback_all[key]
-            if result:
-                return result
-        return {k: fallback_all[k] for k in target if k in fallback_all}
+            dzen_intro = str(parsed.get("dzen_intro") or "").strip()
+            if dzen_intro:
+                assembly_payload["dzen_intro"] = dzen_intro
+            tg_lead = str(parsed.get("telegram_lead") or "").strip()
+            if tg_lead:
+                assembly_payload["telegram_lead"] = tg_lead
+            max_lead = str(parsed.get("max_lead") or "").strip()
+            if max_lead:
+                assembly_payload["max_lead"] = max_lead
+        return assemble_platform_outputs(assembly_payload, platforms=target)
 
     def run_qc(self, outputs: dict[str, str], has_ok: bool) -> list[dict[str, str]]:
         task = Task(
@@ -381,43 +391,7 @@ class CrewWorkflow:
         return result
 
     def _fallback_platforms(self, payload: dict[str, Any]) -> dict[str, str]:
-        raw_tags = list(payload.get("hashtags") or [])
-        tags_tg_max = _normalize_hashtag_tokens(raw_tags, 4, 6)
-        tags_vk_dzen = _normalize_hashtag_tokens(raw_tags, 3, 5)
-        date = str(payload.get("date") or "")
-        lead = "Коротко: главные сдвиги в мире ИИ и вокруг экосистемы продуктов за сегодня."
-        news_lines_tg: list[str] = []
-        max_blocks: list[str] = []
-        vk_blocks: list[str] = []
-        dzen_blocks: list[str] = []
-        for item in payload["selected_news"]:
-            title = item["title"]
-            url = item["url"]
-            summary = " ".join(str(item.get("summary", "")).split())
-            news_lines_tg.append(f"➤ [{title}]({url})\n{summary}")
-            summary_m = summary.replace("\n", " ")
-            max_blocks.append(f"➤ [{title}]({url})\n{summary_m}")
-            vk_blocks.append(
-                f"👉 {title}\n\n{summary}\n\n👉 Итог для читателя: событие стоит отслеживать в контексте рынка ИИ.\n\nПодробности: {url}"
-            )
-            dzen_blocks.append(_fallback_dzen_paragraphs(item))
-        header = f"**⚡Пять актуальных новостей про ИИ | {date}**\n\n{lead}\n\n"
-        telegram = header + "\n\n".join(news_lines_tg) + f"\n\n———\n{_SUBSCRIPTION_MD_LINE}\n{tags_tg_max}"
-        max_inner = "\n\n...\n\n".join(max_blocks)
-        max_text = f"⚡Пять актуальных новостей про ИИ | {date}\n\n{lead}\n\n{max_inner}\n\n———\n{_SUBSCRIPTION_MD_LINE}\n{tags_tg_max}"
-        vk_body = "\n\n──────────\n\n".join(vk_blocks)
-        vk = f"{vk_body}\n\n{_SUBSCRIPTION_VK_BLOCK}\n{tags_vk_dzen}"
-        dzen_intro = (
-            "Ниже — подборка из пяти материалов: мы кратко задаём контекст, затем разбираем каждую новость "
-            "в формате, удобном для длинного чтения в Дзене.\n\n"
-        )
-        dzen = dzen_intro + "\n\n".join(dzen_blocks) + f"\n\n———\n{_SUBSCRIPTION_MD_LINE}\n{tags_vk_dzen}"
-        return {
-            "telegram": telegram,
-            "max": max_text,
-            "vk": vk,
-            "dzen": dzen,
-        }
+        return assemble_platform_outputs(payload)
 
 
 def current_msk_iso() -> str:

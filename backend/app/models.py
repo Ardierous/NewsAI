@@ -79,6 +79,70 @@ class NewsCandidate(Base):
     digest: Mapped["Digest"] = relationship("Digest", back_populates="candidates")
 
 
+class Step1DiscoveryRun(Base):
+    """Один запуск сбора кандидатов (шаг 1) для выпуска."""
+
+    __tablename__ = "step1_discovery_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    digest_id: Mapped[int] = mapped_column(ForeignKey("digests.id", ondelete="CASCADE"), nullable=False, index=True)
+    run_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    pool_formed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    news_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class Step1DiscoveredNews(Base):
+    __tablename__ = "step1_discovered_news"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    digest_id: Mapped[int] = mapped_column(ForeignKey("digests.id", ondelete="CASCADE"), nullable=False, index=True)
+    discovery_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("step1_discovery_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    source_stage: Mapped[str] = mapped_column(String(40), default="unknown", nullable=False)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    source: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    published_at: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    headline_editorial_ok: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    link_status: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    page_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    reject_codes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    verification_comment: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    manual_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    manual_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manual_reason_other: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class Step1ManualRatingLog(Base):
+    """Журнал ручных оценок (не удаляется при пересборке пула)."""
+
+    __tablename__ = "step1_manual_rating_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    discovery_run_id: Mapped[int] = mapped_column(
+        ForeignKey("step1_discovery_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    digest_id: Mapped[int] = mapped_column(ForeignKey("digests.id", ondelete="CASCADE"), nullable=False, index=True)
+    pool_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    run_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    discovered_news_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(String(500), nullable=False)
+    url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    published_at: Mapped[str] = mapped_column(String(100), nullable=False, default="")
+    manual_score: Mapped[int] = mapped_column(Integer, nullable=False)
+    manual_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manual_reason_other: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class SelectedNews(Base):
     __tablename__ = "selected_news"
 

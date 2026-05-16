@@ -10,15 +10,19 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import get_db
-from app.models import Analytics, Asset, Digest, FinalOutput, LlmCostRecord, NewsCandidate, QualityCheck, SelectedNews
+from app.models import Analytics, Asset, Digest, FinalOutput, LlmCostRecord, NewsCandidate, QualityCheck, SelectedNews, Step1DiscoveredNews
 from app.services.cost_labels import enrich_llm_cost_row
 from app.services.cost_tracker import proxyapi_spent_today_rub
+from app.services.platform_assembly import digest_docx_filename
+from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 from app.schemas import (
     CandidateOut,
     CommandRequest,
     DigestCreateResponse,
     DigestDetail,
     DigestItem,
+    Step1DiscoveredFeedbackRequest,
+    Step1DiscoveredNewsOut,
     OrderRequest,
     SelectRequest,
     Step0Request,
@@ -59,6 +63,17 @@ def list_digests(db: Session = Depends(get_db)) -> list[DigestItem]:
     return [DigestItem.model_validate(x) for x in service.list_digests()]
 
 
+@router.get("/step1/manual-ratings/export")
+def download_step1_manual_ratings_export(db: Session = Depends(get_db)) -> FileResponse:
+    """Синхронизирует журнал оценок по всем выпускам и отдаёт JSON-файл."""
+    path = sync_step1_manual_ratings_export(db, get_settings().step1_manual_ratings_path)
+    return FileResponse(
+        path,
+        media_type="application/json; charset=utf-8",
+        filename=path.name,
+    )
+
+
 @router.get("/{digest_id}", response_model=DigestDetail)
 def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     service = DigestService(db)
@@ -72,6 +87,12 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     checks = db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).all()
     llm_costs = db.query(LlmCostRecord).filter(LlmCostRecord.digest_id == digest.id).order_by(LlmCostRecord.id.asc()).all()
     assets = db.query(Asset).filter(Asset.digest_id == digest.id).all()
+    discovered_news_rows = (
+        db.query(Step1DiscoveredNews)
+        .filter(Step1DiscoveredNews.digest_id == digest.id)
+        .order_by(Step1DiscoveredNews.id.asc())
+        .all()
+    )
     candidate_map = {c.id: c for c in candidates}
     selected = []
     for row in selected_rows:
@@ -143,11 +164,34 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     spent_today_proxy = proxyapi_spent_today_rub(db, service.cost_tracker)
     candidates_are_demo_fallback = bool(candidates) and all(_candidate_row_is_demo_placeholder(c) for c in candidates)
     budget_notices = service.build_budget_notices(digest)
+    proxyapi_budget_message = service.digest_proxyapi_budget_blocked_message(digest.id)
     return DigestDetail(
         digest=DigestItem.model_validate(digest),
         candidates=[CandidateOut.model_validate(c) for c in candidates],
+        discovered_news=[
+            Step1DiscoveredNewsOut(
+                id=row.id,
+                title=row.title,
+                url=row.url,
+                source=row.source,
+                published_at=row.published_at,
+                source_stage=row.source_stage,
+                link_status=bool(row.link_status),
+                headline_editorial_ok=bool(row.headline_editorial_ok),
+                page_verified=bool(row.page_verified),
+                reject_codes=[x for x in str(row.reject_codes or "").split(",") if x],
+                verification_comment=row.verification_comment or "",
+                manual_score=row.manual_score,
+                manual_reason=row.manual_reason,
+                manual_reason_other=row.manual_reason_other,
+                rated_at=row.rated_at,
+            )
+            for row in discovered_news_rows
+        ],
         candidates_are_demo_fallback=candidates_are_demo_fallback,
         budget_notices=budget_notices,
+        proxyapi_budget_exceeded=proxyapi_budget_message is not None,
+        proxyapi_budget_message=proxyapi_budget_message,
         rejected_reasons_summary=rejected_reasons_summary,
         selected=selected,
         analytics=[
@@ -221,6 +265,32 @@ def run_step1(digest_id: int, payload: Step1RunRequest, db: Session = Depends(ge
     service = DigestService(db)
     rows = service.run_step_1(digest_id, payload.manual_urls, rebuild=payload.rebuild)
     return [CandidateOut.model_validate(r) for r in rows]
+
+
+@router.post("/{digest_id}/step1/discovered/{news_id}/feedback")
+def save_step1_discovered_feedback(
+    digest_id: int,
+    news_id: int,
+    payload: Step1DiscoveredFeedbackRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    service = DigestService(db)
+    row = service.save_step1_discovered_feedback(
+        digest_id=digest_id,
+        news_id=news_id,
+        score=payload.score,
+        reason=payload.reason,
+        reason_other=payload.reason_other,
+    )
+    export_path = str(get_settings().step1_manual_ratings_path.resolve())
+    return {
+        "id": row.id,
+        "manual_score": row.manual_score,
+        "manual_reason": row.manual_reason,
+        "manual_reason_other": row.manual_reason_other,
+        "rated_at": row.rated_at.isoformat() if row.rated_at else None,
+        "ratings_export_path": export_path,
+    }
 
 
 @router.post("/{digest_id}/step2/select")
@@ -317,11 +387,12 @@ def get_final_blocks(digest_id: int, db: Session = Depends(get_db)) -> dict:
 @router.get("/{digest_id}/docx")
 def download_docx(digest_id: int, db: Session = Depends(get_db)) -> FileResponse:
     service = DigestService(db)
-    service.get_digest(digest_id)
+    digest = service.get_digest(digest_id)
     asset = db.query(Asset).filter(Asset.digest_id == digest_id, Asset.type == "docx").order_by(Asset.id.desc()).first()
     if not asset or not Path(asset.path).exists():
         raise HTTPException(status_code=404, detail="DOCX not found")
-    return FileResponse(path=asset.path, filename=f"digest_{digest_id}.docx")
+    download_name = digest_docx_filename(digest.date, digest.id)
+    return FileResponse(path=asset.path, filename=download_name)
 
 
 @router.get("/{digest_id}/image")

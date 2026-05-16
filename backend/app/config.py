@@ -42,10 +42,10 @@ class Settings(BaseSettings):
     step1_max_cost_rub: float = 50.0
     # step_2 ordering: при суммарном расходе шага >= лимита OrderingAgent не вызывается.
     step2_max_cost_rub: float = 50.0
-  # После «Применить порядок» / AI-порядка автоматически запускать шаг 3 (аналитика).
-  auto_run_step3_after_order: bool = True
-  # Генерация обложек на шаге 4 (gpt-image через ProxyAPI).
-  enable_step4_image_generation: bool = False
+    # После «Применить порядок» / AI-порядка автоматически запускать шаг 3 (аналитика).
+    auto_run_step3_after_order: bool = True
+    # Генерация обложек на шаге 4 (gpt-image через ProxyAPI).
+    enable_step4_image_generation: bool = False
 
     log_level: str = "INFO"
     log_dir: Path = BASE_DIR / "logs"
@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     storage_dir: Path = BASE_DIR / "storage"
     image_dir: Path = BASE_DIR / "storage" / "images"
     docx_dir: Path = BASE_DIR / "storage" / "docx"
+    step1_manual_ratings_path: Path = BASE_DIR / "storage" / "step1_manual_ratings.json"
     prompts_path: Path = BASE_DIR / "app" / "prompts" / "digest_contract.txt"
     source_tiers_path: Path = BASE_DIR / "app" / "prompts" / "source_tiers.txt"
 
@@ -67,5 +68,6 @@ def get_settings() -> Settings:
     settings.storage_dir.mkdir(parents=True, exist_ok=True)
     settings.image_dir.mkdir(parents=True, exist_ok=True)
     settings.docx_dir.mkdir(parents=True, exist_ok=True)
+    settings.step1_manual_ratings_path.parent.mkdir(parents=True, exist_ok=True)
     settings.log_dir.mkdir(parents=True, exist_ok=True)
     return settings

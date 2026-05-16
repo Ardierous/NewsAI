@@ -1,0 +1,113 @@
+{
+  "stats": {
+    "1": {
+      "total": 23,
+      "in_step2": 3,
+      "auto_verified": 4
+    },
+    "2": {
+      "total": 5,
+      "in_step2": 2,
+      "auto_verified": 2
+    },
+    "3": {
+      "total": 8,
+      "in_step2": 4,
+      "auto_verified": 8
+    }
+  },
+  "bad_in2": [
+    {
+      "manual_score": 1,
+      "in_step2": true,
+      "step2_num": 7,
+      "step2_total": 6,
+      "page_verified": true,
+      "link_status": true,
+      "title": "Страница не найдена",
+      "url": "https://www.comnews.ru/technologies/2026/05/14/emozii-iskusstvennogo-intellekta-mogut-vliyat-na-informacionnuyu-bezopasnost-i-reputaciyu-biznesa"
+    },
+    {
+      "manual_score": 1,
+      "in_step2": true,
+      "step2_num": 9,
+      "step2_total": 6,
+      "page_verified": true,
+      "link_status": true,
+      "title": "Страница не найдена",
+      "url": "https://www.comnews.ru/technologies/2026/05/14/iskusstvennyy-intellekt-emocii-vliyayut-na-informacionnuyu-bezopasnost-i-reputaciyu-biznesa-2026-05-14-1234567.html"
+    },
+    {
+      "manual_score": 2,
+      "in_step2": true,
+      "step2_num": 1,
+      "step2_total": 6,
+      "page_verified": true,
+      "link_status": true,
+      "title": "«Несчастны все, кроме руководства»: в Meta✴ рекордно упал моральный дух, несмотря на рекордные прибыли",
+      "url": "https://3dnews.ru/1141743/ii-otnyal-u-sotrudnikov-meta-i-dengi-i-pokoy-pribyl-dostigla-27-mlrd-no-kompaniya-sokrashchaet-shtat-i-urezaet-zarplaty"
+    },
+    {
+      "manual_score": 2,
+      "in_step2": true,
+      "step2_num": 3,
+      "step2_total": 6,
+      "page_verified": true,
+      "link_status": true,
+      "title": "Китай создал фотонный квантовый компьютер, который суперкомпьютерам не догнать даже за время жизни Вселенной",
+      "url": "https://3dnews.ru/1141770/kitay-sozdal-fotonniy-kvantoviy-kompyuter-kotoriy-superkompyuteram-ne-dognat-dage-za-vremya-gizni-vselennoy"
+    },
+    {
+      "manual_score": 1,
+      "in_step2": true,
+      "step2_num": 8,
+      "step2_total": 6,
+      "page_verified": true,
+      "link_status": true,
+      "title": "Компьютерные науки > Искусственный интеллект",
+      "url": "https://arxiv.org/abs/1705.08807"
+    }
+  ],
+  "good_out": [
+    {
+      "manual_score": 3,
+      "in_step2": false,
+      "step2_num": null,
+      "step2_total": null,
+      "page_verified": true,
+      "link_status": true,
+      "title": "Как Perplexity запускает Qwen на Blackwell и почему большие модели всё сильнее зависят от архитектуры стойки",
+      "url": "https://neuro-ai.ru/articles/kak-perplexity-zapuskaet-qwen-na-blackwell-i-pochemu-bolshie-modeli-vsyo-silnee-zavisjat-ot-arhitekt.html"
+    },
+    {
+      "manual_score": 3,
+      "in_step2": false,
+      "step2_num": null,
+      "step2_total": null,
+      "page_verified": true,
+      "link_status": true,
+      "title": "Как нейросети и AI-агенты помогают геймерам исправлять NAT type strict, лаги и блокировку портов",
+      "url": "https://neuro-ai.ru/articles/kak-neiroseti-i-ai-agenty-pomogayut-geimeram-ispravljat-nat-type-strict-lagi-i-blokirovku-portov.html"
+    },
+    {
+      "manual_score": 3,
+      "in_step2": false,
+      "step2_num": null,
+      "step2_total": null,
+      "page_verified": true,
+      "link_status": true,
+      "title": "ITGlobal запустил корпоративный шлюз к 50+ LLM",
+      "url": "https://neuro-ai.ru/news/itglobal-zapustil-korporativnyi-shlyuz-k-50-llm-dannye-ostayutsja-v-rossii.html"
+    },
+    {
+      "manual_score": 3,
+      "in_step2": false,
+      "step2_num": null,
+      "step2_total": null,
+      "page_verified": true,
+      "link_status": true,
+      "title": "Минздрав внедряет ИИ для анализа медкарт и снижения бумажной нагрузки на врачей",
+      "url": "https://neuro-ai.ru/news/minzdrav-vnedrjaet-ii-dlja-analiza-medkart-i-snizhenija-bumazhnoi-nagruzki-na-vrachei.html"
+    }
+  ]
+}

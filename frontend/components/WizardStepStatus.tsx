@@ -2,6 +2,20 @@
 
 export type Step3ProgressMode = "combined" | "analytics";
 
+const STEP1_PHASES: { atSec: number; text: string }[] = [
+  { atSec: 0, text: "Запрос принят: снимок баланса ProxyAPI…" },
+  { atSec: 3, text: "Веб-поиск URL статей (ProxyAPI / SerpAPI / Tavily)…" },
+  { atSec: 25, text: "Загрузка и проверка страниц кандидатов…" },
+  { atSec: 55, text: "Добор ссылок и фильтрация по теме ИИ…" },
+  { atSec: 90, text: "ИИ: поиск, проверка источников, скоринг (если нужен добор)…" },
+  { atSec: 150, text: "Сохранение проверенного пула в базу…" },
+  { atSec: 200, text: "Почти готово — дожидаемся ответа сервера…" },
+];
+
+export function getStep1PhaseText(elapsedSec: number): string {
+  return phaseFromList(STEP1_PHASES, elapsedSec);
+}
+
 const STEP3_PHASES: Record<Step3ProgressMode, { atSec: number; text: string }[]> = {
   combined: [
     { atSec: 0, text: "Сохраняем порядок пяти новостей…" },

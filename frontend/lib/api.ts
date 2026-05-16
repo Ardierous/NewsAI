@@ -96,6 +96,39 @@ export const api = {
       body: JSON.stringify({ manual_urls, rebuild: opts?.rebuild ?? false }),
       timeoutMs: LONG_POST_MS,
     }),
+  saveStep1DiscoveredFeedback: (
+    id: number,
+    newsId: number,
+    payload: {
+      score: 1 | 2 | 3;
+      reason?: "published_out_of_range" | "http_unreachable" | "url_redirect_mismatch" | "off_topic_not_ai" | "other";
+      reason_other?: string;
+    },
+  ) =>
+    request<any>(`/digests/${id}/step1/discovered/${newsId}/feedback`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  downloadStep1ManualRatings: async () => {
+    const res = await fetch(`${API_BASE}/digests/step1/manual-ratings/export`, { cache: "no-store" });
+    if (!res.ok) {
+      const msg = await readErrorMessage(res);
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = "step1_manual_ratings.json";
+      anchor.rel = "noopener";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  },
   selectNews: (id: number, selected_ids: number[], top5: boolean) =>
     request<any>(`/digests/${id}/step2/select`, { method: "POST", body: JSON.stringify({ selected_ids, top5 }) }),
   orderNews: (id: number, ordered_candidate_ids: number[]) =>

@@ -14,11 +14,17 @@ from app.services.news_search import extract_http_urls_from_text, extract_urls_f
 logger = logging.getLogger("app.proxyapi")
 
 
+def _is_proxyapi_budget_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "budget exceeded" in text or "402" in text
+
+
 class ProxyApiClient:
     def __init__(self) -> None:
         settings = get_settings()
         self.settings = settings
         self._last_api_response: Any = None
+        self.last_error_kind: str | None = None
         self.client = OpenAI(
             api_key=settings.proxyapi_api_key,
             base_url=settings.proxyapi_base_url,
@@ -38,6 +44,8 @@ class ProxyApiClient:
             self._last_api_response = response
             return response.choices[0].message.content or ""
         except Exception as exc:
+            if _is_proxyapi_budget_error(exc):
+                self.last_error_kind = "budget_exceeded"
             logger.exception("Ошибка chat.completions | model=%s", model or self.settings.proxyapi_model)
             raise RuntimeError("ProxyAPI chat request failed") from exc
 
@@ -90,6 +98,7 @@ class ProxyApiClient:
             }
         ]
         model = self.settings.proxyapi_web_search_model
+        self.last_error_kind = None
         try:
             response = self.client.responses.create(
                 model=model,
@@ -101,7 +110,9 @@ class ProxyApiClient:
             if urls:
                 logger.info("ProxyAPI web_search (responses) | model=%s count=%s", model, len(urls))
                 return urls
-        except Exception:
+        except Exception as exc:
+            if _is_proxyapi_budget_error(exc):
+                self.last_error_kind = "budget_exceeded"
             logger.warning("ProxyAPI responses web_search failed, fallback to search-preview", exc_info=True)
         return self._search_news_urls_chat_preview(user_prompt, limit)
 
@@ -129,9 +140,11 @@ class ProxyApiClient:
             if urls:
                 logger.info("ProxyAPI web_search (chat preview) | model=%s count=%s", preview_model, len(urls))
             return urls
-        except Exception:
+        except Exception as exc:
+            if _is_proxyapi_budget_error(exc):
+                self.last_error_kind = "budget_exceeded"
             logger.exception("ProxyAPI chat search-preview failed | model=%s", preview_model)
-            raise RuntimeError("ProxyAPI web search request failed") from None
+            return []
 
     def suggest_news_order(
         self, items: list[dict[str, Any]], digest_type: str = "serious", model: str | None = None
