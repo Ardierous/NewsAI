@@ -1,0 +1,79 @@
+"""Оптимизация ProxyAPI web_search: fallback только при ошибке API, context size."""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.proxyapi_client import ProxyApiClient
+
+
+def _settings(**kwargs):
+    base = {
+        "proxyapi_api_key": "test-key",
+        "proxyapi_base_url": "https://openai.api.proxyapi.ru/v1",
+        "proxyapi_model": "openai/gpt-4.1",
+        "proxyapi_image_model": "openai/gpt-image-1",
+        "proxyapi_web_search_enabled": True,
+        "proxyapi_web_search_model": "gpt-4o-mini",
+        "proxyapi_web_search_preview_model": "gpt-4o-mini-search-preview",
+        "proxyapi_web_search_context_size": "medium",
+    }
+    base.update(kwargs)
+    return SimpleNamespace(**base)
+
+
+def test_search_empty_responses_does_not_call_preview(monkeypatch: pytest.MonkeyPatch):
+    client = ProxyApiClient.__new__(ProxyApiClient)
+    client.settings = _settings()
+    client.last_error_kind = None
+    client._last_api_response = None
+    client.client = MagicMock()
+
+    empty_resp = MagicMock()
+    empty_resp.output_text = "[]"
+    empty_resp.output = []
+    client.client.responses.create.return_value = empty_resp
+
+    preview = MagicMock()
+    monkeypatch.setattr(client, "_search_news_urls_chat_preview", preview)
+
+    urls = client.search_news_article_urls("AI news", limit=5)
+    assert urls == []
+    preview.assert_not_called()
+
+
+def test_search_api_error_calls_preview(monkeypatch: pytest.MonkeyPatch):
+    client = ProxyApiClient.__new__(ProxyApiClient)
+    client.settings = _settings()
+    client.last_error_kind = None
+    client._last_api_response = None
+    client.client = MagicMock()
+    client.client.responses.create.side_effect = RuntimeError("API down")
+
+    preview = MagicMock(return_value=["https://example.com/a"])
+    monkeypatch.setattr(client, "_search_news_urls_chat_preview", preview)
+
+    urls = client.search_news_article_urls("AI news", limit=5)
+    assert urls == ["https://example.com/a"]
+    preview.assert_called_once()
+    assert preview.call_args.kwargs.get("search_context_size") == "medium"
+
+
+def test_search_passes_supplement_context_size(monkeypatch: pytest.MonkeyPatch):
+    client = ProxyApiClient.__new__(ProxyApiClient)
+    client.settings = _settings()
+    client.last_error_kind = None
+    client._last_api_response = None
+    client.client = MagicMock()
+
+    resp = MagicMock()
+    resp.output_text = '["https://ria.ru/20260519/a.html"]'
+    resp.output = []
+    client.client.responses.create.return_value = resp
+
+    with patch("app.proxyapi_client.extract_urls_from_responses_payload", return_value=["https://ria.ru/20260519/a.html"]):
+        client.search_news_article_urls("q", limit=3, search_context_size="low")
+
+    tools = client.client.responses.create.call_args.kwargs["tools"]
+    assert tools[0]["search_context_size"] == "low"

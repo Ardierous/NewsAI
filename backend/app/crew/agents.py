@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from crewai import Agent, LLM
 
 from app.config import get_settings
-from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS
+from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS, proxyapi_litellm_model
 
 
 @dataclass
@@ -20,8 +20,9 @@ class CrewAgents:
 
 def build_llm(model_name: str | None = None) -> LLM:
     settings = get_settings()
+    raw = model_name or settings.proxyapi_model
     return LLM(
-        model=model_name or settings.proxyapi_model,
+        model=proxyapi_litellm_model(raw),
         base_url=settings.proxyapi_base_url,
         api_key=settings.proxyapi_api_key,
         temperature=0.2,
@@ -64,8 +65,13 @@ def create_agents(system_contract: str) -> CrewAgents:
         ),
         analytics=Agent(
             role="AnalyticsAgent",
-            goal="Подготовить аналитические карточки по каждой новости и общий вывод выпуска",
-            backstory="Ты аналитик технологического медиа, объясняешь просто и точно.",
+            goal="Подготовить карточки по новостям: суть, описание для читателя и развёрнутый комментарий",
+            backstory=(
+                "Ты выпускающий редактор технологического медиа. Сразу пишешь готовые к публикации "
+                "описания: 2–3 предложения живым русским языком, без канцелярита, служебных меток "
+                "и следов генерации ИИ. В каждом описании есть суть новости и понятная польза, вред "
+                "или риск для читателя."
+            ),
             llm=build_llm(AGENT_MODEL_RECOMMENDATIONS["AnalyticsAgent"]),
             allow_delegation=False,
             verbose=False,

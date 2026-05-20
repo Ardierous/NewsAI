@@ -78,11 +78,11 @@ flowchart TD
 
 После серии регрессий зафиксирован **порядок и инварианты**, при которых зелёные чипы снова соответствуют реальным статьям:
 
-1. **Источник URL:** ProxyAPI web_search (и supplement до 3 раундов) → ручные URL → CrewAI **только** если после поиска < `STEP1_MIN_VERIFIED` (5).
+1. **Источник URL:** ProxyAPI web_search (итеративные батчи + короткие supplement-раунды) → ручные URL → CrewAI **только** если после поиска < `STEP1_MIN_VERIFIED` (10).
 2. **Prefilter до HTTP:** `url_suspected_hallucinated` (обрезанный slug, `/doc/5678901`, дата `15052026` в path), `is_topic_pool_page_url` (индексные пулы CNews `/book/mutual/`).
 3. **Verify:** `link_status = false` в начале; зелёный статус только после успешного GET, заголовка с HTML и темы ИИ; URL в карточке — `final_url` после редиректа.
 4. **Score не меняет URL:** `_filter_score_url_mutations` — баллы из score, `url` из verify.
-5. **Rebuild:** backup/restore пула, если было ≥5 зелёных; не затирать проверенный пул preview при 502.
+5. **Rebuild:** backup/restore пула, если было ≥10 зелёных; не затирать проверенный пул preview при 502.
 6. **Окно дат (шаг 0):** материалы старше `digest.date − news_window_days` (календарные или рабочие пн–пт) отсекаются с `published_before_window` — устраняет попадание статей вроде Ведомостей 2023 при выпуске 2026-05.
 
 ## Инварианты (не ломать при правках)
@@ -101,7 +101,7 @@ flowchart TD
 4. **ScoringAgent не меняет `url`.**  
    `_filter_score_url_mutations`: merge по `original_number`, URL из verify.
 
-5. **CrewAI research не запускать**, если веб-поиск уже дал ≥5 подтверждённых (`STEP1_MIN_VERIFIED`).  
+5. **CrewAI research не запускать**, если веб-поиск уже дал ≥10 подтверждённых (`STEP1_MIN_VERIFIED`).  
    Иначе снова доминируют `llm_hallucinated_url` / `url_mutated_between_agents`.
 
 6. **В карточке хранить `final_url` после редиректа**, не «сырой» URL из выдачи (см. комментарий у manual/search verify).
@@ -160,6 +160,8 @@ PROXYAPI_API_KEY=...
 PROXYAPI_WEB_SEARCH_ENABLED=true
 ```
 
+Шаг 1 формирует пул сразу после набора 10 валидных страниц (без дополнительного порога воронки).
+
 Опционально: `SERPAPI_API_KEY`, `TAVILY_API_KEY`. Без ключа и без ручных URL шаг 1 не соберёт пул.
 
 ## Типовые регрессии («что ломается»)
@@ -171,7 +173,7 @@ PROXYAPI_WEB_SEARCH_ENABLED=true
 | Доверять `url` из ScoringAgent | `url_mutated_between_agents` в логе | `_filter_score_url_mutations` |
 | Всегда вызывать Crew research | Много битых URL при успешном web_search | условие `len(verified_pool) < STEP1_MIN_VERIFIED` |
 | Preview при 502 как «итог» | 18 карточек, 1 зелёная | при неудачной **пересборке** восстанавливается прежний пул (если был ≥5 зелёных); иначе rebuild |
-| CrewAI до добора web_search | Много `http_unreachable` на выдуманных URL | сначала 3 раунда `web_search` supplement, потом CrewAI |
+| CrewAI до добора web_search | Много `http_unreachable` на выдуманных URL | сначала итеративные батчи web_search, потом CrewAI |
 | URL вида `.../15052026/` или обрезанный slug | 404, `llm_hallucinated_url` | `url_suspected_hallucinated` в поиске и prefilter |
 | Показывать LLM title при failed verify | Заголовок правдоподобный, ссылка серая | сброс `title` перед verify в llm_merged |
 

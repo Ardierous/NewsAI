@@ -90,6 +90,8 @@ class Step1DiscoveryRun(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     pool_formed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     news_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    duration_sec: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_rub: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class Step1DiscoveredNews(Base):

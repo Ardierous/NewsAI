@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-05-16 13:34:18 МСК",
+  "updated_at": "2026-05-20 19:16:51 МСК",
   "pool_dates": [
     {
       "pool_date": "2026-05-16",
@@ -410,6 +410,452 @@
               "discovered_news_id": 36
             }
           ]
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-05-18",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-05-18 09:58:31 МСК",
+          "pool_formed_at": "2026-05-18 10:03:50 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 2,
+          "news_in_pool": 21,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 2,
+          "run_started_at": "2026-05-18 10:07:04 МСК",
+          "pool_formed_at": "2026-05-18 10:15:15 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 3,
+          "news_in_pool": 42,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 3,
+          "run_started_at": "2026-05-18 10:21:04 МСК",
+          "pool_formed_at": "2026-05-18 10:24:17 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 4,
+          "news_in_pool": 33,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 4,
+          "run_started_at": "2026-05-18 11:55:11 МСК",
+          "pool_formed_at": "2026-05-18 12:09:23 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 5,
+          "news_in_pool": 39,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 5,
+          "run_started_at": "2026-05-18 12:41:07 МСК",
+          "pool_formed_at": "2026-05-18 13:15:21 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 6,
+          "news_in_pool": 41,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 6,
+          "run_started_at": "2026-05-18 13:46:49 МСК",
+          "pool_formed_at": "2026-05-18 14:12:47 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 7,
+          "news_in_pool": 41,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 7,
+          "run_started_at": "2026-05-18 14:56:32 МСК",
+          "pool_formed_at": "2026-05-18 15:02:41 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 8,
+          "news_in_pool": 9,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 8,
+          "run_started_at": "2026-05-18 15:40:06 МСК",
+          "pool_formed_at": "2026-05-18 15:49:17 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 9,
+          "news_in_pool": 21,
+          "ratings_count": 1,
+          "ratings": [
+            {
+              "rated_at": "2026-05-18 16:34:45 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: gazeta.ru",
+              "url": "https://www.gazeta.ru/auth/sso.shtml?origin=/business/news/2025/11/20/27231601.shtml",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 50
+            }
+          ]
+        },
+        {
+          "run_number": 9,
+          "run_started_at": "2026-05-18 16:15:13 МСК",
+          "pool_formed_at": null,
+          "digest_id": 6,
+          "discovery_run_id": 10,
+          "news_in_pool": 0,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 10,
+          "run_started_at": "2026-05-18 16:46:09 МСК",
+          "pool_formed_at": "2026-05-18 16:53:59 МСК",
+          "digest_id": 6,
+          "discovery_run_id": 11,
+          "news_in_pool": 59,
+          "ratings_count": 9,
+          "ratings": [
+            {
+              "rated_at": "2026-05-18 16:58:37 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: cset.georgetown.edu",
+              "url": "https://cset.georgetown.edu/publication/decree-of-the-president-of-the-russian-federation-on-the-development-of-artificial-intelligence-in-the-russian-federation/",
+              "published_at": "2019-10-28T17:49:00+03:00",
+              "discovered_news_id": 85
+            },
+            {
+              "rated_at": "2026-05-18 16:59:28 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Как Россия создает суверенную экосистему беспилотников для автономии на базе ИИ",
+              "url": "https://www.csis.org/analysis/how-russia-building-sovereign-drone-ecosystem-ai-driven-autonomy",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 79
+            },
+            {
+              "rated_at": "2026-05-18 17:00:11 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "нельзя использовать Википедию",
+              "title": "Искусственный интеллект",
+              "url": "https://ru.wikipedia.org/wiki/%D0%98%D1%81%D0%BA%D1%83%D1%81%D1%81%D1%82%D0%B2%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9_%D0%B8%D0%BD%D1%82%D0%B5%D0%BB%D0%BB%D0%B5%D0%BA%D1%82",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 40
+            },
+            {
+              "rated_at": "2026-05-18 17:00:33 МСК",
+              "score": 2,
+              "reason_code": "http_unreachable",
+              "reason_label": "ссылка не открылась",
+              "reason_other": null,
+              "title": "ABBYY представила новую платформу ИИ для автоматизации документооборота",
+              "url": "https://www.cnews.ru/news/line/2026-05-17_abbyy_predstavila_novuyu_platformu_ii",
+              "published_at": "2026-05-17T17:00:00+03:00",
+              "discovered_news_id": 61
+            },
+            {
+              "rated_at": "2026-05-18 17:00:49 МСК",
+              "score": 2,
+              "reason_code": "url_redirect_mismatch",
+              "reason_label": "ссылка открылась на другую страницу",
+              "reason_other": null,
+              "title": "Страница: sberbank.ru",
+              "url": "https://www.sberbank.ru/ru/sberpress/all/article?newsID=20260517120000",
+              "published_at": "2026-05-17T15:00:00+03:00",
+              "discovered_news_id": 43
+            },
+            {
+              "rated_at": "2026-05-18 17:01:17 МСК",
+              "score": 2,
+              "reason_code": "http_unreachable",
+              "reason_label": "ссылка не открылась",
+              "reason_other": null,
+              "title": "Росатом запускает проект по созданию ИИ для управления энергосистемами",
+              "url": "https://tass.ru/ekonomika/15543211/rosatom-zapuskaet-proekt-po-sozdaniyu-ii-dlya-upravleniya-energosistemami",
+              "published_at": "2026-05-17T14:30:00+03:00",
+              "discovered_news_id": 41
+            },
+            {
+              "rated_at": "2026-05-18 17:01:47 МСК",
+              "score": 2,
+              "reason_code": "http_unreachable",
+              "reason_label": "ссылка не открылась",
+              "reason_other": null,
+              "title": "Российские стартапы представили инновационные решения на AI Expo",
+              "url": "https://technews.ru/startups-ai-expo-2026",
+              "published_at": "2026-05-17T14:00:00+03:00",
+              "discovered_news_id": 52
+            },
+            {
+              "rated_at": "2026-05-18 17:02:05 МСК",
+              "score": 2,
+              "reason_code": "http_unreachable",
+              "reason_label": "ссылка не открылась",
+              "reason_other": null,
+              "title": "Яндекс обновил голосового помощника с использованием новых ИИ-моделей",
+              "url": "https://yandex.ru/company/news/2026/05/17/yandex-voice-assistant-update",
+              "published_at": "2026-05-17T13:00:00+03:00",
+              "discovered_news_id": 55
+            },
+            {
+              "rated_at": "2026-05-18 17:03:03 МСК",
+              "score": 2,
+              "reason_code": "http_unreachable",
+              "reason_label": "ссылка не открылась",
+              "reason_other": null,
+              "title": "MIT Technology Review: Тренды развития ИИ в 2026 году",
+              "url": "https://www.technologyreview.com/2026/05/17/ai-trends-2026/",
+              "published_at": "2026-05-17T08:00:00+03:00",
+              "discovered_news_id": 59
+            }
+          ]
+        },
+        {
+          "run_number": 11,
+          "run_started_at": "2026-05-18 18:52:20 МСК",
+          "pool_formed_at": null,
+          "digest_id": 6,
+          "discovery_run_id": 12,
+          "news_in_pool": 0,
+          "ratings_count": 0,
+          "ratings": []
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-05-19",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-05-19 12:00:16 МСК",
+          "pool_formed_at": "2026-05-19 12:30:59 МСК",
+          "digest_id": 7,
+          "discovery_run_id": 13,
+          "news_in_pool": 41,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 2,
+          "run_started_at": "2026-05-19 13:08:41 МСК",
+          "pool_formed_at": "2026-05-19 13:35:45 МСК",
+          "digest_id": 7,
+          "discovery_run_id": 14,
+          "news_in_pool": 61,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 3,
+          "run_started_at": "2026-05-19 14:52:27 МСК",
+          "pool_formed_at": null,
+          "digest_id": 7,
+          "discovery_run_id": 15,
+          "news_in_pool": 0,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 4,
+          "run_started_at": "2026-05-19 14:53:13 МСК",
+          "pool_formed_at": null,
+          "digest_id": 7,
+          "discovery_run_id": 16,
+          "news_in_pool": 0,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 5,
+          "run_started_at": "2026-05-19 15:23:25 МСК",
+          "pool_formed_at": "2026-05-19 15:49:30 МСК",
+          "digest_id": 7,
+          "discovery_run_id": 17,
+          "news_in_pool": 23,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 6,
+          "run_started_at": "2026-05-19 19:19:45 МСК",
+          "pool_formed_at": "2026-05-19 19:45:58 МСК",
+          "digest_id": 7,
+          "discovery_run_id": 18,
+          "news_in_pool": 23,
+          "ratings_count": 0,
+          "ratings": []
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-05-20",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-05-20 11:29:23 МСК",
+          "pool_formed_at": "2026-05-20 11:35:21 МСК",
+          "digest_id": 8,
+          "discovery_run_id": 19,
+          "news_in_pool": 43,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 2,
+          "run_started_at": "2026-05-20 12:26:51 МСК",
+          "pool_formed_at": "2026-05-20 12:32:13 МСК",
+          "digest_id": 8,
+          "discovery_run_id": 20,
+          "news_in_pool": 17,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 3,
+          "run_started_at": "2026-05-20 14:03:34 МСК",
+          "pool_formed_at": "2026-05-20 14:08:58 МСК",
+          "digest_id": 8,
+          "discovery_run_id": 21,
+          "news_in_pool": 26,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 4,
+          "run_started_at": "2026-05-20 15:13:02 МСК",
+          "pool_formed_at": "2026-05-20 15:19:53 МСК",
+          "digest_id": 8,
+          "discovery_run_id": 22,
+          "news_in_pool": 34,
+          "ratings_count": 8,
+          "ratings": [
+            {
+              "rated_at": "2026-05-20 15:22:44 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "ссылка на агрегатор, а не на новость",
+              "title": "Искусственный интеллект (ИИ)",
+              "url": "https://ria.ru/product_iskusstvennyy-intellekt/",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 134
+            },
+            {
+              "rated_at": "2026-05-20 15:24:46 МСК",
+              "score": 2,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "дата неопределена",
+              "title": "Искусственный интеллект",
+              "url": "https://www.sciencedaily.com/terms/artificial_intelligence.htm",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 136
+            },
+            {
+              "rated_at": "2026-05-20 15:25:52 МСК",
+              "score": 1,
+              "reason_code": "other",
+              "reason_label": "другое",
+              "reason_other": "статья недоступна для просмотра (возможно платная)",
+              "title": "Искусственный интеллект",
+              "url": "https://www.tadviser.ru/index.php/%D0%A1%D1%82%D0%B0%D1%82%D1%8C%D1%8F:%D0%98%D1%81%D0%BA%D1%83%D1%81%D1%81%D1%82%D0%B2%D0%B5%D0%BD%D0%BD%D1%8B%D0%B9_%D0%B8%D0%BD%D1%82%D0%B5%D0%BB%D0%BB%D0%B5%D0%BA%D1%82",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 143
+            },
+            {
+              "rated_at": "2026-05-20 15:27:58 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Safe Pro сообщает о рекордном росте доходов на 560% за первый квартал благодаря росту продаж искусственного интеллекта на 2 400%, с валовой прибылью по ИИ более 72%",
+              "url": "https://aimagazine.com/globenewswire/3295808",
+              "published_at": "2026-05-15T15:02:00+03:00",
+              "discovered_news_id": 132
+            },
+            {
+              "rated_at": "2026-05-20 15:28:08 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Обновление – LPL Financial получила две награды Stevie за инновации в концепциях искусственного интеллекта",
+              "url": "https://aimagazine.com/globenewswire/3295514",
+              "published_at": "2026-05-15T03:14:07+03:00",
+              "discovered_news_id": 146
+            },
+            {
+              "rated_at": "2026-05-20 15:29:03 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Безопасное внедрение ИИ в корпорации: 3 архитектурных подхода и опыт Alpina Digital",
+              "url": "https://habr.com/ru/companies/alpinadigital/articles/1035766/",
+              "published_at": "2026-05-16T09:00:35+03:00",
+              "discovered_news_id": 129
+            },
+            {
+              "rated_at": "2026-05-20 15:30:12 МСК",
+              "score": 3,
+              "reason_code": null,
+              "reason_label": "",
+              "reason_other": null,
+              "title": "Motif, поддерживаемая Temasek, запускает Clarity — систему ИИ, которая хочет дать платформам для управления богатством \"мозг",
+              "url": "https://thenextweb.com/news/motif-clarity-ai-financial-intelligence-temasek",
+              "published_at": "2026-05-19T13:44:44+03:00",
+              "discovered_news_id": 138
+            },
+            {
+              "rated_at": "2026-05-20 15:30:52 МСК",
+              "score": 1,
+              "reason_code": "published_out_of_range",
+              "reason_label": "дата не в диапазоне",
+              "reason_other": null,
+              "title": "Страница: vedomosti.ru",
+              "url": "https://www.vedomosti.ru/technologies/new_technologies/articles/2026/05/14/1196904-illyuzii-k-praktike?from=newsline_vedomosti",
+              "published_at": "UNDEFINED",
+              "discovered_news_id": 121
+            }
+          ]
+        },
+        {
+          "run_number": 5,
+          "run_started_at": "2026-05-20 17:18:32 МСК",
+          "pool_formed_at": null,
+          "digest_id": 8,
+          "discovery_run_id": 23,
+          "news_in_pool": 0,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 6,
+          "run_started_at": "2026-05-20 18:53:35 МСК",
+          "pool_formed_at": null,
+          "digest_id": 8,
+          "discovery_run_id": 24,
+          "news_in_pool": 0,
+          "ratings_count": 0,
+          "ratings": []
         }
       ]
     }

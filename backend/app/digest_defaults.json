@@ -1,0 +1,7 @@
+{
+  "step0": {
+    "digest_type_default": "curious",
+    "news_window_days_default": 3,
+    "news_window_day_kind_default": "working"
+  }
+}

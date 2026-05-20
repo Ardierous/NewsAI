@@ -54,6 +54,14 @@ def test_telegram_no_sep_inline_subscription_short_lead():
     assert re.search(r"➤ \[OpenAI[^\]]+\]\(https://3dnews\.ru/[^\)]+\)\nКомпания объединяет", text)
 
 
+def test_telegram_hashtags_separated_from_subscription():
+    text = assemble_telegram(_sample_payload())
+    sub_end = text.index("boosty.to/extellect")
+    tags_start = text.index("#ИИ", sub_end)
+    between = text[sub_end:tags_start]
+    assert "\n\n" in between
+
+
 def test_max_title_link_only_no_duplicate_url():
     text = assemble_max(_sample_payload())
     assert MAX_NEWS_SEP in text

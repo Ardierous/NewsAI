@@ -1,14 +1,15 @@
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 
-/** Длинные AI-операции (шаги 1, 3, 4): браузерный fetch по умолчанию не ограничен, но явный таймаут защищает от «вечного» зависания. */
-const LONG_POST_MS = 15 * 60 * 1000;
+/** Длинные AI-операции (шаги 3, 4): опциональный таймаут. Шаг 1 без лимита — сбор пула может идти долго. */
+const LONG_POST_MS = 60 * 60 * 1000;
 
 type RequestOptions = RequestInit & { timeoutMs?: number };
 
 function createTimeoutSignal(ms: number): { signal: AbortSignal; cancel: () => void } {
   const controller = new AbortController();
+  const min = Math.max(1, Math.round(ms / 60_000));
   const id = setTimeout(() => {
-    controller.abort(new Error("Превышено время ожидания ответа сервера (15 мин)."));
+    controller.abort(new Error(`Превышено время ожидания ответа сервера (${min} мин).`));
   }, ms);
   return {
     signal: controller.signal,
@@ -90,11 +91,49 @@ export const api = {
         news_window_day_kind: opts?.news_window_day_kind ?? "working",
       }),
     }),
-  step1Run: (id: number, manual_urls: string[], opts?: { rebuild?: boolean }) =>
+  patchNewsWindow: (
+    id: number,
+    opts: { news_window_days: number; news_window_day_kind: "calendar" | "working" },
+  ) =>
+    request<any>(`/digests/${id}/news-window`, {
+      method: "PATCH",
+      body: JSON.stringify(opts),
+    }),
+  step1Run: (
+    id: number,
+    manual_urls: string[],
+    opts?: {
+      rebuild?: boolean;
+      keep_candidate_ids?: number[];
+      news_window_days?: number;
+      news_window_day_kind?: "calendar" | "working";
+    },
+  ) =>
     request<any[]>(`/digests/${id}/step1/run`, {
       method: "POST",
-      body: JSON.stringify({ manual_urls, rebuild: opts?.rebuild ?? false }),
-      timeoutMs: LONG_POST_MS,
+      body: JSON.stringify({
+        manual_urls,
+        rebuild: opts?.rebuild ?? false,
+        keep_candidate_ids: opts?.keep_candidate_ids ?? [],
+        news_window_days: opts?.news_window_days ?? null,
+        news_window_day_kind: opts?.news_window_day_kind ?? null,
+      }),
+      // Без timeoutMs: шаг 1 верифицирует десятки URL — обрыв на 15 мин давал ложный сбой при живом backend.
+    }),
+  getStep1Filters: (id: number) =>
+    request<any>(`/digests/${id}/step1/filters`),
+  saveStep1Filters: (
+    id: number,
+    payload: {
+      version: number;
+      filters: Array<{ id: string; enabled: boolean; order: number }>;
+      min_discovered_pages: number;
+      min_collection_iterations: number;
+    },
+  ) =>
+    request<any>(`/digests/${id}/step1/filters`, {
+      method: "PUT",
+      body: JSON.stringify(payload),
     }),
   saveStep1DiscoveredFeedback: (
     id: number,

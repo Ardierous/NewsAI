@@ -8,7 +8,7 @@ from typing import Any
 from openai import OpenAI
 
 from app.config import get_settings
-from app.crew.model_policy import STEP2_AI_ORDER_MODEL
+from app.crew.model_policy import STEP2_AI_ORDER_MODEL, proxyapi_chat_model
 from app.services.news_search import extract_http_urls_from_text, extract_urls_from_responses_payload
 
 logger = logging.getLogger("app.proxyapi")
@@ -34,7 +34,7 @@ class ProxyApiClient:
     def chat(self, system_prompt: str, user_prompt: str, model: str | None = None) -> str:
         try:
             response = self.client.chat.completions.create(
-                model=model or self.settings.proxyapi_model,
+                model=proxyapi_chat_model(model or self.settings.proxyapi_model),
                 temperature=0.2,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -70,16 +70,27 @@ class ProxyApiClient:
             logger.exception("Ошибка images.generate | model=%s", model or self.settings.proxyapi_image_model)
             raise RuntimeError("ProxyAPI image generation failed") from exc
 
-    def search_news_article_urls(self, query: str, limit: int = 15) -> list[str]:
+    def search_news_article_urls(
+        self,
+        query: str,
+        limit: int = 15,
+        *,
+        search_context_size: str | None = None,
+    ) -> list[str]:
         """
         Реальный веб-поиск через ProxyAPI (OpenAI Responses API + tool web_search).
         Документация: https://proxyapi.ru/docs/openai-web-search
         """
         if not self.settings.proxyapi_web_search_enabled:
             return []
+        ctx_size = (search_context_size or self.settings.proxyapi_web_search_context_size).strip().lower()
+        if ctx_size not in ("low", "medium", "high"):
+            ctx_size = "medium"
         user_prompt = (
-            f"Найди до {limit} свежих новостей за последние 96 часов (часовой пояс Europe/Moscow) по теме: {query}. "
+            f"Найди до {limit} свежих новостей (часовой пояс Europe/Moscow) по теме: {query}. "
+            "Строго соблюдай ограничения дат из запроса (after:/окно публикации). "
             "Только материалы про искусственный интеллект, нейросети, машинное обучение или крупные модели (GPT, Gemini, Claude и т.п.). "
+            "Можно использовать агрегаторы и дайджесты для поиска сюжета, но итоговые ссылки должны вести на первоисточник. "
             "Нужны прямые URL отдельных HTML-статей (не рубрики, не ленты, не разделы вроде /neiroseti или /articles/artificial_intelligence/, "
             "не агрегаторы, не Google News, не Reddit, не главные страницы, не поиск). "
             f"Ответ: строго JSON-массив из не более {limit} строк — каждая строка один полный URL, без markdown и без пояснений."
@@ -93,7 +104,7 @@ class ProxyApiClient:
         tools = [
             {
                 "type": "web_search",
-                "search_context_size": self.settings.proxyapi_web_search_context_size,
+                "search_context_size": ctx_size,
                 "user_location": location,
             }
         ]
@@ -108,22 +119,39 @@ class ProxyApiClient:
             self._last_api_response = response
             urls = extract_urls_from_responses_payload(response, limit=limit)
             if urls:
-                logger.info("ProxyAPI web_search (responses) | model=%s count=%s", model, len(urls))
+                logger.info(
+                    "ProxyAPI web_search (responses) | model=%s count=%s context=%s",
+                    model,
+                    len(urls),
+                    ctx_size,
+                )
                 return urls
+            logger.warning(
+                "ProxyAPI web_search (responses): пустой список URL, без повторного search-preview | model=%s",
+                model,
+            )
+            return []
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
             logger.warning("ProxyAPI responses web_search failed, fallback to search-preview", exc_info=True)
-        return self._search_news_urls_chat_preview(user_prompt, limit)
+        return self._search_news_urls_chat_preview(user_prompt, limit, search_context_size=ctx_size)
 
-    def _search_news_urls_chat_preview(self, user_prompt: str, limit: int) -> list[str]:
+    def _search_news_urls_chat_preview(
+        self,
+        user_prompt: str,
+        limit: int,
+        *,
+        search_context_size: str = "medium",
+    ) -> list[str]:
         preview_model = self.settings.proxyapi_web_search_preview_model
+        ctx_size = search_context_size if search_context_size in ("low", "medium", "high") else "medium"
         try:
             response = self.client.chat.completions.create(
                 model=preview_model,
                 messages=[{"role": "user", "content": user_prompt}],
                 web_search_options={
-                    "search_context_size": self.settings.proxyapi_web_search_context_size,
+                    "search_context_size": ctx_size,
                     "user_location": {
                         "type": "approximate",
                         "approximate": {
@@ -138,7 +166,12 @@ class ProxyApiClient:
             text = response.choices[0].message.content or ""
             urls = extract_http_urls_from_text(text, limit=limit)
             if urls:
-                logger.info("ProxyAPI web_search (chat preview) | model=%s count=%s", preview_model, len(urls))
+                logger.info(
+                    "ProxyAPI web_search (chat preview) | model=%s count=%s context=%s",
+                    preview_model,
+                    len(urls),
+                    ctx_size,
+                )
             return urls
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):

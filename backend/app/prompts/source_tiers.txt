@@ -1,57 +1,248 @@
-Система приоритетов источников для дайджеста ИИ (заменяет прежние общие указания по Tier).
+Система приоритетов источников для дайджеста ИИ.
 
-Правило для поля tier в JSON кандидатов:
-- Используй строки: Tier-1, Tier-2, Tier-3, Tier-4 — по соответствию домену/изданию ниже (чем выше доверие и авторитет для дайджеста, тем меньше номер).
-- Источники из категории «Tier 5 (запрещённые)» не используй как основу кандидата: помечай is_aggregator=true (или эквивалентный признак агрегатора), снижай total_score, в reliability_status отрази проблему; к финальной пятёрке такие материалы не допускай.
+Это список ресурсов, где нужно искать новости для дайджеста. Поле tier относится к итоговому источнику новости, а не к инструменту поиска.
+Важно: фактическое применение/неприменение фильтров и ограничений на шаге 1 управляется runtime-настройками фильтров выпуска в UI; этот документ задаёт приоритеты и ориентиры, а не жёстко прошитые условия отбора.
 
----
-
-Tier-1 (приоритет №1):
-- Пресс-релизы крупных компаний, связанных с разработкой и использованием ИИ.
-- Крупнейшие и наиболее авторитетные международные и российские издания (высокое качество аналитики и оперативность).
-
-Международные: Bloomberg, Financial Times (FT), Wall Street Journal (WSJ).
-Российские: ТАСС, Интерфакс, Ведомости, Коммерсантъ, РБК, Эксперт (expert.ru).
-
-Эти источники — надёжная основа для ежедневного дайджеста (международный и локальный контекст).
+Правила для поля tier в JSON кандидатов:
+- Используй строки: Tier-1, Tier-2, Tier-3, Tier-4, Tier-5.
+- Tier-1 и Tier-2 заполняй строго по спискам ниже. Если ресурса нет в соответствующем списке исследования, не повышай его до Tier-1/Tier-2.
+- Агрегаторы, поисковые ленты, дайджест-каналы и newsletter-сводки можно использовать как разведку для поиска первоисточника, но нельзя возвращать как самостоятельную новость. В кандидате должен быть прямой URL отдельной HTML-статьи или публикации первоисточника.
+- Если URL кандидата ведёт на агрегатор, ленту, поиск, тег, главную страницу или запрещённое СМИ — выставь Tier-5, is_aggregator=true для агрегаторов, link_status=false и не допускай в финальную пятёрку.
+- При равной значимости отдавай предпочтение более высокому tier (меньший номер), но не жертвуй рабочей ссылкой, свежестью и соответствием теме ИИ.
 
 ---
 
-Tier-2 (приоритет №2):
-Популярные технологические и специализированные издания для углублённого изучения темы ИИ.
+Tier-1 (приоритет №1): ресурсы для массового читателя из исследования
 
-Международные: TechCrunch, Axios, The Verge, MIT Technology Review.
-Российские: VC.ru, CNews.ru, Хабр (habr.com), «Открытые системы», «Информационные технологии».
+Назначение: понятные новости и объяснения об ИИ для начинающих, широкой аудитории и делового читателя без глубокой технической экспертизы.
 
-Подходят профессионалам и широкой аудитории; разнообразие взглядов и глубина темы.
+Зарубежные:
+- Google News по запросу Artificial Intelligence — https://news.google.com/search?q=artificial%20intelligence — только для поиска первоисточников, не как самостоятельная новость.
+- Particle.news — https://particle.news/ — для быстрого обнаружения и сверки сюжетов; если материал агрегирует чужие публикации, ищи первоисточник.
+- TNW / The Next Web, раздел Artificial Intelligence — https://thenextweb.com/artificial-intelligence
+- The Batch от DeepLearning.AI — https://www.deeplearning.ai/the-batch/ — полезен для объяснения трендов; если это дайджест, предпочитай первоисточник события.
+- Analytics Insight, раздел Artificial Intelligence — https://www.analyticsinsight.net/artificial-intelligence/
 
----
+Российские:
+- AiManual — https://ai-manual.ru/
+- Telegram-канал «Искусственный Интеллект (дайджест)» — https://t.me/s/AI_UD — только для поиска первоисточников, не как самостоятельная новость.
+- Telegram «Голос Технократии» — https://t.me/s/technokratos — мониторинг шага 1: из постов берутся внешние ссылки на статьи (автопарсинг t.me/s/), не URL постов TG.
+- РИА Новости, тематический раздел «Искусственный интеллект» — https://ria.ru/product_iskusstvennyy-intellekt/
+- Interfax, раздел Digital — https://www.interfax.ru/digital/
+- Ведомости, раздел «Технологии» — https://www.vedomosti.ru/technologies/
 
-Tier-3 (приоритет №3):
-Профильные блоги, аналитические центры и официальные инициативы; экспертные и официальные позиции.
-
-Государственные и смежные: Министерство цифрового развития РФ (Минцифры), Фонд «Сколково», Росатом, Ростех.
-Образовательные платформы: Coursera, Stepik, Нетология.
-Сообщества и соцсети (профиль): LinkedIn, RuDataLeaks, Data Science Community Russia.
-Научные и отраслевые обзоры: arXiv.org, AI Index Report, IEEE Spectrum.
-
-Глубина и стратегические направления развития ИИ в России и мире.
-
----
-
-Tier-4 (приоритет №4):
-Корпоративные источники и стартапы: инновации и практические кейсы ИИ.
-
-Российский бизнес: Яндекс, VK / экосистема бывш. Mail.ru Group, Сбербанк, Cognitive Technologies, ABBYY.
-Зарубежные корпорации: Google, Microsoft, IBM, NVIDIA, OpenAI.
-
-Полезно для практических реализаций и коммерческих новостей.
+Что не вошло в этот список, не повышай до Tier-1.
 
 ---
 
-Tier-5 (запрещённые агрегаторы):
-Агрегаторы новостей, снижающие уникальность и затрудняющие проверку первоисточника.
+Tier-2 (приоритет №2): ресурсы для профессионального читателя из исследования
 
-Примеры: Яндекс.Новости, агрегаторы RBC и аналогичные агрегаторы без оригинальной редакции.
+Назначение: техническая, отраслевая и профессиональная повестка для экспертов, разработчиков, исследователей, предпринимателей и инвесторов.
 
-Для таких URL: не трактуй как первоисточник; is_aggregator=true; не рекомендуй к включению в итоговую пятёрку.
+Зарубежные:
+- MIT Technology Review, раздел Artificial Intelligence — https://www.technologyreview.com/topic/artificial-intelligence/
+- IEEE Spectrum, раздел Artificial Intelligence — https://spectrum.ieee.org/topic/artificial-intelligence/
+- WIRED, раздел/tag Artificial Intelligence — https://www.wired.com/tag/artificial-intelligence/
+- TechCrunch, раздел Artificial Intelligence — https://techcrunch.com/category/artificial-intelligence/
+- The Rundown AI — https://www.therundown.ai/ — как источник мониторинга; если это дайджест, ищи прямой URL первоисточника.
+- TLDR AI — https://tldr.tech/api/latest/ai — как источник мониторинга последнего выпуска; если это дайджест, ищи прямой URL первоисточника.
+- ScienceDaily, раздел Computers & Math / Artificial Intelligence — https://www.sciencedaily.com/news/computers_math/artificial_intelligence/ — по возможности предпочитай первичную публикацию университета/журнала.
+- TechXplore, раздел Machine Learning & AI — https://techxplore.com/machine-learning-ai-news/
+- ZDNet, раздел Artificial Intelligence — https://www.zdnet.com/topic/artificial-intelligence/
+- AI Magazine — https://aimagazine.com/
+
+Российские:
+- TAdviser, общий пул новостей — https://www.tadviser.ru/index.php/Новости; тематическая справочная страница ИИ — https://www.tadviser.ru/index.php/Статья:Искусственный_интеллект
+- Хабр, хаб «Искусственный интеллект» — https://habr.com/ru/hubs/artificial_intelligence/
+- VC.ru, раздел AI — https://vc.ru/ai
+- NVIDIA, официальный AI-архив блога — https://blogs.nvidia.com/blog/tag/artificial-intelligence/ (российский blogs.nvidia.ru недоступен)
+- Shvedkov.pro — https://shvedkov.pro/
+
+Что не вошло в этот список, не повышай до Tier-2.
+
+---
+
+Tier-3 (приоритет №3): профильные блоги, аналитические центры и официальные инициативы
+
+Назначение: экспертные позиции, официальные заявления, отраслевые обзоры, регуляторика и долгосрочная аналитика.
+
+Примеры допустимых направлений:
+- государственные и смежные инициативы: Минцифры РФ, Фонд «Сколково», Росатом, Ростех;
+- образовательные и исследовательские площадки: Coursera, Stepik, Нетология, AI Index Report;
+- профильные сообщества и экспертные блоги, если материал является новостью, исследованием, официальной позицией или содержательной аналитикой.
+
+arXiv.org и Wikipedia не допускаются в пул шага 1 как самостоятельные новости (см. blocked_search_hosts в HOST_RULES).
+
+---
+
+Tier-4 (приоритет №4): корпоративные источники и стартапы
+
+Назначение: инновации, практические кейсы ИИ и пресс-релизы крупных компаний про ИИ.
+
+Ищи только новостные материалы: анонсы моделей и продуктов, крупные внедрения, партнёрства, инвестиции, исследования, регуляторные заявления, значимые релизы API/инфраструктуры. Не используй страницы инструментов, лендинги, pricing, demo, документацию, evergreen-гайды и промо «как пользоваться».
+
+Примеры источников:
+- российские компании: Яндекс, VK, Сбер, Cognitive Technologies, ABBYY;
+- зарубежные компании: Google / DeepMind, Microsoft, IBM, NVIDIA, OpenAI, Anthropic.
+
+---
+
+Tier-5 (запрещённые источники и недопустимые URL)
+
+Не допускаются как самостоятельные новости:
+- агрегаторы новостей, поисковые ленты, теги, главные страницы и дайджест-каналы без прямой оригинальной публикации;
+- Wikipedia;
+- СМИ, запрещённые законодательством РФ (список доменов — banned_media_hosts в HOST_RULES);
+- любые URL, где нельзя подтвердить отдельную HTML-страницу новости.
+
+Агрегаторы можно использовать для поиска сюжета и первоисточника. В пул кандидатов должен попадать первоисточник, а не URL агрегатора.
+
+Важно: источники-иноагенты не запрещаются автоматически только по этому признаку; они должны быть явно промаркированы в карточке (foreign_agent_hosts в HOST_RULES).
+
+--- HOST_RULES ---
+# Правила для кода (шаг 1, поиск). Один хост/маркер на строку; подстрока в hostname.
+# Секции: aggregator_hosts, tier1_hosts, tier2_hosts, tier3_hosts, tier4_hosts,
+# banned_media_hosts, foreign_agent_hosts, russian_host_markers, blocked_search_hosts, search_seed_urls.
+
+[aggregator_hosts]
+news.google.
+google.com/news
+news.ycombinator.com
+reddit.com
+medium.com/tag/
+feedly.com
+flipboard.com
+newsnow.
+news.yahoo.
+news.tek.fm
+yandex.ru/news
+x.com
+t.co
+t.me/s/ai_ud
+telegram.me
+therundown.ai
+tldr.tech
+
+[tier1_hosts]
+particle.news
+thenextweb.com
+deeplearning.ai
+analyticsinsight.net
+ai-manual.ru
+ria.ru
+interfax.ru
+vedomosti.ru
+
+[tier2_hosts]
+technologyreview.com
+spectrum.ieee.org
+wired.com
+techcrunch.com
+sciencedaily.com
+techxplore.com
+zdnet.com
+aimagazine.com
+tadviser.ru
+habr.com
+vc.ru
+blogs.nvidia.com
+shvedkov.pro
+
+[tier3_hosts]
+digital.gov.ru
+sk.ru
+rosatom.ru
+rostec.ru
+coursera.org
+stepik.org
+netology.ru
+aiindex.stanford.edu
+
+[tier4_hosts]
+yandex.ru
+ya.ru
+vk.com
+vk.company
+sber.ru
+sberbank.ru
+cognitive.ru
+abbyy.com
+blog.google
+googleblog.com
+ai.google
+deepmind.google
+microsoft.com
+ibm.com
+nvidia.com
+openai.com
+anthropic.com
+
+[banned_media_hosts]
+meduza.io
+novayagazeta.eu
+tvrain.
+theins.ru
+i-stories.media
+agentura.ru
+activatica.org
+currenttime.tv
+svoboda.org
+
+[foreign_agent_hosts]
+meduza.io
+tvrain.
+currenttime.tv
+svoboda.org
+
+[russian_host_markers]
+interfax.ru
+vedomosti.ru
+ai-manual.ru
+ria.ru
+tadviser.ru
+habr.com
+vc.ru
+shvedkov.pro
+digital.gov.ru
+sk.ru
+rosatom.ru
+rostec.ru
+yandex.ru
+ya.ru
+vk.com
+vk.company
+sber.ru
+sberbank.ru
+cognitive.ru
+
+[blocked_search_hosts]
+arxiv.org
+wikipedia.org
+
+[search_seed_urls]
+https://news.google.com/search?q=artificial%20intelligence
+https://particle.news/
+https://thenextweb.com/artificial-intelligence
+https://www.deeplearning.ai/the-batch/
+https://www.analyticsinsight.net/artificial-intelligence/
+https://ai-manual.ru/
+https://t.me/s/AI_UD
+https://ria.ru/product_iskusstvennyy-intellekt/
+https://www.interfax.ru/digital/
+https://www.vedomosti.ru/technologies/
+https://www.technologyreview.com/topic/artificial-intelligence/
+https://spectrum.ieee.org/topic/artificial-intelligence/
+https://www.wired.com/tag/artificial-intelligence/
+https://techcrunch.com/category/artificial-intelligence/
+https://www.therundown.ai/
+https://tldr.tech/api/latest/ai
+https://www.sciencedaily.com/news/computers_math/artificial_intelligence/
+https://techxplore.com/machine-learning-ai-news/
+https://www.zdnet.com/topic/artificial-intelligence/
+https://aimagazine.com/
+https://www.tadviser.ru/index.php/Новости
+https://www.tadviser.ru/index.php/Статья:Искусственный_интеллект
+https://habr.com/ru/hubs/artificial_intelligence/
+https://vc.ru/ai
+https://blogs.nvidia.com/blog/tag/artificial-intelligence/
+https://shvedkov.pro/

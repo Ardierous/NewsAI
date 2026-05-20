@@ -16,6 +16,23 @@ def _digest(date_iso: str = "2026-05-15", days: int = 3, kind: str = "calendar")
 from app.services import news_search
 
 
+def test_bot_challenge_html_detected():
+    html = """<!DOCTYPE html><html><head>
+    <noscript><meta http-equiv="refresh" content="0; url=/exhkqyad"></noscript>
+    </head><body><div class="container"></div></body></html>"""
+    assert ds._is_bot_challenge_html(html) is True
+    assert ds._is_bot_challenge_html('<html><article><h1>Нейросеть</h1></article></html>') is False
+
+
+def test_search_noise_url_filters_indexes_and_authors():
+    assert news_search.is_search_noise_url("https://ria.ru/20011020/2026.html")
+    assert news_search.is_search_noise_url("https://news.tek.fm/authors/10058")
+    assert news_search.is_search_noise_url("https://arxiv.org/pdf/1706.01040")
+    assert not news_search.is_search_noise_url("https://vz.ru/news/2026/4/9/1409407.html")
+    assert not news_search.is_search_noise_url("https://ria.ru/20260519/ii-2093333250.html")
+    assert news_search.search_url_prefilter_reason("https://ria.ru/20260519/ii-2093333250.html") is None
+
+
 class _Resp:
     def __init__(self, status_code: int, url: str, text: str):
         self.status_code = status_code
@@ -23,6 +40,47 @@ class _Resp:
         self.text = text
         self.encoding = "utf-8"
         self.apparent_encoding = "utf-8"
+
+
+def test_reader_proxy_bundle_extracts_headline_and_corpus():
+    markdown_text = """
+Source URL: https://www.reuters.com/technology/example
+Title: Anthropic briefs watchdog on cyber risks
+
+Reuters reports that Anthropic warned about cyber flaws exposed by adversarial prompting.
+The note references model safeguards and incidents in financial systems.
+"""
+    # Сеть не трогаем: проверяем только локальные парсеры markdown.
+    assert ds._reader_extract_headline(markdown_text) == "Anthropic briefs watchdog on cyber risks"
+    assert len(ds._reader_topic_corpus(markdown_text)) > 120
+
+
+def test_fetch_bundle_uses_reader_fallback_on_bot_challenge(monkeypatch):
+    html_challenge = """
+    <html><head><noscript><meta http-equiv="refresh" content="0; url=/exhkqyad"></noscript></head>
+    <body>Loading...</body></html>
+    """
+    reader_md = """
+Source URL: https://www.reuters.com/technology/example
+Title: Anthropic briefs watchdog on cyber risks
+
+Reuters reports that Anthropic warned about cyber flaws exposed by adversarial prompting.
+The note references model safeguards and incidents in financial systems.
+"""
+
+    def fake_http_get(_url: str):
+        return _Resp(200, "https://www.reuters.com/technology/example", html_challenge)
+
+    def fake_requests_get(url: str, *args, **kwargs):
+        assert "r.jina.ai/http://" in url
+        return _Resp(200, url, reader_md)
+
+    monkeypatch.setattr(ds, "_http_get_html_for_article", fake_http_get)
+    monkeypatch.setattr(ds.requests, "get", fake_requests_get)
+    bundle = ds._fetch_article_page_bundle("https://www.reuters.com/technology/example")
+    assert bundle["ok"] is True
+    assert bundle["headline_source"] == "reader_proxy"
+    assert bundle["headline"]
 
 
 def test_bundle_marks_article_page(monkeypatch):
@@ -75,7 +133,7 @@ def test_bundle_handles_http_error(monkeypatch):
 def test_source_policy_flags_aggregator():
     tier, is_aggregator, status = ds._classify_source_policy("https://news.google.com/articles/abc")
     assert is_aggregator is True
-    assert tier == "Tier-4"
+    assert tier == "Tier-5"
     assert status == "❗ без подтверждения"
 
 

@@ -1,5 +1,22 @@
 from dataclasses import dataclass
 
+PROXYAPI_OPENAI_PROVIDER = "openai"
+
+
+def proxyapi_litellm_model(model: str) -> str:
+    """CrewAI/LiteLLM: обязателен provider/model (например openai/gpt-4.1-mini)."""
+    name = (model or "").strip()
+    if not name:
+        return name
+    if "/" in name:
+        return name
+    return f"{PROXYAPI_OPENAI_PROVIDER}/{name}"
+
+
+def proxyapi_chat_model(model: str) -> str:
+    """OpenAI SDK / ProxyAPI chat.completions — тот же формат, что в PROXYAPI_MODEL."""
+    return proxyapi_litellm_model(model)
+
 
 @dataclass(frozen=True)
 class ModelPricing:

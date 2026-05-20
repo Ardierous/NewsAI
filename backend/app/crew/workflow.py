@@ -11,6 +11,31 @@ from crewai.types.usage_metrics import UsageMetrics
 from app.crew.agents import create_agents
 from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS
 from app.services.platform_assembly import assemble_platform_outputs, subscription_md_inline
+from app.services.reader_copy import sanitize_reader_description
+
+_ANALYTICS_EDITORIAL = (
+    "Для каждого items[] верни candidate_id, essence, comment, analysis. "
+    "Пиши сразу финальный редакционный текст, не черновик: сервер не должен чинить стиль после тебя. "
+    "Используй title и source_description как фактическую опору, но не пересказывай их механически. "
+    "essence — одно короткое предложение с главной новостью для карточки в UI. "
+    "comment — ГОТОВОЕ описание новости для публикации: 2–3 предложения, живой русский язык, "
+    "без канцелярита, без рекламного тона, без фраз, похожих на генерацию ИИ. "
+    "В каждом comment обязательно ответь на четыре вопроса: краткая суть новости; почему это важно; "
+    "для кого это важно; как это касается читателей дайджеста — какую пользу или вред это может нести "
+    "или уже несёт. Не обязательно перечислять вопросы явно, но все четыре смысла должны быть в тексте. "
+    "Запрещено писать Tier, баллы, статусы верификации, коды отказа, имена агентов, поля JSON и любую внутреннюю кухню. "
+    "Запрещены штампы: «ключевая суть», «важно для рынка ИИ», «меняет расстановку сил», "
+    "«ускорение внедрения», «игроки экосистемы», «инсайт», «в контексте». "
+    "analysis — развёрнутый комментарий для редактора (4–6 предложений), тоже без служебки. "
+    "overall_analysis сформируй здесь же, на шаге аналитики, после анализа всех 5 выбранных новостей: "
+    "это не вступление для площадок, а общий вывод выпуска на 3–5 предложений. Покажи общую линию выпуска, "
+    "какие сдвиги видны по пяти новостям вместе, кому стоит обратить внимание и что это даёт или чем рискует "
+    "аудитория дайджеста. "
+    "self_check[] — добавь проверки: comment_2_3_sentences, comment_has_what_why_who_reader_impact, "
+    "overall_analysis_from_selected_five, no_service_info, no_ai_cliches. "
+    "hashtags[] — 4–6 тегов с #. "
+    "Ответ — только JSON, без markdown и текста вокруг."
+)
 
 
 def _strip_markdown_json_fence(raw: str) -> str:
@@ -50,14 +75,18 @@ def _extract_candidate_list(raw: str) -> list[dict[str, Any]]:
 
 
 def _fallback_analytics_item(news: dict[str, Any]) -> dict[str, Any]:
-    title = str(news.get("title") or "Новость")
+    title = str(news.get("title") or "Новость").strip()
+    short = title if len(title) <= 140 else f"{title[:137]}…"
     return {
         "candidate_id": int(news["candidate_id"]),
-        "essence": f"Ключевая суть: {title}",
-        "comment": "Это важно для рынка ИИ, потому что меняет скорость внедрения технологий.",
+        "essence": short,
+        "comment": (
+            f"{short} Стоит открыть первоисточник и решить, "
+            "затрагивает ли это ваши продукты, бюджет или конкурентов."
+        ),
         "analysis": (
-            "Событие повлияет на конкуренцию и распределение ресурсов; "
-            "выиграют команды, которые быстрее адаптируют продукты."
+            f"По заголовку: {short} Для полной картины нужен текст статьи — "
+            "сверьте факты с планами команды и сроками, если тема в вашем поле."
         ),
     }
 
@@ -81,9 +110,9 @@ def complete_analytics_result(result: dict[str, Any], selected_news: list[dict[s
             continue
         by_id[cid] = {
             "candidate_id": cid,
-            "essence": str(row.get("essence") or "").strip(),
-            "comment": str(row.get("comment") or "").strip(),
-            "analysis": str(row.get("analysis") or "").strip(),
+            "essence": sanitize_reader_description(str(row.get("essence") or "")),
+            "comment": sanitize_reader_description(str(row.get("comment") or "")),
+            "analysis": sanitize_reader_description(str(row.get("analysis") or "")),
         }
     complete_items: list[dict[str, Any]] = []
     for cid in expected:
@@ -104,9 +133,11 @@ def complete_analytics_result(result: dict[str, Any], selected_news: list[dict[s
     out["items"] = complete_items
     if not str(out.get("overall_analysis") or "").strip():
         out["overall_analysis"] = (
-            "Выпуск показывает ускорение прикладного ИИ, усиление конкуренции за вычисления "
-            "и смещение ценности к продуктам с явной монетизацией."
+            "В этом выпуске несколько тем сходятся в одну линию: "
+            "рынок ИИ ускоряется, а ставки на инфраструктуру и продукты растут."
         )
+    else:
+        out["overall_analysis"] = sanitize_reader_description(str(out["overall_analysis"]))
     raw_tags = out.get("hashtags", [])
     if isinstance(raw_tags, str):
         out["hashtags"] = [x for x in raw_tags.split() if x]
@@ -148,9 +179,20 @@ class CrewWorkflow:
             "Поля: original_number,title,url,source,published_at,category,description,tier,"
             "significance_score,novelty_score,impact_score,total_score,reliability_status,"
             "is_aggregator,is_duplicate,is_foreign_agent,verification_comment,link_status. "
-            "Поле tier: только Tier-1, Tier-2, Tier-3 или Tier-4 по шкале «Система приоритетов источников» в контракте; "
-            "источники уровня запрещённых агрегаторов (Tier-5 в том разделе) не подбирай — если URL попал из manual_urls, пометь is_aggregator и низкий балл. "
+            "Tier — это приоритет источника новости: Tier-1/Tier-2 ставь только ресурсам из tier-файла. "
+            "Агрегаторы и дайджесты можно использовать только для поиска первоисточника, но не как URL кандидата. "
+            "Также не используй СМИ, запрещённые законодательством РФ (это Tier-5). "
+            "Если источник помечен как иноагент, не исключай его только по этому признаку, но выставь is_foreign_agent=true. "
+            "Поле tier заполняй как Tier-1..Tier-5 по наилучшему соответствию. "
+            "URL агрегаторов, лент и поисковых страниц не подбирай — "
+            "если URL попал из manual_urls, пометь is_aggregator и низкий балл. "
             "При равной новизне отдавай предпочтение более высокому Tier (меньший номер). "
+            "Включай корпоративные пресс-релизы и официальные заявления только как НОВОСТИ: факты, планы, прорывы, "
+            "регулирование, крупные внедрения, инвестиции, партнёрства — не страницы инструментов и не «новая функция бота». "
+            "Не подбирай URL разделов /product, /tools, /features, /pricing, /demo, лендинги сервисов и обзоры «как пользоваться». "
+            "В пуле таких новостных пресс/официальных материалов — 20-35% (для 10 новостей это 2-3). "
+            "Из одного источника — не более 2 новостей. "
+            "Доля российских источников — 30-50% (для 10 новостей это 3-5). "
             "Каждый объект: поле url должно быть прямой ссылкой на ту же HTML-страницу, что описывает title "
             "(после открытия url в браузере заголовок вкладки/статьи должен соответствовать title); "
             "не подставляй URL главной сайта, поиска или ленты вместо URL материала. "
@@ -179,9 +221,13 @@ class CrewWorkflow:
             "significance_score,novelty_score,impact_score,total_score,reliability_status,"
             "is_aggregator,is_duplicate,is_foreign_agent,verification_comment,link_status. "
             "Нельзя использовать URL из списка исключений (ни один из них, ни очевидные дубликаты того же материала). "
+            "Соблюдай баланс пула: новостные пресс-релизы/официальные заявления (факты, планы, прорывы) — 20-35%, "
+            "без промо инструментов и страниц функционала, "
+            "российские источники — 30-50%, из одного источника не более 2 новостей. "
             "Не выдумывай несуществующие адреса — только реальные прямые ссылки на страницы статей. "
             "Каждый url должен вести на ту же публикацию, что и title. "
-            "Не возвращай агрегаторы и ленты (news.google, reddit, поисковые страницы, теги, главные страницы). "
+            "Агрегаторы и дайджесты можно использовать только для обнаружения первоисточников; "
+            "не возвращай URL агрегаторов и лент (news.google, reddit, поисковые страницы, теги, главные страницы). "
             "Только материалы про ИИ/нейросети/ML — без посторонних тем. "
             "Предпочитай страницы с признаками article-page (og:type=article, article:published_time, JSON-LD NewsArticle/Article). "
             f"Исключённые URL: {excluded_preview}. "
@@ -204,8 +250,8 @@ class CrewWorkflow:
                 "Для каждого кандидата: url и title должны относиться к одной и той же публикации и к теме ИИ/нейросетей; "
                 "если материал не про ИИ — удали объект из массива или пометь link_status=false. "
                 "если url ведёт на другую статью, ленту или 404 — не подменяй ссылку на новую, только пометь link_status=false. "
-                "Пересчитай tier строго по разделу «Система приоритетов источников»: Tier-1…Tier-4 для допустимых изданий; "
-                "для доменов из запрещённых агрегаторов (Tier-5 того раздела) выставь is_aggregator=true и снизь пригодность к финальной пятёрке. "
+                "Пересчитай tier строго по разделу «Система приоритетов источников»: Tier-1/Tier-2 только для ресурсов из файла; "
+                "для URL агрегаторов, лент и поисковых страниц выставь Tier-5, is_aggregator=true и link_status=false. "
                 "Ответ — только один JSON-массив из 10 объектов, без текста до/после JSON. "
                 f"Входные кандидаты: {json.dumps(research_rows, ensure_ascii=False)}"
             ),
@@ -267,9 +313,8 @@ class CrewWorkflow:
     def run_analytics(self, selected_news: list[dict[str, Any]]) -> dict[str, Any]:
         task = Task(
             description=self._with_contract(
-                "Сформируй JSON с полями: items[], overall_analysis, hashtags[], self_check[]. "
-                "Для каждого items: candidate_id,essence,comment,analysis. "
-                f"Вход:{selected_news}"
+                "Сформируй JSON: items[], overall_analysis, hashtags[], self_check[]. "
+                f"{_ANALYTICS_EDITORIAL} Вход: {json.dumps(selected_news, ensure_ascii=False)}"
             ),
             expected_output="JSON объект аналитики",
             agent=self.agents.analytics,

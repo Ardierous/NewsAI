@@ -1,7 +1,9 @@
 from datetime import date, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
+
+from app.digest_defaults import get_digest_defaults
 
 
 class DigestCreateResponse(BaseModel):
@@ -26,10 +28,33 @@ class DigestItem(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class DigestTop5ListItem(BaseModel):
+    position: int
+    title: str
+    source: str | None = None
+
+
+class DigestListItem(DigestItem):
+    status_label_ru: str = ""
+    summary_title: str = ""
+    top5: list[DigestTop5ListItem] = Field(default_factory=list)
+    total_cost_rub: float = 0.0
+
+
+def _step0_news_window_days_default() -> int:
+    return get_digest_defaults().step0.news_window_days_default
+
+
+def _step0_news_window_day_kind_default() -> Literal["calendar", "working"]:
+    return get_digest_defaults().step0.news_window_day_kind_default
+
+
 class Step0Request(BaseModel):
     digest_type: Literal["serious", "curious"] | None = None
-    news_window_days: int = Field(default=3, ge=1, le=90)
-    news_window_day_kind: Literal["calendar", "working"] = "working"
+    news_window_days: int = Field(default_factory=_step0_news_window_days_default, ge=1, le=90)
+    news_window_day_kind: Literal["calendar", "working"] = Field(
+        default_factory=_step0_news_window_day_kind_default
+    )
 
 
 class Step0Response(BaseModel):
@@ -40,10 +65,48 @@ class Step0Response(BaseModel):
     news_window_day_kind: Literal["calendar", "working"]
 
 
+class NewsWindowPatch(BaseModel):
+    news_window_days: int = Field(ge=1, le=90)
+    news_window_day_kind: Literal["calendar", "working"]
+
+
 class Step1RunRequest(BaseModel):
     manual_urls: list[str] = Field(default_factory=list)
     """Полная пересборка пула после шагов 2–4 (сброс выбора, порядка, аналитики, финала)."""
     rebuild: bool = False
+    """При rebuild=true: id кандидатов из шага 2, которые оставить в пуле; остальные слоты добираются заново."""
+    keep_candidate_ids: list[int] = Field(default_factory=list)
+    """Если задано — сохраняется в выпуск перед поиском (актуально при смене окна между пересборками)."""
+    news_window_days: int | None = Field(default=None, ge=1, le=90)
+    news_window_day_kind: Literal["calendar", "working"] | None = None
+
+
+class Step1FilterCatalogItem(BaseModel):
+    id: str
+    label_ru: str
+    description_ru: str
+    stage: Literal["pre_http", "verify", "pool"]
+    default_enabled: bool = True
+    locked: bool = False
+
+
+class Step1FilterState(BaseModel):
+    id: str
+    enabled: bool = True
+    order: int = Field(ge=1)
+
+
+class Step1FilterConfig(BaseModel):
+    version: int = 1
+    filters: list[Step1FilterState] = Field(default_factory=list)
+    min_discovered_pages: int = Field(ge=10, le=200)
+    min_collection_iterations: int = Field(ge=1, le=50)
+
+
+class Step1FiltersResponse(BaseModel):
+    catalog: list[Step1FilterCatalogItem] = Field(default_factory=list)
+    config: Step1FilterConfig
+    counters: dict[str, int] = Field(default_factory=dict)
 
 
 class Step1DiscoveredFeedbackRequest(BaseModel):
@@ -71,6 +134,9 @@ class CandidateOut(BaseModel):
     link_status: bool
     headline_editorial_ok: bool = False
     page_verified: bool = False
+    is_foreign_agent: bool = False
+    is_aggregator: bool = False
+    is_duplicate: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -128,6 +194,7 @@ class Step1DiscoveredNewsOut(BaseModel):
     link_status: bool = False
     headline_editorial_ok: bool = False
     page_verified: bool = False
+    in_candidate_pool: bool = False
     reject_codes: list[str] = Field(default_factory=list)
     verification_comment: str = ""
     manual_score: int | None = None
@@ -179,6 +246,35 @@ class AgentModelRecommendationOut(BaseModel):
     rationale: str
 
 
+class Step1RunStatsOut(BaseModel):
+    run_number: int
+    started_at: str | None = None
+    completed_at: str | None = None
+    duration_sec: int | None = None
+    duration_human: str = "—"
+    cost_rub: float = 0.0
+    news_count: int = 0
+
+
+class PoolStatsOut(BaseModel):
+    total: int = 0
+    press_count: int = 0
+    press_share: float = 0.0
+    ru_count: int = 0
+    ru_share: float = 0.0
+    max_per_source: int = 0
+    foreign_agent_count: int = 0
+    forbidden_count: int = 0
+
+
+class PoolCollectionStatsOut(BaseModel):
+    pool: PoolStatsOut
+    last_run: Step1RunStatsOut | None = None
+    step1_total_rub: float = 0.0
+    step1_costs: list[LlmCostRecordOut] = Field(default_factory=list)
+    history: list[Step1RunStatsOut] = Field(default_factory=list)
+
+
 class DigestDetail(BaseModel):
     digest: DigestItem
     candidates: list[CandidateOut]
@@ -188,6 +284,7 @@ class DigestDetail(BaseModel):
     proxyapi_budget_exceeded: bool = False
     proxyapi_budget_message: str | None = None
     rejected_reasons_summary: dict[str, int] = Field(default_factory=dict)
+    step1_collection_meta: dict[str, Any] = Field(default_factory=dict)
     selected: list[SelectedNewsOut]
     analytics: list[AnalyticsItemOut]
     outputs: list[FinalOutputOut]
@@ -205,3 +302,4 @@ class DigestDetail(BaseModel):
     proxyapi_spent_today_rub: float | None = None
     enable_step4_image_generation: bool = False
     model_recommendations: list[AgentModelRecommendationOut]
+    pool_collection_stats: PoolCollectionStatsOut | None = None

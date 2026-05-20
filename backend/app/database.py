@@ -143,6 +143,16 @@ def ensure_digest_schema_migrations() -> None:
                     )
                 )
                 conn.commit()
+            rows_s1r = conn.execute(text("PRAGMA table_info(step1_discovery_runs)")).fetchall()
+            s1r_names = {row[1] for row in rows_s1r}
+            if s1r_names and "duration_sec" not in s1r_names:
+                conn.execute(text("ALTER TABLE step1_discovery_runs ADD COLUMN duration_sec INTEGER"))
+                conn.commit()
+            rows_s1r = conn.execute(text("PRAGMA table_info(step1_discovery_runs)")).fetchall()
+            s1r_names = {row[1] for row in rows_s1r}
+            if s1r_names and "cost_rub" not in s1r_names:
+                conn.execute(text("ALTER TABLE step1_discovery_runs ADD COLUMN cost_rub REAL"))
+                conn.commit()
             rows_sd = conn.execute(text("PRAGMA table_info(step1_discovered_news)")).fetchall()
             sd_names = {row[1] for row in rows_sd}
             if sd_names and "discovery_run_id" not in sd_names:

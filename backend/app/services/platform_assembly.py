@@ -213,7 +213,7 @@ def assemble_telegram(payload: dict[str, Any]) -> str:
         f"**{HEADER_TITLE} | {date_ru}**\n\n"
         f"{lead}\n\n"
         f"{body}\n\n"
-        f"{subscription_md_inline()}\n"
+        f"{subscription_md_inline()}\n\n"
         f"{tags}"
     )
     return truncate_platform_text(compress_paragraphs(fix_markdown_links(text)), TELEGRAM_MAX_CHARS)

@@ -29,4 +29,5 @@ python -m pytest tests/test_step1_link_validation_smoke.py tests/test_step1_regr
 ## Прочее
 
 - Общий запуск и `.env`: [README.md](README.md)
+- Дорожка шага 1 (поиск, воронка, порог): [docs/STEP1_PIPELINE.md](docs/STEP1_PIPELINE.md)
 - Контракт дайджеста: `backend/app/prompts/digest_contract.txt`

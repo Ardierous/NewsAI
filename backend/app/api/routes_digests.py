@@ -14,6 +14,7 @@ from app.models import Analytics, Asset, Digest, FinalOutput, LlmCostRecord, New
 from app.services.cost_labels import enrich_llm_cost_row
 from app.services.cost_tracker import proxyapi_spent_today_rub
 from app.services.platform_assembly import digest_docx_filename
+from app.services.digest_pool_stats import build_pool_collection_stats
 from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 from app.schemas import (
     CandidateOut,
@@ -21,13 +22,18 @@ from app.schemas import (
     DigestCreateResponse,
     DigestDetail,
     DigestItem,
+    DigestListItem,
     Step1DiscoveredFeedbackRequest,
     Step1DiscoveredNewsOut,
     OrderRequest,
     SelectRequest,
     Step0Request,
     Step0Response,
+    PoolCollectionStatsOut,
+    NewsWindowPatch,
     Step1RunRequest,
+    Step1FilterConfig,
+    Step1FiltersResponse,
     Step4GenerateImagesRequest,
     Step4GenerateTextsRequest,
     Step4SelectImageRequest,
@@ -57,10 +63,10 @@ def create_digest(db: Session = Depends(get_db)) -> DigestCreateResponse:
     return DigestCreateResponse(id=digest.id, date=digest.date, status=digest.status, current_step=digest.current_step)
 
 
-@router.get("", response_model=list[DigestItem])
-def list_digests(db: Session = Depends(get_db)) -> list[DigestItem]:
+@router.get("", response_model=list[DigestListItem])
+def list_digests(db: Session = Depends(get_db)) -> list[DigestListItem]:
     service = DigestService(db)
-    return [DigestItem.model_validate(x) for x in service.list_digests()]
+    return [DigestListItem.model_validate(x) for x in service.build_digest_list_items()]
 
 
 @router.get("/step1/manual-ratings/export")
@@ -116,6 +122,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     docx_path = None
     image_variants: list[ImageVariantOut] = []
     rejected_reasons_summary: dict[str, int] = {}
+    step1_collection_meta: dict[str, object] = {}
     for a in assets:
         if a.type == "hashtags":
             hashtags = a.prompt.split()
@@ -136,6 +143,13 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
                 raw = json.loads(a.prompt or "{}")
                 if isinstance(raw, dict):
                     rejected_reasons_summary = {str(k): int(v) for k, v in raw.items()}
+            except Exception:
+                pass
+        if a.type == "step1_collection_meta":
+            try:
+                raw = json.loads(a.prompt or "{}")
+                if isinstance(raw, dict):
+                    step1_collection_meta = raw
             except Exception:
                 pass
     image_variants.sort(key=lambda x: x.variant)
@@ -165,6 +179,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     candidates_are_demo_fallback = bool(candidates) and all(_candidate_row_is_demo_placeholder(c) for c in candidates)
     budget_notices = service.build_budget_notices(digest)
     proxyapi_budget_message = service.digest_proxyapi_budget_blocked_message(digest.id)
+    pool_collection_stats = PoolCollectionStatsOut.model_validate(build_pool_collection_stats(db, digest.id))
     return DigestDetail(
         digest=DigestItem.model_validate(digest),
         candidates=[CandidateOut.model_validate(c) for c in candidates],
@@ -179,6 +194,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
                 link_status=bool(row.link_status),
                 headline_editorial_ok=bool(row.headline_editorial_ok),
                 page_verified=bool(row.page_verified),
+                in_candidate_pool=bool(row.link_status and row.headline_editorial_ok and row.page_verified),
                 reject_codes=[x for x in str(row.reject_codes or "").split(",") if x],
                 verification_comment=row.verification_comment or "",
                 manual_score=row.manual_score,
@@ -193,6 +209,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         proxyapi_budget_exceeded=proxyapi_budget_message is not None,
         proxyapi_budget_message=proxyapi_budget_message,
         rejected_reasons_summary=rejected_reasons_summary,
+        step1_collection_meta=step1_collection_meta,
         selected=selected,
         analytics=[
             {
@@ -239,6 +256,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         proxyapi_spent_today_rub=spent_today_proxy,
         enable_step4_image_generation=get_settings().enable_step4_image_generation,
         model_recommendations=service.get_model_recommendations(),
+        pool_collection_stats=pool_collection_stats,
     )
 
 
@@ -260,11 +278,49 @@ def run_step0(digest_id: int, payload: Step0Request, db: Session = Depends(get_d
     )
 
 
+@router.patch("/{digest_id}/news-window", response_model=Step0Response)
+def patch_digest_news_window(digest_id: int, payload: NewsWindowPatch, db: Session = Depends(get_db)) -> Step0Response:
+    service = DigestService(db)
+    digest = service.update_news_window(
+        digest_id,
+        news_window_days=payload.news_window_days,
+        news_window_day_kind=payload.news_window_day_kind,
+    )
+    return Step0Response(
+        digest_id=digest.id,
+        digest_type=digest.digest_type or "serious",
+        default_applied=bool(digest.digest_type_via_default),
+        news_window_days=digest.news_window_days,
+        news_window_day_kind=digest.news_window_day_kind,  # type: ignore[arg-type]
+    )
+
+
 @router.post("/{digest_id}/step1/run", response_model=list[CandidateOut])
 def run_step1(digest_id: int, payload: Step1RunRequest, db: Session = Depends(get_db)) -> list[CandidateOut]:
     service = DigestService(db)
-    rows = service.run_step_1(digest_id, payload.manual_urls, rebuild=payload.rebuild)
+    rows = service.run_step_1(
+        digest_id,
+        payload.manual_urls,
+        rebuild=payload.rebuild,
+        keep_candidate_ids=payload.keep_candidate_ids,
+        news_window_days=payload.news_window_days,
+        news_window_day_kind=payload.news_window_day_kind,
+    )
     return [CandidateOut.model_validate(r) for r in rows]
+
+
+@router.get("/{digest_id}/step1/filters", response_model=Step1FiltersResponse)
+def get_step1_filters(digest_id: int, db: Session = Depends(get_db)) -> Step1FiltersResponse:
+    service = DigestService(db)
+    payload = service.get_step1_filters_payload(digest_id)
+    return Step1FiltersResponse.model_validate(payload)
+
+
+@router.put("/{digest_id}/step1/filters", response_model=Step1FiltersResponse)
+def save_step1_filters(digest_id: int, payload: Step1FilterConfig, db: Session = Depends(get_db)) -> Step1FiltersResponse:
+    service = DigestService(db)
+    data = service.save_step1_filters_payload(digest_id, payload.model_dump())
+    return Step1FiltersResponse.model_validate(data)
 
 
 @router.post("/{digest_id}/step1/discovered/{news_id}/feedback")

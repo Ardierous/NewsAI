@@ -1,5 +1,6 @@
 from datetime import date
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.services import digest_service as ds
 
@@ -122,7 +123,9 @@ def test_verify_sets_published_at_from_bundle(monkeypatch):
     }
     svc = SimpleNamespace()
     svc._ensure_russian_candidate_title = lambda _d, _u, h: h
-    ds.DigestService._verify_llm_candidate_dict(svc, _digest(days=10), item)
+    d = _digest(days=10)
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 5, 15)):
+        ds.DigestService._verify_llm_candidate_dict(svc, d, item)
     assert item.get("headline_editorial_ok") is True
     assert item.get("published_at", "").startswith("2026-05-08")
     assert "11:56:15" not in item.get("published_at", "")

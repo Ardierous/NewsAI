@@ -20,6 +20,21 @@ from app.services.digest_service import (
 from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 
 
+@pytest.fixture(autouse=True)
+def _isolated_step1_filter_settings(tmp_path, monkeypatch):
+    """Не читать/писать рабочий step1_filter_settings.json; порог воронки = 10 для тестов пула."""
+    from app.services import step1_filter_settings as settings_mod
+    from app.services.step1_filter_settings import _bootstrap_filter_config, save_step1_filter_settings
+
+    path = tmp_path / "step1_filter_settings.json"
+    monkeypatch.setattr(settings_mod, "_STEP1_FILTER_SETTINGS_PATH", path)
+    cfg = _bootstrap_filter_config()
+    cfg["min_discovered_pages"] = 10
+    cfg["min_collection_iterations"] = 1
+    save_step1_filter_settings(cfg)
+    yield
+
+
 def _fake_expand_listing(url: str, max_children: int = 10) -> list[tuple[str, dict]]:
     u = url.strip()
     bundle = {
@@ -51,7 +66,7 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     service.settings.enable_web_fetch = True
     service.settings.step1_max_cost_rub = 9999.0
 
-    seed_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    seed_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     monkeypatch.setattr(
         service.cost_tracker,
         "measure",
@@ -63,7 +78,8 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     monkeypatch.setattr(
         service, "_prefilter_llm_candidates_fetchable", lambda _digest_id, rows: (rows, [])
     )
-    monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: [])
+    monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: ([], {}))
+    # Реальный rebalance: лимит ≤2 на домен и квоты RU/press.
     monkeypatch.setattr(ds, "_expand_listing_url_candidates", _fake_expand_listing)
     return service, digest
 
@@ -83,7 +99,7 @@ def test_step1_raises_402_when_proxyapi_budget_exceeded(monkeypatch: pytest.Monk
 def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
-    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
@@ -97,7 +113,7 @@ def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):
         service.run_step_1(digest.id, [])
 
     assert ex.value.status_code == 502
-    assert "Основные причины отбраковки: off_topic_not_ai=6." in str(ex.value.detail)
+    assert "Основные причины отбраковки: off_topic_not_ai=10." in str(ex.value.detail)
 
     saved = (
         service.db.query(Asset)
@@ -107,16 +123,16 @@ def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):
     )
     assert saved is not None
     stats = json.loads(saved.prompt or "{}")
-    assert stats.get("off_topic_not_ai") == 6
+    assert stats.get("off_topic_not_ai") == 10
 
     preview_count = service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count()
-    assert preview_count == 6
+    assert preview_count == 0
 
 
 def test_step1_success_sets_status_and_candidates(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
-    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
@@ -140,17 +156,221 @@ def test_step1_success_sets_status_and_candidates(monkeypatch: pytest.MonkeyPatc
     rows = service.run_step_1(digest.id, [])
     service.db.refresh(digest)
 
-    assert len(rows) >= 5
+    assert len(rows) >= 10
     assert digest.status == STATUS_STEP1
     assert digest.current_step == STATUS_STEP1
-    assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 5
-    assert service.db.query(Step1DiscoveredNews).filter(Step1DiscoveredNews.digest_id == digest.id).count() >= 5
+
+
+def test_search_ingest_does_not_pre_mark_verified_urls_as_seen(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    def fake_verify(_digest: Digest, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["page_verified"] = True
+        item["title"] = "ИИ ускорил обработку данных"
+        item["verification_comment"] = ""
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+
+    seen_fp: set[str] = set()
+    rows = service._ingest_step1_urls_with_listing_expansion(
+        digest,
+        ["https://techcrunch.com/2026/05/19/openai-ai-news/"],
+        "2026-05-19T12:00:00+03:00",
+        seen_fp,
+        limit=1,
+    )
+
+    assert len(rows) == 1
+    assert seen_fp == set()
+
+
+def test_step1_forms_pool_as_soon_as_ten_verified_found(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    rows = []
+    for i in range(10):
+        rows.append(
+            {
+                "original_number": i + 1,
+                "title": f"ИИ новость {i + 1}",
+                "url": f"https://source{i}.example.com/news/{i}",
+                "source": f"source{i}.example.com",
+                "tier": "Tier-3",
+                "published_at": "2026-05-14T12:00:00",
+                "category": "technology",
+                "description": "Описание",
+                "significance_score": 2,
+                "novelty_score": 2,
+                "impact_score": 2,
+                "total_score": 6,
+                "reliability_status": "✅ подтверждено",
+                "link_status": True,
+                "headline_editorial_ok": True,
+                "page_verified": True,
+                "is_aggregator": False,
+                "verification_comment": "",
+            }
+        )
+
+    monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: (rows, {}))
+
+    result = service.run_step_1(digest.id, [])
+
+    assert len(result) == 10
+    assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() == 10
+
+
+def test_step1_can_return_up_to_fifteen_candidates(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    service.settings.step1_max_candidates_for_ui = 15
+    service.settings.step1_batch_size = 20
+
+    rows = []
+    for i in range(20):
+        rows.append(
+            {
+                "original_number": i + 1,
+                "title": f"ИИ новость {i + 1}",
+                "url": f"https://source{i}.example.com/news/{i}",
+                "source": f"source{i}.example.com",
+                "tier": "Tier-3",
+                "published_at": "2026-05-14T12:00:00",
+                "category": "technology",
+                "description": "Описание",
+                "significance_score": 2,
+                "novelty_score": 2,
+                "impact_score": 2,
+                "total_score": 6,
+                "reliability_status": "✅ подтверждено",
+                "link_status": True,
+                "headline_editorial_ok": True,
+                "page_verified": True,
+                "is_aggregator": False,
+                "verification_comment": "",
+            }
+        )
+
+    monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: (rows, {}))
+    monkeypatch.setattr(service, "_step1_run_web_supplement_rounds", lambda *args, **kwargs: None)
+
+    result = service.run_step_1(digest.id, [])
+
+    assert len(result) == 15
+    assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() == 15
+
+
+def test_step1_records_hard_timeout_stop_reason(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_monotonic() -> float:
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else 31.0
+
+    monkeypatch.setattr(ds.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(service, "_step1_run_web_supplement_rounds", lambda *args, **kwargs: None)
+
+    verified_pool: list[dict] = []
+    seen_fp: set[str] = set()
+    excluded_urls: list[str] = []
+    meta = service._step1_collect_iterative_batches(
+        digest,
+        verified_pool=verified_pool,
+        seen_fp=seen_fp,
+        excluded_urls=excluded_urls,
+        now_msk="2026-05-19T12:00:00+03:00",
+        snapshot_preview_row=lambda _x: None,
+        append_verified=lambda item: verified_pool.append(item),
+        register_reject=lambda _x: None,
+        target_min_verified=10,
+        target_max_candidates=15,
+        batch_size=20,
+        soft_limit_sec=180,
+        hard_limit_sec=300,
+        started_monotonic=0.0,
+        start_iteration=0,
+        min_iterations=1,
+    )
+    assert meta["stop_reason"] in {"hard_timeout", "no_progress"}
+
+
+def test_step1_collect_runs_at_least_min_iterations_before_no_progress(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    tick = {"n": 0}
+
+    def fake_monotonic() -> float:
+        tick["n"] += 1
+        return float(tick["n"])
+
+    monkeypatch.setattr(ds.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr(service, "_step1_run_web_supplement_rounds", lambda *args, **kwargs: None)
+
+    verified_pool: list[dict] = []
+    meta = service._step1_collect_iterative_batches(
+        digest,
+        verified_pool=verified_pool,
+        seen_fp=set(),
+        excluded_urls=[],
+        now_msk="2026-05-19T12:00:00+03:00",
+        snapshot_preview_row=lambda _x: None,
+        append_verified=lambda item: verified_pool.append(item),
+        register_reject=lambda _x: None,
+        target_min_verified=10,
+        target_max_candidates=20,
+        batch_size=20,
+        soft_limit_sec=9999,
+        hard_limit_sec=9999,
+        started_monotonic=1.0,
+        start_iteration=0,
+        min_iterations=5,
+    )
+    assert meta["iterations"] >= 5
+    assert meta["stop_reason"] == "no_progress"
+
+
+def test_select_news_requires_ten_candidate_pool(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    for idx in range(9):
+        service.db.add(
+            NewsCandidate(
+                digest_id=digest.id,
+                original_number=idx + 1,
+                title=f"ИИ новость {idx + 1}",
+                url=f"https://source{idx + 1}.example.com/news/{idx + 1}",
+                source="Example",
+                tier="Tier-2",
+                published_at="2026-05-14T12:00:00",
+                category="technology",
+                description="Описание",
+                significance_score=2,
+                novelty_score=2,
+                impact_score=2,
+                total_score=6,
+                reliability_status="✅ подтверждено",
+                link_status=True,
+                headline_editorial_ok=True,
+                page_verified=True,
+            )
+        )
+    service.db.commit()
+
+    with pytest.raises(HTTPException) as ex:
+        service.select_news(digest.id, [], top5=True)
+
+    assert ex.value.status_code == 400
+    assert "минимум 10 проверенных новостей" in str(ex.value.detail)
 
 
 def test_step1_discovered_feedback_saved(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
-    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
@@ -245,10 +465,11 @@ def test_step1_manual_ratings_backfill_all_digests(tmp_path):
 def test_step1_keeps_verify_url_when_score_mutates_url(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
-    verify_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    verify_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     score_rows = [dict(x) for x in verify_rows]
     score_rows[-1]["url"] = "https://broken.example.net/new-path"
     score_rows[-1]["total_score"] = 99
+    score_rows[-1]["reliability_status"] = "⚠️ сомнительный"
 
     monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: verify_rows)
     monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: verify_rows)
@@ -273,15 +494,64 @@ def test_step1_keeps_verify_url_when_score_mutates_url(monkeypatch: pytest.Monke
     monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
 
     rows = service.run_step_1(digest.id, [])
-    assert len(rows) == 6
-    assert rows[-1].url.endswith("/news/5")
+    assert len(rows) == 10
+    assert rows[-1].url.endswith("/news/9")
     assert "broken.example.net" not in rows[-1].url
+    assert rows[-1].reliability_status == "✅ подтверждено"
+
+
+def test_step1_partial_rebuild_keeps_marked_candidates(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["is_aggregator"] = False
+        item["verification_comment"] = ""
+        item["title"] = f"ИИ: {item.get('title', 'Новость')}"
+        item["source"] = "Example"
+        item["published_at"] = "2026-05-14T12:00:00"
+        item["category"] = "technology"
+        item["description"] = "Описание"
+        item["significance_score"] = 2
+        item["novelty_score"] = 2
+        item["impact_score"] = 2
+        item["total_score"] = 6
+        item["reliability_status"] = "✅ подтверждено"
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+
+    first = service.run_step_1(digest.id, [])
+    assert len(first) == 10
+    keep_ids = [first[0].id, first[1].id, first[2].id]
+    keep_urls = {first[0].url, first[1].url, first[2].url}
+
+    new_score_rows = [
+        {"original_number": i + 1, "title": f"Fresh {i}", "url": f"https://fresh{i}.example.com/news/{i}"}
+        for i in range(10)
+    ]
+    monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: new_score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: [dict(x) for x in research_rows])
+    monkeypatch.setattr(
+        service.workflow,
+        "run_candidates_score",
+        lambda verify_rows, now_msk: [dict(x) for x in verify_rows],
+    )
+
+    rows = service.run_step_1(digest.id, [], rebuild=True, keep_candidate_ids=keep_ids)
+    assert 10 <= len(rows) <= 15
+    result_urls = {r.url for r in rows}
+    assert keep_urls.issubset(result_urls)
+    assert any("fresh" in u and "example.com" in u for u in result_urls)
 
 
 def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
-    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
@@ -303,7 +573,7 @@ def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.Monke
     monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
 
     first = service.run_step_1(digest.id, [])
-    assert len(first) >= 5
+    assert len(first) >= 10
     digest.status = STATUS_SELECTED
     digest.current_step = STATUS_SELECTED
     service.db.add(
@@ -339,8 +609,8 @@ def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.Monke
     assert digest.status == STATUS_STEP1
     assert service.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).count() == 0
     assert service.db.query(Analytics).filter(Analytics.digest_id == digest.id).count() == 0
-    assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 5
-    assert len(rows) >= 5
+    assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 10
+    assert len(rows) >= 10
 
 
 def test_step1_rebuild_from_analytics_ready(monkeypatch: pytest.MonkeyPatch):
@@ -349,7 +619,7 @@ def test_step1_rebuild_from_analytics_ready(monkeypatch: pytest.MonkeyPatch):
     digest.current_step = STATUS_ANALYTICS
     service.db.commit()
 
-    score_rows = [{"title": f"Candidate {i}", "url": f"https://example.com/news/{i}"} for i in range(6)]
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
@@ -373,4 +643,138 @@ def test_step1_rebuild_from_analytics_ready(monkeypatch: pytest.MonkeyPatch):
     rows = service.run_step_1(digest.id, [], rebuild=True)
     service.db.refresh(digest)
     assert digest.status == STATUS_STEP1
-    assert len(rows) >= 5
+    assert len(rows) >= 10
+
+
+def test_rebalance_pool_respects_source_ru_and_press_shares():
+    pool = [
+        {"url": "https://example.com/news/1", "source": "example.com", "total_score": 9, "tier": "Tier-2"},
+        {"url": "https://example.com/news/2", "source": "example.com", "total_score": 8, "tier": "Tier-2"},
+        {"url": "https://example.com/news/3", "source": "example.com", "total_score": 7, "tier": "Tier-2"},
+        {"url": "https://tass.ru/ai/1", "source": "tass.ru", "total_score": 9, "tier": "Tier-1"},
+        {"url": "https://rbc.ru/technology/ai-1", "source": "rbc.ru", "total_score": 8, "tier": "Tier-1"},
+        {"url": "https://cnews.ru/news/top/ai-1", "source": "cnews.ru", "total_score": 7, "tier": "Tier-2"},
+        {"url": "https://company-a.com/press/ai-platform", "source": "company-a.com", "total_score": 9, "tier": "Tier-3"},
+        {"url": "https://company-b.com/newsroom/ai-case", "source": "company-b.com", "total_score": 8, "tier": "Tier-3"},
+        {"url": "https://www.prnewswire.com/news-releases/ai-case-1.html", "source": "prnewswire.com", "total_score": 8, "tier": "Tier-2"},
+        {"url": "https://globenewswire.com/news-release/ai-case-2", "source": "globenewswire.com", "total_score": 7, "tier": "Tier-2"},
+        {"url": "https://theverge.com/ai/story-1", "source": "theverge.com", "total_score": 7, "tier": "Tier-2"},
+        {"url": "https://venturebeat.com/ai/story-2", "source": "venturebeat.com", "total_score": 7, "tier": "Tier-2"},
+    ]
+
+    out = ds._rebalance_verified_pool(pool, target=10)
+    assert len(out) == 10
+
+    by_host: dict[str, int] = {}
+    ru_count = 0
+    press_count = 0
+    for item in out:
+        host = ds._publisher_host_key(item)
+        by_host[host] = by_host.get(host, 0) + 1
+        if ds._is_russian_host(ds._host_from_url(str(item.get("url") or ""))):
+            ru_count += 1
+        if ds._is_press_release_candidate_dict(item):
+            press_count += 1
+
+    assert max(by_host.values()) <= 2
+    assert 3 <= ru_count <= 5
+    assert 2 <= press_count <= 4
+
+
+def test_classify_source_policy_marks_tier5_forbidden_media():
+    tier, is_aggregator, reliability = ds._classify_source_policy("https://meduza.io/feature/ai-case")
+    assert tier == "Tier-5"
+    assert is_aggregator is False
+    assert reliability == "❗ без подтверждения"
+
+
+def test_rebalance_caps_by_url_host_when_source_labels_differ():
+    pool = []
+    for src in ("cisoclub.ru", "CISO Club", "CISOCLUB", "cisoclub"):
+        for i in range(4):
+            pool.append(
+                {
+                    "url": f"https://cisoclub.ru/news/{src}-{i}",
+                    "source": src,
+                    "total_score": 9,
+                    "tier": "Tier-2",
+                }
+            )
+    for i in range(6):
+        pool.append({"url": f"https://other{i}.example.com/n", "source": f"other{i}.example.com", "total_score": 7})
+    out = ds._rebalance_verified_pool(pool, target=10)
+    by_host: dict[str, int] = {}
+    for item in out:
+        host = ds._publisher_host_key(item)
+        by_host[host] = by_host.get(host, 0) + 1
+    assert by_host.get("cisoclub.ru", 0) <= 2
+    assert max(by_host.values()) <= 2
+
+
+def test_rebalance_host_cap_fallback_fills_when_press_quota_blocks():
+    pool = []
+    for i in range(12):
+        pool.append(
+            {
+                "url": f"https://press{i}.example.com/press-release/ai-investment-plan-{i}.html",
+                "source": f"press{i}.example.com",
+                "title": f"Компания объявила план инвестиций в ИИ {i}",
+                "description": "инвестиции партнёрство регулирование прорыв million",
+                "total_score": 9,
+                "tier": "Tier-2",
+            }
+        )
+    out = ds._rebalance_verified_pool(pool, target=10)
+    assert len(out) == 10
+    assert max(ds._pool_host_counts(out).values()) <= 2
+
+
+def test_rebalance_does_not_break_source_cap_even_if_pool_small():
+    pool = []
+    for i in range(6):
+        pool.append({"url": f"https://cisoclub.ru/news/{i}", "source": "cisoclub.ru", "total_score": 8, "tier": "Tier-3"})
+    for i in range(4):
+        pool.append({"url": f"https://neuro-ai.ru/news/{i}", "source": "neuro-ai.ru", "total_score": 7, "tier": "Tier-3"})
+
+    out = ds._rebalance_verified_pool(pool, target=10)
+    by_host: dict[str, int] = {}
+    for item in out:
+        host = ds._publisher_host_key(item)
+        by_host[host] = by_host.get(host, 0) + 1
+    assert max(by_host.values()) <= 2
+    assert len(out) == 4
+
+
+def test_step1_requires_minimum_discovered_pages_before_pool(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    from app.services.step1_filter_settings import load_step1_filter_settings, save_step1_filter_settings
+
+    cfg = load_step1_filter_settings()
+    cfg["min_discovered_pages"] = 20
+    save_step1_filter_settings(cfg)
+
+    rows = []
+    for i in range(19):
+        rows.append(
+            {
+                "original_number": i + 1,
+                "title": f"ИИ новость {i + 1}",
+                "url": f"https://news{i}.example.com/ai/article-{i + 1}",
+                "source": f"news{i}.example.com",
+                "headline_editorial_ok": True,
+                "link_status": True,
+                "page_verified": True,
+                "is_aggregator": False,
+            }
+        )
+
+    monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: (rows, {}))
+    monkeypatch.setattr(service.workflow, "run_candidates_research", lambda *args, **kwargs: [])
+    monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda rows: rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: verify_rows)
+
+    with pytest.raises(HTTPException) as ex:
+        service.run_step_1(digest.id, [])
+
+    assert ex.value.status_code == 502
+    assert "Найдено конкретных проверенных страниц 19 из требуемых 20" in str(ex.value.detail)
