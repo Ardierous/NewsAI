@@ -88,7 +88,10 @@ def test_fetch_article_urls_raw_merges_providers(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(
         news_search,
         "_tavily_search_urls",
-        lambda key, query, limit: ["https://ria.ru/20260519/a.html", "https://habr.com/c"],
+        lambda key, query, limit, include_domains=None: [
+            "https://ria.ru/20260519/a.html",
+            "https://habr.com/c",
+        ],
     )
     raw = news_search.fetch_article_urls_raw_merged(settings, "AI", limit=10, proxy=proxy)
     assert "https://ria.ru/20260519/a.html" in raw
@@ -134,3 +137,76 @@ def test_fetch_article_urls_falls_back_to_serpapi(monkeypatch: pytest.MonkeyPatc
         settings, "AI news", limit=5, proxy=proxy
     )
     assert urls == [serp_url]
+
+
+def test_search_url_prefilter_non_policy_source_when_tier_strict():
+    assert news_search.search_url_prefilter_reason(
+        "https://random-blog.example.com/ai-news",
+        tier_strict=True,
+    ) == "non_policy_source"
+    assert news_search.search_url_prefilter_reason(
+        "https://random-blog.example.com/ai-news",
+        tier_strict=False,
+    ) is None
+    assert news_search.search_url_prefilter_reason(
+        "https://ria.ru/20260519/ai-story.html",
+        tier_strict=True,
+    ) is None
+
+
+def test_fetch_tier_prioritized_raw_urls_batches_by_tier(monkeypatch: pytest.MonkeyPatch):
+    from app.source_tiers_policy import SourceTiersPolicy
+
+    policy = SourceTiersPolicy(
+        prompt_text="test",
+        aggregator_hosts=("news.google.",),
+        tier1_hosts=("ria.ru", "tass.ru"),
+        tier2_hosts=("techcrunch.com",),
+        tier3_hosts=(),
+        tier4_hosts=(),
+        banned_media_hosts=(),
+        foreign_agent_hosts=(),
+        russian_host_markers=(),
+        blocked_search_hosts=(),
+        search_seed_urls=("https://ria.ru/product_iskusstvennyy-intellekt/",),
+    )
+    calls: list[dict] = []
+
+    def _fake_fetch(settings, query, limit, *, proxy=None, search_context_size=None, include_domains=None, allowed_hosts=None):
+        calls.append(
+            {
+                "query": query,
+                "limit": limit,
+                "include_domains": include_domains,
+                "allowed_hosts": allowed_hosts,
+            }
+        )
+        hosts = allowed_hosts or []
+        out: list[str] = []
+        if "ria.ru" in hosts:
+            out.extend(["https://ria.ru/20260519/a.html", "https://news.google.com/x"])
+        if "tass.ru" in hosts:
+            out.append("https://tass.ru/ekonomika/123")
+        if "techcrunch.com" in hosts:
+            out.append("https://techcrunch.com/2026/ai-story")
+        return out
+
+    monkeypatch.setattr(news_search, "fetch_article_urls_raw_merged", _fake_fetch)
+    settings = SimpleNamespace(enable_web_fetch=True, proxyapi_web_search_enabled=True)
+    urls = news_search.fetch_tier_prioritized_raw_urls(
+        settings,
+        window_prefix="за неделю ",
+        topic_terms="ИИ нейросети",
+        product_excludes="-продукт",
+        fetch_limit=20,
+        proxy=MagicMock(),
+        policy=policy,
+    )
+    assert "https://ria.ru/20260519/a.html" in urls
+    assert "https://tass.ru/ekonomika/123" in urls
+    assert "https://techcrunch.com/2026/ai-story" in urls
+    assert all("news.google." not in u for u in urls)
+    assert calls
+    assert all(call["allowed_hosts"] for call in calls)
+    assert "site:ria.ru" in calls[0]["query"] or "site:tass.ru" in calls[0]["query"]
+

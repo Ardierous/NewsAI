@@ -213,3 +213,5 @@ def test_filter_counters_fall_back_to_discovered_news_journal():
     payload = service.get_step1_filters_payload(digest.id)
     assert payload["counters"]["http_unreachable"] == 1
     assert payload["counters"]["published_before_window"] == 1
+    assert payload["journal_totals"]["total"] == 2
+    assert payload["journal_totals"]["rejected"] == 1

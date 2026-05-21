@@ -73,6 +73,24 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
 
 export const api = {
   listDigests: () => request<any[]>("/digests"),
+  getAppConfig: () =>
+    request<{
+      sections: Array<{
+        id: string;
+        title: string;
+        file: string;
+        items: Array<{
+        label: string;
+        value: string;
+        source: string;
+        hint?: string | null;
+        why_chosen?: string;
+        alternatives?: string;
+      }>;
+      }>;
+      env_overrides: string[];
+      note: string;
+    }>("/config"),
   createTodayDigest: () => request<any>("/digests/create", { method: "POST" }),
   getDigest: (id: number) => request<any>(`/digests/${id}`),
   step0: (

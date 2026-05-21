@@ -76,6 +76,7 @@ class ProxyApiClient:
         limit: int = 15,
         *,
         search_context_size: str | None = None,
+        allowed_hosts: list[str] | None = None,
     ) -> list[str]:
         """
         Реальный веб-поиск через ProxyAPI (OpenAI Responses API + tool web_search).
@@ -90,7 +91,18 @@ class ProxyApiClient:
             f"Найди до {limit} свежих новостей (часовой пояс Europe/Moscow) по теме: {query}. "
             "Строго соблюдай ограничения дат из запроса (after:/окно публикации). "
             "Только материалы про искусственный интеллект, нейросети, машинное обучение или крупные модели (GPT, Gemini, Claude и т.п.). "
-            "Можно использовать агрегаторы и дайджесты для поиска сюжета, но итоговые ссылки должны вести на первоисточник. "
+        )
+        if allowed_hosts:
+            hosts_csv = ", ".join(str(h).strip() for h in allowed_hosts if str(h).strip())
+            user_prompt += (
+                f"Искать ТОЛЬКО на доменах из политики источников: {hosts_csv}. "
+                "Не возвращай URL с других сайтов. "
+            )
+        else:
+            user_prompt += (
+                "Можно использовать агрегаторы и дайджесты для поиска сюжета, но итоговые ссылки должны вести на первоисточник. "
+            )
+        user_prompt += (
             "Нужны прямые URL отдельных HTML-статей (не рубрики, не ленты, не разделы вроде /neiroseti или /articles/artificial_intelligence/, "
             "не агрегаторы, не Google News, не Reddit, не главные страницы, не поиск). "
             f"Ответ: строго JSON-массив из не более {limit} строк — каждая строка один полный URL, без markdown и без пояснений."

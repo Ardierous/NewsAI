@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "web": {
+    "enable_fetch": true
+  },
+  "step1": {
+    "search_tier1_min_raw_urls": 15,
+    "max_cost_rub": 50,
+    "batch_size": 20,
+    "search_fetch_limit": 100,
+    "urls_checked_per_collect": 80,
+    "soft_time_limit_sec": 180,
+    "hard_time_limit_sec": 300,
+    "max_candidates_for_ui": 15,
+    "verify_workers": 6,
+    "crew_fallback_only_if_empty": true,
+    "tier_strict_search": true,
+    "telegram_monitor_enabled": true,
+    "telegram_monitor_channels": "technokratos",
+    "telegram_max_pages": 2,
+    "telegram_max_links": 30,
+    "seed_urls_max": 35
+  },
+  "step2": {
+    "max_cost_rub": 50
+  },
+  "workflow": {
+    "auto_run_step3_after_order": true
+  },
+  "step4": {
+    "enable_image_generation": false
+  },
+  "logging": {
+    "level": "INFO",
+    "enable_file": true,
+    "file_name": "app.log",
+    "max_bytes": 5000000,
+    "backup_count": 5
+  }
+}

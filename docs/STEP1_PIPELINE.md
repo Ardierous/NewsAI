@@ -19,13 +19,23 @@
 | Тип и окно выпуска | `POST /digests/{id}/step0`; смена только окна — `PATCH /digests/{id}/news-window` или поля в теле `POST …/step1/run` (UI передаёт их при каждом запуске/пересборке) |
 | Дефолты шага 0 | `backend/app/digest_defaults.json` (`step0`) |
 | Фильтры шага 1 и порог воронки | `backend/app/step1_filter_settings.json`; UI «Настройки фильтра новостей» → `PUT /digests/{id}/step1/filters` |
-| Технические лимиты шага 1 | `backend/.env` (`STEP1_BATCH_SIZE`, `STEP1_SOFT_TIME_LIMIT_SEC`, `STEP1_HARD_TIME_LIMIT_SEC`, `STEP1_MAX_CANDIDATES_FOR_UI`) |
-| Ключи и лимиты | `backend/.env` (`ENABLE_WEB_FETCH`, `STEP1_MAX_COST_RUB`, `PROXYAPI_WEB_SEARCH_*`, `STEP1_SEARCH_TIER1_MIN_RAW_URLS`, `SERPAPI_API_KEY`, `TAVILY_API_KEY`) |
+| Технические лимиты шага 1 | `backend/app/pipeline_settings.json` (`batch_size`, `soft/hard_time_limit_sec`, `max_candidates_for_ui`, `verify_workers`, …); переопределение через `.env` (`STEP1_*`) |
+| Ключи и ProxyAPI web_search | `backend/.env` (`PROXYAPI_WEB_SEARCH_*`, `SERPAPI_API_KEY`, `TAVILY_API_KEY`; `STEP1_MAX_COST_RUB` при необходимости) |
+| Автосбор (`web.enable_fetch`) | `backend/app/pipeline_settings.json` |
 
-### Веб-поиск ProxyAPI (оптимизация)
+### Веб-поиск и политика источников
 
-- Основной запрос: Responses API + `web_search`, `PROXYAPI_WEB_SEARCH_CONTEXT_SIZE` (обычно `medium`).
-- Второй запрос `site:ria.ru OR …` — только если сырых URL после основного поиска &lt; `STEP1_SEARCH_TIER1_MIN_RAW_URLS` (15), с `PROXYAPI_WEB_SEARCH_CONTEXT_SIZE_SUPPLEMENT=low`.
+По умолчанию (`step1.tier_strict_search: true` в `pipeline_settings.json`) шаг 1 **не** делает «общий» поиск по интернету. Вместо этого:
+
+1. Берутся хосты tier-1 → tier-4 из `backend/app/prompts/source_tiers.txt`.
+2. Для каждого батча (до 3 доменов) формируется запрос с `site:` и подсказками из `search_seed_urls`.
+3. ProxyAPI / SerpAPI / Tavily получают `allowed_hosts` / `include_domains` — URL вне политики отбрасываются на prefilter (`non_policy_source`).
+
+Режим `tier_strict_search: false` возвращает прежнее поведение: один общий запрос + добор tier-1 при нехватке сырых URL (&lt; `STEP1_SEARCH_TIER1_MIN_RAW_URLS`).
+
+Дополнительно:
+
+- `PROXYAPI_WEB_SEARCH_CONTEXT_SIZE` (обычно `medium`) — для tier-батчей используется `PROXYAPI_WEB_SEARCH_CONTEXT_SIZE_SUPPLEMENT` (`low`).
 - Fallback на `*-search-preview` — **только при ошибке** Responses API, не при пустом парсинге URL (иначе двойная оплата поиска).
 - Документация: [proxyapi.ru/docs/openai-web-search](https://proxyapi.ru/docs/openai-web-search).
 
@@ -113,9 +123,12 @@ Stop-правила:
 
 - Блок «Итоги сбора пула».
 - Дополнительно: итерации, причина остановки, elapsed, размер батча и целевой размер пула.
-- Блок «Статистика отбраковки ссылок» (суммы по кодам).
+- Блок «Статистика отбраковки ссылок» (суммы по кодам фильтров + `journal_totals` из API).
+- В модалке «Настройки фильтра новостей»: журнал **последнего** прогона (`journal_totals`: проверено / в пул / отбраковано), строка «При последнем сборе „Дата вне окна“ была вкл/выкл» (`filters_applied_last_run`).
 - **Журнал проверки ссылок** — каждый проверенный URL, заголовок, ссылка, статус «в пуле / не в пуле» и текст причины отбраковки; фильтры «Все / В пуле / Отбраковано».
 - Кнопка «Все найденные новости» — полный список для ручных оценок.
+
+Счётчики фильтров синхронизируются с журналом `step1_discovered_news` после каждого прогона; при расхождении с суммой URL у одной статьи может быть несколько кодов отбраковки.
 
 ## Таймаут браузера
 

@@ -84,6 +84,32 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     return service, digest
 
 
+def test_build_manual_candidates_classifies_tier_hosts(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    monkeypatch.setattr(
+        ds,
+        "_fetch_article_page_bundle",
+        lambda url: {
+            "ok": True,
+            "final_url": url,
+            "display_url": url,
+            "headline": "Нейросеть и искусственный интеллект: тестовая новость",
+            "topic_corpus": "искусственный интеллект нейросети машинное обучение",
+        },
+    )
+    monkeypatch.setattr(service, "_ensure_russian_candidate_title", lambda _d, _u, title: title)
+    rows = service._build_manual_candidates(
+        digest,
+        ["https://habr.com/ru/news/1036050/"],
+        "2026-05-21T12:00:00+03:00",
+        mandatory=False,
+    )
+    assert len(rows) == 1
+    assert rows[0]["tier"] == "Tier-2"
+    assert rows[0]["reliability_status"] == "✅ подтверждено"
+    assert rows[0]["is_aggregator"] is False
+
+
 def test_step1_raises_402_when_proxyapi_budget_exceeded(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
     service.proxy.last_error_kind = "budget_exceeded"
@@ -365,6 +391,42 @@ def test_select_news_requires_ten_candidate_pool(monkeypatch: pytest.MonkeyPatch
 
     assert ex.value.status_code == 400
     assert "минимум 10 проверенных новостей" in str(ex.value.detail)
+
+
+def test_select_news_top5_picks_best_when_many_mandatory_manual(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    for idx in range(12):
+        mandatory = idx < 7
+        service.db.add(
+            NewsCandidate(
+                digest_id=digest.id,
+                original_number=idx + 1,
+                title=f"Новость {idx}",
+                url=f"https://ria.ru/2026052{idx}/story",
+                source="ria.ru",
+                tier="Tier-1",
+                published_at="2026-05-20T12:00:00",
+                category="manual" if mandatory else "technology",
+                description="Описание",
+                significance_score=2,
+                novelty_score=2,
+                impact_score=2,
+                total_score=10 - idx,
+                reliability_status="✅ подтверждено",
+                link_status=True,
+                headline_editorial_ok=True,
+                page_verified=True,
+                verification_comment="MANUAL_REQUIRED: добавлено пользователем" if mandatory else "",
+            )
+        )
+    service.db.commit()
+
+    selected = service.select_news(digest.id, [], top5=True)
+    assert len(selected) == 5
+    service.db.refresh(digest)
+    assert digest.status == STATUS_SELECTED
 
 
 def test_step1_discovered_feedback_saved(monkeypatch: pytest.MonkeyPatch):

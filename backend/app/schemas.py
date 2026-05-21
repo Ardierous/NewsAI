@@ -1,9 +1,10 @@
 from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.digest_defaults import get_digest_defaults
+from app.services.candidate_origin import resolve_candidate_origin
 
 
 class DigestCreateResponse(BaseModel):
@@ -103,10 +104,24 @@ class Step1FilterConfig(BaseModel):
     min_collection_iterations: int = Field(ge=1, le=50)
 
 
+class Step1JournalTotals(BaseModel):
+    total: int = 0
+    in_pool: int = 0
+    rejected: int = 0
+
+
+class Step1FilterAppliedSnapshot(BaseModel):
+    id: str
+    enabled: bool = True
+    order: int = 0
+
+
 class Step1FiltersResponse(BaseModel):
     catalog: list[Step1FilterCatalogItem] = Field(default_factory=list)
     config: Step1FilterConfig
     counters: dict[str, int] = Field(default_factory=dict)
+    journal_totals: Step1JournalTotals = Field(default_factory=Step1JournalTotals)
+    filters_applied_last_run: list[Step1FilterAppliedSnapshot] = Field(default_factory=list)
 
 
 class Step1DiscoveredFeedbackRequest(BaseModel):
@@ -139,6 +154,42 @@ class CandidateOut(BaseModel):
     is_duplicate: bool = False
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_origin_category(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            payload = dict(data)
+        else:
+            payload = {
+                "id": data.id,
+                "original_number": data.original_number,
+                "title": data.title,
+                "url": data.url,
+                "source": data.source,
+                "tier": data.tier,
+                "published_at": data.published_at,
+                "category": data.category,
+                "description": data.description,
+                "significance_score": data.significance_score,
+                "novelty_score": data.novelty_score,
+                "impact_score": data.impact_score,
+                "total_score": data.total_score,
+                "reliability_status": data.reliability_status,
+                "verification_comment": data.verification_comment or "",
+                "link_status": data.link_status,
+                "headline_editorial_ok": data.headline_editorial_ok,
+                "page_verified": data.page_verified,
+                "is_foreign_agent": data.is_foreign_agent,
+                "is_aggregator": data.is_aggregator,
+                "is_duplicate": data.is_duplicate,
+            }
+        payload["category"] = resolve_candidate_origin(
+            payload.get("category"),
+            payload.get("verification_comment"),
+            payload.get("description"),
+        )
+        return payload
 
 
 class SelectRequest(BaseModel):

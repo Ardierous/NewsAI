@@ -264,6 +264,58 @@ function candidateSelectableForStep2(c: {
   return true;
 }
 
+const CATEGORY_LABELS: Record<string, string> = {
+  manual: "Ручная ссылка (поле URL)",
+  telegram_seed: "Из Telegram",
+  search: "Web-поиск",
+  llm_crew: "LLM-добор",
+  technology: "LLM-добор",
+  analytics: "LLM-добор",
+};
+
+function resolveOriginCategory(c: {
+  category?: string;
+  verification_comment?: string;
+  description?: string;
+}): string {
+  const comment = String(c.verification_comment || "");
+  const desc = String(c.description || "");
+  const cat = String(c.category || "").trim().toLowerCase();
+  if (comment.includes("TELEGRAM_SEED:") || desc.includes("Telegram-монитор") || cat === "telegram_seed") {
+    return "telegram_seed";
+  }
+  if (comment.includes("Источник из веб-поиска") || cat === "search") {
+    return "search";
+  }
+  if (cat === "llm_crew" || cat === "technology" || cat === "analytics") {
+    return "llm_crew";
+  }
+  if (desc.includes("поле URL на шаге 1")) {
+    return "manual";
+  }
+  if (comment.includes("MANUAL_REQUIRED:")) {
+    return "telegram_seed";
+  }
+  if (cat === "manual") {
+    return "telegram_seed";
+  }
+  return cat || "search";
+}
+
+function categoryLabel(c: {
+  category?: string;
+  verification_comment?: string;
+  description?: string;
+}): string {
+  const key = resolveOriginCategory(c);
+  if (!key) return "";
+  return CATEGORY_LABELS[key] || key;
+}
+
+function isTier5ForbiddenMedia(c: { tier?: string; is_aggregator?: boolean }): boolean {
+  return String(c.tier || "") === "Tier-5" && !Boolean(c.is_aggregator);
+}
+
 function rejectReasonCodes(text: string): string[] {
   return String(text || "")
     .split(/\s+/)
@@ -300,6 +352,8 @@ const REJECT_REASON_LABELS: Record<string, string> = {
     "ссылка ведёт на другую страницу (редирект на главную или другой материал), не на заявленную новость",
   forbidden_media_source:
     "источник входит в Tier-5 (запрещённые законом РФ СМИ) и исключён из кандидатного пула",
+  non_policy_source:
+    "домен не входит в tier-1…tier-4 из политики источников — при строгом поиске такие URL не собираются",
   unknown_reject: "точная причина в данных не указана",
   duplicate_url_skip: "ссылка уже проверялась в этом запуске или исключена как дубликат",
   product_tool_page: "страница продукта/инструмента, а не новостная публикация",
@@ -428,12 +482,38 @@ export function DigestWizard({ digestId }: Props) {
   const [step1FilterCatalog, setStep1FilterCatalog] = useState<Step1FilterCatalogItem[]>([]);
   const [step1FilterStates, setStep1FilterStates] = useState<Step1FilterState[]>([]);
   const [step1FilterCounters, setStep1FilterCounters] = useState<Record<string, number>>({});
+  const [step1JournalTotalsApi, setStep1JournalTotalsApi] = useState<{ total: number; in_pool: number; rejected: number } | null>(
+    null,
+  );
+  const [step1FiltersAppliedLastRun, setStep1FiltersAppliedLastRun] = useState<
+    Array<{ id: string; enabled: boolean; order: number }>
+  >([]);
   const [step1MinDiscoveredPages, setStep1MinDiscoveredPages] = useState(20);
   const [step1MinCollectionIterations, setStep1MinCollectionIterations] = useState(5);
   const [step1FilterLoading, setStep1FilterLoading] = useState(false);
   const [step1FilterSaving, setStep1FilterSaving] = useState(false);
   const [step1FilterError, setStep1FilterError] = useState("");
   const [draggedFilterId, setDraggedFilterId] = useState<string | null>(null);
+  const [showAppConfigModal, setShowAppConfigModal] = useState(false);
+  const [appConfigLoading, setAppConfigLoading] = useState(false);
+  const [appConfigError, setAppConfigError] = useState("");
+  const [appConfig, setAppConfig] = useState<{
+    sections: Array<{
+      id: string;
+      title: string;
+      file: string;
+      items: Array<{
+        label: string;
+        value: string;
+        source: string;
+        hint?: string | null;
+        why_chosen?: string;
+        alternatives?: string;
+      }>;
+    }>;
+    env_overrides: string[];
+    note: string;
+  } | null>(null);
 
   const sortedOutputs = useMemo(() => {
     const list = [...(digest?.outputs || [])];
@@ -598,6 +678,32 @@ export function DigestWizard({ digestId }: Props) {
     if (step1AuditFilter === "rejected") return rows.filter((r: any) => !r.in_candidate_pool);
     return rows;
   }, [digest?.discovered_news, step1AuditFilter]);
+
+  const step1RejectBreakdown = useMemo(() => {
+    const byId = new Map(step1FilterCatalog.map((x) => [x.id, x]));
+    return Object.entries(step1FilterCounters)
+      .filter(([, n]) => Number(n) > 0)
+      .map(([id, count]) => ({
+        id,
+        count: Number(count),
+        label: byId.get(id)?.label_ru ?? REJECT_REASON_LABELS[id] ?? id,
+      }))
+      .sort((a, b) => b.count - a.count);
+  }, [step1FilterCatalog, step1FilterCounters]);
+
+  const step1CountersSum = useMemo(
+    () => step1RejectBreakdown.reduce((acc, x) => acc + x.count, 0),
+    [step1RejectBreakdown],
+  );
+
+  const step1ModalJournal = useMemo(() => {
+    const src = step1JournalTotalsApi ?? step1AuditCounts;
+    return {
+      total: src.total,
+      inPool: "in_pool" in src ? src.in_pool : src.inPool,
+      rejected: src.rejected,
+    };
+  }, [step1JournalTotalsApi, step1AuditCounts]);
 
   const step1FiltersOrdered = useMemo(() => {
     const byId = new Map(step1FilterCatalog.map((x) => [x.id, x]));
@@ -863,10 +969,26 @@ export function DigestWizard({ digestId }: Props) {
     setStep1FilterLoading(true);
     setStep1FilterError("");
     try {
-      const data = await api.getStep1Filters(digestId);
+      const [data] = await Promise.all([
+        api.getStep1Filters(digestId),
+        loadDigest({ skipProgress: true }),
+      ]);
       setStep1FilterCatalog(Array.isArray(data?.catalog) ? data.catalog : []);
       setStep1FilterStates(Array.isArray(data?.config?.filters) ? data.config.filters : []);
       setStep1FilterCounters((data?.counters && typeof data.counters === "object" ? data.counters : {}) as Record<string, number>);
+      const jt = data?.journal_totals;
+      if (jt && typeof jt === "object") {
+        setStep1JournalTotalsApi({
+          total: Number(jt.total) || 0,
+          in_pool: Number(jt.in_pool) || 0,
+          rejected: Number(jt.rejected) || 0,
+        });
+      } else {
+        setStep1JournalTotalsApi(null);
+      }
+      setStep1FiltersAppliedLastRun(
+        Array.isArray(data?.filters_applied_last_run) ? data.filters_applied_last_run : [],
+      );
       const minPages = Number(data?.config?.min_discovered_pages);
       if (Number.isFinite(minPages) && minPages >= 10) setStep1MinDiscoveredPages(minPages);
       const minIters = Number(data?.config?.min_collection_iterations);
@@ -876,7 +998,22 @@ export function DigestWizard({ digestId }: Props) {
     } finally {
       setStep1FilterLoading(false);
     }
-  }, [digestId]);
+  }, [digestId, loadDigest]);
+
+  const openAppConfigModal = useCallback(async () => {
+    setShowAppConfigModal(true);
+    setAppConfigLoading(true);
+    setAppConfigError("");
+    try {
+      const data = await api.getAppConfig();
+      setAppConfig(data);
+    } catch (e) {
+      setAppConfigError((e as Error).message || "Не удалось загрузить настройки сервера.");
+      setAppConfig(null);
+    } finally {
+      setAppConfigLoading(false);
+    }
+  }, []);
 
   const saveStep1FilterSettings = useCallback(async () => {
     setStep1FilterSaving(true);
@@ -1346,7 +1483,12 @@ export function DigestWizard({ digestId }: Props) {
       <DigestHintsAccordion />
 
       <div className="card">
-        <h3>Шаг 0 — тип дайджеста и окно новостей</h3>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+          <h3 style={{ margin: 0 }}>Шаг 0 — тип дайджеста и окно новостей</h3>
+          <button type="button" disabled={loading} onClick={() => void openAppConfigModal()}>
+            Настройки
+          </button>
+        </div>
         <StepProgressBar active={runningStepKey === "0" || runningStepKey === "init"} />
         <p className="wizard-hint-do">
           Задайте окно по дате публикации, затем нажмите <strong>одну</strong> кнопку тона и дождитесь полоски загрузки. После
@@ -1756,6 +1898,97 @@ export function DigestWizard({ digestId }: Props) {
         </div>
       ) : null}
 
+      {showAppConfigModal ? (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="app-config-modal-title"
+          className="card"
+          style={{
+            position: "fixed",
+            inset: 24,
+            zIndex: 72,
+            overflow: "auto",
+            background: "rgba(15, 23, 42, 0.98)",
+            borderColor: "#334155",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10, gap: 8, flexWrap: "wrap" }}>
+            <h3 id="app-config-modal-title" style={{ margin: 0 }}>
+              Настройки сервера
+            </h3>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" disabled={appConfigLoading} onClick={() => void openAppConfigModal()}>
+                {appConfigLoading ? "Обновляем…" : "Обновить"}
+              </button>
+              <button type="button" onClick={() => setShowAppConfigModal(false)}>
+                Закрыть
+              </button>
+            </div>
+          </div>
+          <p className="wizard-hint-do" style={{ marginTop: 0 }}>
+            Только просмотр. В <code style={{ color: "#e2e8f0" }}>backend/.env</code> обычно только{" "}
+            <code style={{ color: "#e2e8f0" }}>PROXYAPI_API_KEY</code>; остальные параметры — из JSON и{" "}
+            <code style={{ color: "#e2e8f0" }}>config.py</code>. Колонки «Почему так» и «Другие значения» поясняют текущий
+            выбор.
+          </p>
+          {appConfigError ? <div style={{ color: "#fca5a5", marginBottom: 12 }}>{appConfigError}</div> : null}
+          {appConfigLoading && !appConfig ? <p style={{ color: "#94a3b8" }}>Загрузка…</p> : null}
+          {appConfig?.env_overrides?.length ? (
+            <p style={{ color: "#94a3b8", fontSize: "0.88rem", lineHeight: 1.45 }}>
+              Переопределено через <code style={{ color: "#e2e8f0" }}>.env</code>:{" "}
+              {appConfig.env_overrides.join(", ")}
+            </p>
+          ) : null}
+          {appConfig?.sections?.map((section) => (
+            <section key={section.id} style={{ marginBottom: 20 }}>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline", marginBottom: 8 }}>
+                <h4 style={{ margin: 0 }}>{section.title}</h4>
+                <span style={{ color: "#64748b", fontSize: "0.85rem" }}>{section.file}</span>
+              </div>
+              <div style={{ overflowX: "auto", border: "1px solid #334155", borderRadius: 8 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.9rem" }}>
+                  <thead>
+                    <tr style={{ background: "rgba(30, 41, 59, 0.65)", textAlign: "left" }}>
+                      <th style={{ padding: "8px 10px", fontWeight: 600 }}>Параметр</th>
+                      <th style={{ padding: "8px 10px", fontWeight: 600 }}>Значение</th>
+                      <th style={{ padding: "8px 10px", fontWeight: 600 }}>Почему так</th>
+                      <th style={{ padding: "8px 10px", fontWeight: 600 }}>Другие значения</th>
+                      <th style={{ padding: "8px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>Источник</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {section.items.map((row) => (
+                      <tr key={`${section.id}-${row.label}`} style={{ borderTop: "1px solid #334155" }}>
+                        <td style={{ padding: "8px 10px", verticalAlign: "top", color: "#cbd5e1" }}>{row.label}</td>
+                        <td style={{ padding: "8px 10px", verticalAlign: "top", wordBreak: "break-word" }}>
+                          {row.value}
+                          {row.hint ? (
+                            <div style={{ color: "#64748b", fontSize: "0.82rem", marginTop: 4 }}>{row.hint}</div>
+                          ) : null}
+                        </td>
+                        <td style={{ padding: "8px 10px", verticalAlign: "top", color: "#94a3b8", fontSize: "0.86rem", lineHeight: 1.45 }}>
+                          {row.why_chosen || "—"}
+                        </td>
+                        <td style={{ padding: "8px 10px", verticalAlign: "top", color: "#94a3b8", fontSize: "0.86rem", lineHeight: 1.45 }}>
+                          {row.alternatives || "—"}
+                        </td>
+                        <td style={{ padding: "8px 10px", verticalAlign: "top", color: "#94a3b8", whiteSpace: "nowrap" }}>
+                          {row.source}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          ))}
+          {appConfig?.note ? (
+            <p style={{ color: "#94a3b8", fontSize: "0.88rem", marginBottom: 0 }}>{appConfig.note}</p>
+          ) : null}
+        </div>
+      ) : null}
+
       {showStep1FilterSettings ? (
         <div
           role="dialog"
@@ -1841,17 +2074,46 @@ export function DigestWizard({ digestId }: Props) {
               />
             </label>
             <span style={{ color: "#94a3b8", fontSize: "0.86rem", lineHeight: 1.45, display: "block" }}>
-              Журнал <strong>последнего</strong> запуска шага 1: проверено URL <strong>{step1AuditCounts.total}</strong>, в пул:{" "}
-              <strong>{step1AuditCounts.inPool}</strong>
-              {step1AuditCounts.rejected > 0 ? (
+              Журнал <strong>последнего</strong> запуска шага 1: проверено URL <strong>{step1ModalJournal.total}</strong>, в пул:{" "}
+              <strong>{step1ModalJournal.inPool}</strong>
+              {step1ModalJournal.rejected > 0 ? (
                 <>
-                  , отбраковано <strong>{step1AuditCounts.rejected}</strong>
+                  , не в пул <strong>{step1ModalJournal.rejected}</strong>
                 </>
               ) : null}
-              . Сняли галочку у фильтра — это вступит в силу только после <strong>нового</strong> «Запустить сбор» / «Пересобрать пул»;
-              старые цифры в журнале не пересчитываются. Счётчики у фильтров — причины из того же журнала (не «сейчас по
-              включённым»).
+              . Галочки ниже — настройка на <strong>следующий</strong> сбор; цифры в колонке — что записано в журнале{" "}
+              <strong>уже после последнего</strong> запуска.
             </span>
+            {step1FiltersAppliedLastRun.length > 0 ? (
+              <p style={{ margin: 0, fontSize: "0.84rem", color: "#cbd5e1", lineHeight: 1.45 }}>
+                При <strong>последнем</strong> сборе «Дата вне окна» была{" "}
+                <strong>
+                  {step1FiltersAppliedLastRun.find((x) => x.id === "published_before_window")?.enabled
+                    ? "включена"
+                    : "выключена"}
+                </strong>
+                . Если сейчас выключена, а в журнале всё ещё 20 по дате — перезапустите backend после обновления кода и снова
+                «Пересобрать пул».
+              </p>
+            ) : null}
+            {step1RejectBreakdown.length > 0 ? (
+              <div style={{ marginTop: 4, fontSize: "0.84rem", color: "#e2e8f0", lineHeight: 1.5 }}>
+                <strong>Почему не в пул ({step1ModalJournal.rejected} URL):</strong>
+                <ul style={{ margin: "6px 0 0", paddingLeft: "1.2rem" }}>
+                  {step1RejectBreakdown.map((row) => (
+                    <li key={row.id}>
+                      {row.label}: <strong>{row.count}</strong>
+                    </li>
+                  ))}
+                </ul>
+                {step1CountersSum !== step1ModalJournal.rejected ? (
+                  <span style={{ color: "#94a3b8", display: "block", marginTop: 6 }}>
+                    Сумма по причинам ({step1CountersSum}) может отличаться от числа URL ({step1ModalJournal.rejected}): у одной
+                    ссылки бывает несколько кодов отказа.
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
           {step1FilterError ? (
             <p className="wizard-hint-do" style={{ marginTop: 0, color: step1FilterError.includes("сохранены") ? "#86efac" : "#fca5a5" }}>
@@ -2082,7 +2344,11 @@ export function DigestWizard({ digestId }: Props) {
                     ) : null}
                     <div className="news-pick-meta">
                       {c.source ? <span className="news-chip">{c.source}</span> : null}
-                      {c.category ? <span className="news-chip">{c.category}</span> : null}
+                      {c.category || c.verification_comment || c.description ? (
+                        <span className="news-chip" title="Как материал попал в пул">
+                          {categoryLabel(c)}
+                        </span>
+                      ) : null}
                       {c.tier ? <span className="news-chip">{c.tier}</span> : null}
                       <span className="news-chip">Балл: {c.total_score}</span>
                       <span className="news-chip">{formatNewsPublishedAt(c.published_at)}</span>
@@ -2102,11 +2368,19 @@ export function DigestWizard({ digestId }: Props) {
                         <span className="news-chip warn">Нельзя выбрать в топ‑5</span>
                       )}
                       {c.is_foreign_agent ? (
-                        <span className="news-chip warn">ИНОСТРАННЫЙ АГЕНТ</span>
-                      ) : null}
-                      {c.is_aggregator || String(c.reliability_status || "") === "❗ без подтверждения" ? (
-                        <span className="news-chip warn">Запрещённый источник</span>
-                      ) : null}
+                        <span className="news-chip warn">Иноагент</span>
+                      ) : (
+                        <span className="news-chip ok">Не иноагент</span>
+                      )}
+                      {isTier5ForbiddenMedia(c) ? (
+                        <span className="news-chip warn">Запрещён в РФ</span>
+                      ) : c.is_aggregator ? (
+                        <span className="news-chip warn">Агрегатор</span>
+                      ) : String(c.reliability_status || "") === "❗ без подтверждения" ? (
+                        <span className="news-chip warn">Источник без подтверждения</span>
+                      ) : (
+                        <span className="news-chip ok">Не запрещён в РФ</span>
+                      )}
                       {c.reliability_status ? (
                         <span className={`news-chip ${warnRel ? "warn" : ""}`}>{c.reliability_status}</span>
                       ) : null}

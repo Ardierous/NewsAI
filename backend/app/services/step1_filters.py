@@ -26,6 +26,12 @@ STEP1_FILTER_CATALOG: tuple[Step1FilterDef, ...] = (
         "Отсекает источники из blocked/tier5 по правилам проекта.",
         "pre_http",
     ),
+    Step1FilterDef(
+        "non_policy_source",
+        "Вне политики источников",
+        "Отсекает URL с доменов вне tier-1…tier-4 из source_tiers.txt (при строгом tier-поиске).",
+        "pre_http",
+    ),
     Step1FilterDef("news_listing_page", "Лента/рубрика", "Отсекает страницы-списки, разделы, теги и поисковые выдачи.", "pre_http"),
     Step1FilterDef(
         "llm_hallucinated_url",

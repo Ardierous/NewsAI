@@ -3,7 +3,7 @@
   "filters": [
     {
       "id": "published_before_window",
-      "enabled": false,
+      "enabled": true,
       "order": 1
     },
     {
@@ -13,7 +13,7 @@
     },
     {
       "id": "published_date_undefined",
-      "enabled": false,
+      "enabled": true,
       "order": 3
     },
     {

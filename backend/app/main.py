@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.routes_config import router as config_router
 from app.api.routes_digests import router as digests_router
 from app.config import get_settings
 from app.database import Base, engine, ensure_digest_schema_migrations
@@ -77,6 +78,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(config_router)
 app.include_router(digests_router)
 
 

@@ -51,6 +51,7 @@ from app.services.export_service import build_docx
 from app.services.news_search import (
     fetch_article_urls_from_search,
     fetch_article_urls_raw_merged,
+    fetch_tier_prioritized_raw_urls,
     is_listing_page_url,
     is_search_noise_url,
     is_topic_pool_page_url,
@@ -69,6 +70,7 @@ from app.services.step1_filter_settings import (
     normalize_step1_filter_states,
     save_step1_filter_settings,
 )
+from app.services.candidate_origin import apply_resolved_origin
 from app.services.telegram_channel_monitor import collect_telegram_seed_urls_for_digest
 from app.services.step1_filters import (
     STEP1_FILTER_DEF_BY_ID,
@@ -85,6 +87,12 @@ STATUS_STEP1 = "step_1_candidates"
 STATUS_SELECTED = "selected"
 STATUS_ANALYTICS = "analytics_ready"
 STATUS_FINAL = "final_ready"
+
+
+def _catalog_step1_filter_enabled(filter_id: str) -> bool:
+    """Дефолты каталога фильтров, когда нет контекста выпуска (smoke-тесты, утилиты)."""
+    fdef = STEP1_FILTER_DEF_BY_ID.get(filter_id)
+    return bool(fdef.default_enabled) if fdef else False
 
 STEP4_PLATFORMS = ("telegram", "max", "vk", "dzen")
 STEP4_IMAGE_VARIANT_COUNT = 4
@@ -1494,6 +1502,13 @@ def _normalize_candidate_source(item: dict[str, Any]) -> None:
         item["source"] = host
 
 
+def _apply_source_policy_from_url(item: dict[str, Any], url: str) -> None:
+    tier, is_aggregator, reliability_status = _classify_source_policy(url)
+    item["tier"] = tier
+    item["is_aggregator"] = is_aggregator
+    item["reliability_status"] = reliability_status
+
+
 def _pool_host_counts(pool: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for item in pool:
@@ -1736,11 +1751,41 @@ class DigestService:
                     out[code] += 1
         return out
 
+    def _journal_totals_from_discovered_news(self, digest_id: int) -> dict[str, int]:
+        rows = self.db.query(Step1DiscoveredNews).filter(Step1DiscoveredNews.digest_id == digest_id).all()
+        in_pool = sum(
+            1
+            for r in rows
+            if bool(r.link_status) and bool(r.headline_editorial_ok) and bool(r.page_verified)
+        )
+        total = len(rows)
+        return {"total": total, "in_pool": in_pool, "rejected": max(0, total - in_pool)}
+
+    def _read_step1_collection_meta(self, digest_id: int) -> dict[str, Any]:
+        asset = (
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest_id, Asset.type == "step1_collection_meta")
+            .order_by(Asset.id.desc())
+            .first()
+        )
+        if not asset or not (asset.prompt or "").strip():
+            return {}
+        try:
+            raw = json.loads(asset.prompt or "{}")
+            return raw if isinstance(raw, dict) else {}
+        except Exception:
+            return {}
+
     def _effective_step1_filter_counters(self, digest_id: int) -> dict[str, int]:
-        stored = self._read_step1_filter_counters(digest_id)
-        if sum(stored.values()) > 0:
-            return stored
-        return self._aggregate_filter_counters_from_discovered_news(digest_id)
+        """Счётчики по журналу последнего сбора (одна строка = один URL)."""
+        journal = self._aggregate_filter_counters_from_discovered_news(digest_id)
+        if sum(journal.values()) > 0 or self._journal_totals_from_discovered_news(digest_id)["total"] > 0:
+            return journal
+        return self._read_step1_filter_counters(digest_id)
+
+    def _sync_filter_counters_from_journal(self, digest_id: int) -> None:
+        counters = self._aggregate_filter_counters_from_discovered_news(digest_id)
+        self._save_step1_filter_counters(digest_id, counters)
 
     def _save_step1_filter_counters(self, digest_id: int, counters: dict[str, int]) -> None:
         payload = {fid: int(counters.get(fid, 0) or 0) for fid in STEP1_FILTER_DEF_BY_ID}
@@ -1776,6 +1821,20 @@ class DigestService:
         ids.sort(key=lambda fid: (int(self._active_step1_filter_order.get(fid, 9999)), fid))
         return ids
 
+    def _step1_filters_payload_extras(self, digest_id: int) -> dict[str, Any]:
+        meta = self._read_step1_collection_meta(digest_id)
+        applied_raw = meta.get("filters_applied") if isinstance(meta.get("filters_applied"), list) else []
+        applied = [
+            {"id": str(x.get("id") or ""), "enabled": bool(x.get("enabled")), "order": int(x.get("order") or 0)}
+            for x in applied_raw
+            if isinstance(x, dict) and x.get("id")
+        ]
+        applied.sort(key=lambda x: x["order"])
+        return {
+            "journal_totals": self._journal_totals_from_discovered_news(digest_id),
+            "filters_applied_last_run": applied,
+        }
+
     def get_step1_filters_payload(self, digest_id: int) -> dict[str, Any]:
         self.get_digest(digest_id)
         config = self._read_step1_filter_config()
@@ -1784,6 +1843,7 @@ class DigestService:
             "catalog": step1_filter_catalog_payload(),
             "config": config,
             "counters": counters,
+            **self._step1_filters_payload_extras(digest_id),
         }
 
     def save_step1_filters_payload(self, digest_id: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1794,6 +1854,7 @@ class DigestService:
             "catalog": step1_filter_catalog_payload(),
             "config": config,
             "counters": counters,
+            **self._step1_filters_payload_extras(digest_id),
         }
 
     def _digest_step_llm_cost_sum(self, digest_id: int, step: str) -> float:
@@ -2079,7 +2140,7 @@ class DigestService:
         return digest
 
     def _news_candidate_to_pool_dict(self, candidate: NewsCandidate) -> dict[str, Any]:
-        return {
+        item = {
             "original_number": candidate.original_number,
             "title": candidate.title,
             "url": candidate.url,
@@ -2101,6 +2162,8 @@ class DigestService:
             "is_duplicate": candidate.is_duplicate,
             "verification_comment": candidate.verification_comment or "",
         }
+        apply_resolved_origin(item)
+        return item
 
     def _load_keep_candidates_for_rebuild(
         self, digest_id: int, keep_candidate_ids: list[int]
@@ -2191,6 +2254,7 @@ class DigestService:
         self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest_id).delete()
         seen_urls_lower: set[str] = set()
         for idx, item in enumerate(items, start=1):
+            apply_resolved_origin(item)
             url_norm = str(item.get("url", "")).strip().lower()
             is_duplicate = url_norm in seen_urls_lower
             seen_urls_lower.add(url_norm)
@@ -2252,6 +2316,7 @@ class DigestService:
             if url_norm in seen_lower:
                 continue
             seen_lower.add(url_norm)
+            apply_resolved_origin(item)
             _normalize_candidate_source(item)
             seq += 1
             title = str(item.get("title") or "").strip()
@@ -2558,10 +2623,12 @@ class DigestService:
                 )
         merged_seed_urls = self._merge_step1_seed_urls(manual_urls, telegram_seed_urls)
         normalized_manual_urls = self._normalize_seed_urls(merged_seed_urls)
+        user_manual_urls = self._normalize_seed_urls(manual_urls)
+        telegram_only_urls = [u for u in self._normalize_seed_urls(telegram_seed_urls) if u not in set(user_manual_urls)]
         if not self.settings.enable_web_fetch and not normalized_manual_urls:
             raise HTTPException(
                 status_code=400,
-                detail="Нет веб-доступа (ENABLE_WEB_FETCH=false). Вставьте вручную 5-10 ссылок в поле manual_urls.",
+                detail="Нет веб-доступа (web.enable_fetch=false в pipeline_settings.json). Вставьте вручную 5-10 ссылок в поле manual_urls.",
             )
 
         step1_filter_config = self._read_step1_filter_config()
@@ -2644,17 +2711,35 @@ class DigestService:
                     preview_by_fp[fp] = snap
                     discovered_by_fp[fp] = dict(snap)
     
-            manual_candidates = self._build_manual_candidates(digest, normalized_manual_urls, now_msk)
-            failed_manual = [str(x["url"])[:220] for x in manual_candidates if not x.get("page_verified")]
-            if failed_manual:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Не удалось подтвердить ручные ссылки (страница недоступна или не отвечает): "
-                        + "; ".join(failed_manual[:12])
-                    ),
+            manual_candidates: list[dict[str, Any]] = []
+            if user_manual_urls:
+                manual_candidates.extend(
+                    self._build_manual_candidates(digest, user_manual_urls, now_msk, mandatory=True)
                 )
-    
+            if telegram_only_urls:
+                manual_candidates.extend(
+                    self._build_manual_candidates(digest, telegram_only_urls, now_msk, mandatory=False)
+                )
+            valid_manual_candidates = [x for x in manual_candidates if x.get("page_verified")]
+            failed_manual_candidates = [x for x in manual_candidates if not x.get("page_verified")]
+            if failed_manual_candidates:
+                failed_urls = [str(x.get("url") or "")[:220] for x in failed_manual_candidates]
+                logger.warning(
+                    "Шаг 1: пропущены невалидные seed URL | digest_id=%s failed=%s valid=%s urls=%s",
+                    digest.id,
+                    len(failed_manual_candidates),
+                    len(valid_manual_candidates),
+                    "; ".join(failed_urls[:8]),
+                )
+                if not valid_manual_candidates and not self.settings.enable_web_fetch:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Не удалось подтвердить seed-ссылки и веб-поиск отключён: "
+                            + "; ".join(failed_urls[:12])
+                        ),
+                    )
+
             verified_pool: list[dict[str, Any]] = []
             seen_fp: set[str] = set()
             excluded_urls: list[str] = []
@@ -2688,6 +2773,7 @@ class DigestService:
                     {"id": x["id"], "enabled": bool(x["enabled"]), "order": int(x["order"])}
                     for x in step1_filter_states
                 ],
+                "tier_strict_search": bool(getattr(self.settings, "step1_tier_strict_search", True)),
             }
 
             for kept in kept_rows:
@@ -2784,7 +2870,10 @@ class DigestService:
                 details = ", ".join(f"{code}={count}" for code, count in items)
                 return f" Основные причины отбраковки: {details}."
     
-            for m in manual_candidates:
+            for m in failed_manual_candidates:
+                snapshot_preview_row(m)
+                register_reject(m)
+            for m in valid_manual_candidates:
                 snapshot_preview_row(m)
                 append_verified(m)
     
@@ -2909,7 +2998,7 @@ class DigestService:
                             detail=(
                                 "Автосбор кандидатов недоступен (веб-поиск и CrewAI). "
                                 "Вставьте вручную не менее 10 прямых ссылок на статьи в поле шага 1 "
-                                "или проверьте PROXYAPI_API_KEY и ENABLE_WEB_FETCH=true."
+                                "или проверьте PROXYAPI_API_KEY и web.enable_fetch в pipeline_settings.json."
                             ),
                         ) from exc
     
@@ -3019,7 +3108,7 @@ class DigestService:
                     detail=(
                         "Не удалось получить реальные новости: модель вернула невалидный ответ или сработал внутренний шаблон-заглушка. "
                         "Проверьте PROXYAPI_API_KEY и снова запустите шаг 1. "
-                        "Либо задайте ENABLE_WEB_FETCH=false в backend/.env и вставьте не менее 10 прямых URL на статьи в поле шага 1 — "
+                        "Либо задайте web.enable_fetch=false в pipeline_settings.json и вставьте не менее 10 прямых URL на статьи в поле шага 1 — "
                         "заголовки будут подтянуты с страниц без LLM-поиска."
                     ),
                 )
@@ -3172,6 +3261,7 @@ class DigestService:
             entities: list[NewsCandidate] = []
             seen_urls_lower: set[str] = set()
             for idx, item in enumerate(verified_pool, start=1):
+                apply_resolved_origin(item)
                 url_norm = str(item.get("url", "")).strip().lower()
                 is_duplicate = url_norm in seen_urls_lower or bool(item.get("is_duplicate", False))
                 seen_urls_lower.add(url_norm)
@@ -3220,6 +3310,7 @@ class DigestService:
             self._deactivate_step1_filter_states()
             if discovered_by_fp:
                 self._persist_step1_discovered_news(digest.id, discovery_run.id, discovered_by_fp)
+                self._sync_filter_counters_from_journal(digest.id)
             pool_rows = self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count()
             if pool_rows == 0 and discovered_by_fp:
                 self._persist_step1_preview_candidates(digest.id, discovered_by_fp)
@@ -3261,12 +3352,15 @@ class DigestService:
         mandatory_manual = [c for c in strict_allowed if self._is_manual_required_candidate(c.verification_comment)]
         if top5:
             if len(mandatory_manual) > 5:
-                raise HTTPException(status_code=400, detail="Слишком много обязательных ручных ссылок: максимум 5.")
-            chosen = list(mandatory_manual)
-            strict_rest = [
-                c for c in sorted(strict_allowed, key=lambda x: x.total_score, reverse=True) if c.id not in {m.id for m in chosen}
-            ]
-            chosen.extend(strict_rest[: max(0, 5 - len(chosen))])
+                chosen = sorted(mandatory_manual, key=lambda x: x.total_score, reverse=True)[:5]
+            else:
+                chosen = list(mandatory_manual)
+                strict_rest = [
+                    c
+                    for c in sorted(strict_allowed, key=lambda x: x.total_score, reverse=True)
+                    if c.id not in {m.id for m in chosen}
+                ]
+                chosen.extend(strict_rest[: max(0, 5 - len(chosen))])
             if len(chosen) < 5:
                 raise HTTPException(
                     status_code=400,
@@ -3976,7 +4070,14 @@ class DigestService:
             logger.warning("Перевод заголовка пропущен (ошибка API) | url=%s", url[:100], exc_info=True)
             return t[:500]
 
-    def _build_manual_candidates(self, digest: Digest, manual_urls: list[str], now_msk: str) -> list[dict[str, Any]]:
+    def _build_manual_candidates(
+        self,
+        digest: Digest,
+        manual_urls: list[str],
+        now_msk: str,
+        *,
+        mandatory: bool = True,
+    ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for idx, url in enumerate(manual_urls, start=1):
             bundle = _fetch_article_page_bundle(url)
@@ -4015,10 +4116,16 @@ class DigestService:
                     )
                     logger.warning("Ручной URL: вне темы ИИ | url=%s", stored[:120])
                 else:
-                    desc = (
-                        "Материал добавлен пользователем вручную и обязателен к использованию в выпуске. "
-                        "Заголовок извлечён со страницы по ссылке; при необходимости показан перевод на русский."
-                    )
+                    if mandatory:
+                        desc = (
+                            "Вставлено в поле URL на шаге 1; материал обязателен к использованию в выпуске. "
+                            "Заголовок извлечён со страницы по ссылке; при необходимости показан перевод на русский."
+                        )
+                    else:
+                        desc = (
+                            "Собрано Telegram-монитором (канал из pipeline_settings.json). "
+                            "Заголовок извлечён со страницы по ссылке; при необходимости показан перевод на русский."
+                        )
                     logger.info(
                         "Ручной URL: заголовок извлечён | url=%s raw_len=%s title_len=%s",
                         stored[:80],
@@ -4056,30 +4163,36 @@ class DigestService:
             link_ok = bool(bundle.get("ok"))
             headline_editorial_ok = bool(link_ok and raw_headline and not manual_reject)
             page_verified = headline_editorial_ok and link_ok
-            comment = "MANUAL_REQUIRED: добавлено пользователем"
+            comment = (
+                "MANUAL_REQUIRED: добавлено пользователем"
+                if mandatory
+                else "TELEGRAM_SEED: ссылка из мониторинга канала"
+            )
             if manual_reject:
                 comment = f"{comment} {REJECT_REASON_PREFIX}{manual_reject}"
             if not page_verified:
                 comment = f"{comment} {REJECT_REASON_PREFIX}manual_unverified"
             if _is_foreign_agent_source(stored):
                 comment = f"{comment} МАРКИРОВКА: ИНОСТРАННЫЙ_АГЕНТ"
+            policy_fields: dict[str, Any] = {}
+            _apply_source_policy_from_url(policy_fields, stored)
             result.append(
                 {
                     "original_number": idx,
                     "title": title,
                     "url": stored[:1000],
                     "source": host,
-                    "tier": "Tier-2",
+                    "tier": policy_fields["tier"],
                     "published_at": published_at[:100],
-                    "category": "manual",
+                    "category": "manual" if mandatory else "telegram_seed",
                     "description": desc,
                     "significance_score": 3,
                     "novelty_score": 3,
                     "impact_score": 3,
                     "total_score": 9,
-                    "reliability_status": "⚠️ сомнительный",
+                    "reliability_status": policy_fields["reliability_status"],
                     "is_foreign_agent": _is_foreign_agent_source(stored),
-                    "is_aggregator": False,
+                    "is_aggregator": policy_fields["is_aggregator"],
                     "is_duplicate": False,
                     "verification_comment": comment,
                     "link_status": link_ok,
@@ -4126,7 +4239,7 @@ class DigestService:
         filter_enabled: Any | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Отсекаем URL, которые LLM придумал: страница не открывается по HTTP (с разворотом лент)."""
-        is_enabled = filter_enabled or (lambda _fid: True)
+        is_enabled = filter_enabled or _catalog_step1_filter_enabled
         kept: list[dict[str, Any]] = []
         dropped: list[dict[str, Any]] = []
         for row in rows:
@@ -4156,7 +4269,8 @@ class DigestService:
             kept.append(item)
         return kept, dropped
 
-    def _step1_search_query(self, digest: Digest) -> str:
+    def _step1_search_query_parts(self, digest: Digest) -> tuple[str, str, str]:
+        """(окно дат, тематика, исключения промо) для web-поиска."""
         earliest = digest_earliest_news_date(digest)
         days = int(digest.news_window_days or 3)
         kind = _normalize_news_window_day_kind(digest.news_window_day_kind)
@@ -4172,25 +4286,24 @@ class DigestService:
         product_excludes = (
             "-pricing -demo -trial -signup -download -features -product -tool -chatbot -assistant "
             "-inurl:/product -inurl:/tools -inurl:/features -inurl:/pricing "
+            "-blog -opinion -vacancy -careers -webinar -podcast "
         )
-        source_hint = self._step1_source_seed_hint()
         if (digest.digest_type or "serious") == "serious":
-            return (
-                window_hint
-                + source_hint
-                + "искусственный интеллект нейросети машинное обучение свежие новости СМИ "
-                + "регулирование исследование прорыв внедрение партнёрство инвестиции "
-                + product_excludes
-                + "-blog -opinion -vacancy -careers -webinar -podcast"
+            topic_terms = (
+                "искусственный интеллект нейросети машинное обучение свежие новости СМИ "
+                "регулирование исследование прорыв внедрение партнёрство инвестиции "
             )
-        return (
-            window_hint
-            + source_hint
-            + "AI artificial intelligence neural networks machine learning news article "
-            + "regulation research breakthrough deployment partnership investment "
-            + product_excludes
-            + "-blog -opinion -vacancy -careers -webinar -podcast"
-        )
+        else:
+            topic_terms = (
+                "AI artificial intelligence neural networks machine learning news article "
+                "regulation research breakthrough deployment partnership investment "
+            )
+        return window_hint, topic_terms, product_excludes
+
+    def _step1_search_query(self, digest: Digest) -> str:
+        window_hint, topic_terms, product_excludes = self._step1_search_query_parts(digest)
+        source_hint = self._step1_source_seed_hint()
+        return window_hint + source_hint + topic_terms + product_excludes
 
     def _step1_source_seed_hint(self, max_urls: int = 30) -> str:
         policy = get_source_tiers_policy(self.settings.source_tiers_path)
@@ -4292,6 +4405,7 @@ class DigestService:
         iteration_no = start_iteration
         min_iterations = max(1, int(min_iterations or 1))
         stop_reason = "target_reached" if len(verified_pool) >= target_max_candidates else "not_started"
+        tier_strict = bool(getattr(self.settings, "step1_tier_strict_search", True))
         press_query = self._step1_press_release_query(digest)
         press_min_target = max(2, int(STEP1_TARGET_VERIFIED * STEP1_PRESS_SHARE_MIN))
         no_progress_rounds = 0
@@ -4342,7 +4456,11 @@ class DigestService:
             )
             _run_collect(need)
             substantive_press = sum(1 for x in verified_pool if _is_substantive_press_for_pool(x))
-            if len(verified_pool) < target_max_candidates and substantive_press < press_min_target:
+            if (
+                not tier_strict
+                and len(verified_pool) < target_max_candidates
+                and substantive_press < press_min_target
+            ):
                 press_need = min(max(press_min_target - substantive_press, 2), target_max_candidates - len(verified_pool))
                 _run_collect(max(press_need, 4), query_override=press_query)
             if len(verified_pool) < target_max_candidates:
@@ -4389,7 +4507,7 @@ class DigestService:
                 remaining = max(0, target_max_candidates - len(verified_pool))
                 final_need = min(batch_size, max(4, remaining)) if remaining > 0 else max(4, batch_size // 2)
                 _run_collect(final_need)
-                if len(verified_pool) < target_max_candidates:
+                if len(verified_pool) < target_max_candidates and not tier_strict:
                     _run_collect(final_need, query_override=self._step1_fresh_tier1_query(digest))
                 if len(verified_pool) < target_max_candidates:
                     self._step1_run_web_supplement_rounds(
@@ -4528,7 +4646,8 @@ class DigestService:
         filter_enabled: Any | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Реальные URL из ProxyAPI + SerpAPI + Tavily — до LLM-цепочки."""
-        query = query_override or self._step1_search_query(digest)
+        tier_strict = bool(getattr(self.settings, "step1_tier_strict_search", True)) and query_override is None
+        window_hint, topic_terms, product_excludes = self._step1_search_query_parts(digest)
         fetch_limit = max(
             int(getattr(self.settings, "step1_search_fetch_limit", 100) or 100),
             limit * 8,
@@ -4542,44 +4661,68 @@ class DigestService:
         supplement_ctx = str(
             getattr(self.settings, "proxyapi_web_search_context_size_supplement", "low") or "low"
         ).lower()
-        tier1_min_raw = max(1, int(getattr(self.settings, "step1_search_tier1_min_raw_urls", 15) or 15))
-        raw_merged: list[str] = []
-        raw_merged.extend(
-            fetch_article_urls_raw_merged(
-                self.settings,
-                query,
-                limit=fetch_limit,
-                proxy=self.proxy,
-            )
-        )
+        policy = get_source_tiers_policy(self.settings.source_tiers_path)
         seen_raw: set[str] = set()
         raw_unique: list[str] = []
-        for u in raw_merged:
-            key = str(u or "").strip().lower().rstrip("/")
-            if not key or key in seen_raw:
-                continue
-            seen_raw.add(key)
-            raw_unique.append(str(u).strip())
-        if query_override is None and len(raw_unique) < tier1_min_raw:
-            tier1_query = self._step1_fresh_tier1_query(digest)
+
+        if tier_strict:
             logger.info(
-                "Шаг 1: добор tier-1 web_search | digest_id=%s raw=%s min=%s",
+                "Шаг 1: tier-строгий поиск по source_tiers | digest_id=%s",
                 digest.id,
-                len(raw_unique),
-                tier1_min_raw,
             )
-            for u in fetch_article_urls_raw_merged(
+            for u in fetch_tier_prioritized_raw_urls(
                 self.settings,
-                tier1_query,
-                limit=fetch_limit,
+                window_prefix=window_hint,
+                topic_terms=topic_terms,
+                product_excludes=product_excludes,
+                fetch_limit=fetch_limit,
                 proxy=self.proxy,
                 search_context_size=supplement_ctx,
+                policy=policy,
             ):
                 key = str(u or "").strip().lower().rstrip("/")
                 if not key or key in seen_raw:
                     continue
                 seen_raw.add(key)
                 raw_unique.append(str(u).strip())
+        else:
+            query = query_override or self._step1_search_query(digest)
+            raw_merged: list[str] = []
+            raw_merged.extend(
+                fetch_article_urls_raw_merged(
+                    self.settings,
+                    query,
+                    limit=fetch_limit,
+                    proxy=self.proxy,
+                )
+            )
+            for u in raw_merged:
+                key = str(u or "").strip().lower().rstrip("/")
+                if not key or key in seen_raw:
+                    continue
+                seen_raw.add(key)
+                raw_unique.append(str(u).strip())
+            tier1_min_raw = max(1, int(getattr(self.settings, "step1_search_tier1_min_raw_urls", 15) or 15))
+            if query_override is None and len(raw_unique) < tier1_min_raw:
+                tier1_query = self._step1_fresh_tier1_query(digest)
+                logger.info(
+                    "Шаг 1: добор tier-1 web_search | digest_id=%s raw=%s min=%s",
+                    digest.id,
+                    len(raw_unique),
+                    tier1_min_raw,
+                )
+                for u in fetch_article_urls_raw_merged(
+                    self.settings,
+                    tier1_query,
+                    limit=fetch_limit,
+                    proxy=self.proxy,
+                    search_context_size=supplement_ctx,
+                ):
+                    key = str(u or "").strip().lower().rstrip("/")
+                    if not key or key in seen_raw:
+                        continue
+                    seen_raw.add(key)
+                    raw_unique.append(str(u).strip())
         funnel = {
             "urls_raw_merged": len(raw_unique),
             "urls_prefilter_rejected": 0,
@@ -4592,6 +4735,7 @@ class DigestService:
             [
                 "invalid_url",
                 "duplicate_url_skip",
+                "non_policy_source",
                 "aggregator_source",
                 "forbidden_media_source",
                 "news_listing_page",
@@ -4601,7 +4745,12 @@ class DigestService:
             ],
         )
         for raw in raw_unique:
-            pre_reason = search_url_prefilter_reason(raw, is_enabled=filter_enabled, order=prefilter_order)
+            pre_reason = search_url_prefilter_reason(
+                raw,
+                is_enabled=filter_enabled,
+                order=prefilter_order,
+                tier_strict=tier_strict,
+            )
             if pre_reason:
                 funnel["urls_prefilter_rejected"] += 1
                 self._record_prefilter_reject(
@@ -4787,7 +4936,7 @@ class DigestService:
         link_status — ссылка отвечает и проходит проверку доступности.
         page_verified — оба условия одновременно (совместимость с API/старыми клиентами).
         """
-        is_enabled = filter_enabled or (lambda _fid: True)
+        is_enabled = filter_enabled or _catalog_step1_filter_enabled
         if _manual_required_dict(item):
             return
         item["headline_editorial_ok"] = False
@@ -4844,6 +4993,7 @@ class DigestService:
             item["link_status"] = False
             return
         item["url"] = stored[:1000]
+        _apply_source_policy_from_url(item, stored)
         if _is_foreign_agent_source(stored):
             item["is_foreign_agent"] = True
             vc = str(item.get("verification_comment") or "")
@@ -4931,7 +5081,7 @@ class DigestService:
 
         accepted: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
-        is_enabled = filter_enabled or (lambda _fid: True)
+        is_enabled = filter_enabled or _catalog_step1_filter_enabled
         for row in scored_rows:
             item = dict(row)
             score_url = str(item.get("url") or "").strip()
@@ -4983,35 +5133,69 @@ class DigestService:
         exclude_hosts: set[str] | None = None,
         filter_enabled: Any | None = None,
     ) -> list[dict[str, Any]]:
-        query = _step1_search_query_exclude_saturated_hosts(
-            self._step1_search_query(digest),
-            exclude_hosts or set(),
-        )
+        tier_strict = bool(getattr(self.settings, "step1_tier_strict_search", True))
         supplement_ctx = str(
             getattr(self.settings, "proxyapi_web_search_context_size_supplement", "low") or "low"
         ).lower()
-        urls = fetch_article_urls_from_search(
-            self.settings,
-            query,
-            limit=max(need_hint * 3, 14),
-            proxy=self.proxy,
-            search_context_size=supplement_ctx,
-            is_enabled=filter_enabled,
-            order=self._step1_stage_filter_order(
-                "pre_http",
-                [
-                    "invalid_url",
-                    "duplicate_url_skip",
-                    "aggregator_source",
-                    "forbidden_media_source",
-                    "news_listing_page",
-                    "llm_hallucinated_url",
-                    "product_tool_page",
-                    "published_before_window",
-                    "published_date_undefined",
-                ],
-            ),
+        fetch_limit = max(need_hint * 3, 14)
+        prefilter_order = self._step1_stage_filter_order(
+            "pre_http",
+            [
+                "invalid_url",
+                "duplicate_url_skip",
+                "non_policy_source",
+                "aggregator_source",
+                "forbidden_media_source",
+                "news_listing_page",
+                "llm_hallucinated_url",
+                "product_tool_page",
+                "published_before_window",
+                "published_date_undefined",
+            ],
         )
+        saturated = exclude_hosts or set()
+
+        if tier_strict:
+            window_hint, topic_terms, product_excludes = self._step1_search_query_parts(digest)
+            policy = get_source_tiers_policy(self.settings.source_tiers_path)
+            raw_urls = fetch_tier_prioritized_raw_urls(
+                self.settings,
+                window_prefix=window_hint,
+                topic_terms=topic_terms,
+                product_excludes=product_excludes,
+                fetch_limit=fetch_limit,
+                proxy=self.proxy,
+                search_context_size=supplement_ctx,
+                policy=policy,
+            )
+            urls: list[str] = []
+            for u in raw_urls:
+                host = _host_from_url(u).lower()
+                if saturated and any(marker in host for marker in saturated):
+                    continue
+                pre_reason = search_url_prefilter_reason(
+                    u,
+                    is_enabled=filter_enabled,
+                    order=prefilter_order,
+                    tier_strict=True,
+                )
+                if pre_reason:
+                    continue
+                urls.append(u)
+        else:
+            query = _step1_search_query_exclude_saturated_hosts(
+                self._step1_search_query(digest),
+                saturated,
+            )
+            urls = fetch_article_urls_from_search(
+                self.settings,
+                query,
+                limit=fetch_limit,
+                proxy=self.proxy,
+                search_context_size=supplement_ctx,
+                is_enabled=filter_enabled,
+                order=prefilter_order,
+            )
         out: list[dict[str, Any]] = []
         seq = 900
         for u in urls:

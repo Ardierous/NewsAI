@@ -133,6 +133,40 @@ def is_russian_host(host: str, policy: SourceTiersPolicy | None = None) -> bool:
     return _host_contains_marker(h, p.russian_host_markers)
 
 
+def is_policy_tier_source(url: str, policy: SourceTiersPolicy | None = None) -> bool:
+    """URL с хоста tier-1…tier-4 из политики (не агрегатор и не tier-5)."""
+    p = policy or get_source_tiers_policy()
+    if is_tier5_forbidden_source(url, p) or is_aggregator_source(url, p) or is_blocked_search_host(url, p):
+        return False
+    host = _host_from_url(url)
+    return (
+        _host_contains_marker(host, p.tier1_hosts)
+        or _host_contains_marker(host, p.tier2_hosts)
+        or _host_contains_marker(host, p.tier3_hosts)
+        or _host_contains_marker(host, p.tier4_hosts)
+    )
+
+
+def policy_tier_host_groups(policy: SourceTiersPolicy | None = None) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Группы хостов по приоритету: tier-1 → tier-4."""
+    p = policy or get_source_tiers_policy()
+    return (
+        ("Tier-1", p.tier1_hosts),
+        ("Tier-2", p.tier2_hosts),
+        ("Tier-3", p.tier3_hosts),
+        ("Tier-4", p.tier4_hosts),
+    )
+
+
+def batched_site_host_groups(hosts: tuple[str, ...], *, batch_size: int = 3) -> list[tuple[str, ...]]:
+    """Разбивает маркеры хостов на батчи для site: запросов."""
+    clean = [str(h or "").strip().lower() for h in hosts if str(h or "").strip()]
+    if not clean:
+        return []
+    size = max(1, int(batch_size or 3))
+    return [tuple(clean[i : i + size]) for i in range(0, len(clean), size)]
+
+
 def classify_source_policy(
     url: str,
     policy: SourceTiersPolicy | None = None,

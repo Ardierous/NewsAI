@@ -14,7 +14,14 @@ if TYPE_CHECKING:
     from app.config import Settings
     from app.proxyapi_client import ProxyApiClient
 
-from app.source_tiers_policy import is_aggregator_source, is_blocked_search_host
+from app.source_tiers_policy import (
+    batched_site_host_groups,
+    get_source_tiers_policy,
+    is_aggregator_source,
+    is_blocked_search_host,
+    is_policy_tier_source,
+    policy_tier_host_groups,
+)
 from app.services.step1_candidate_policy import is_product_tool_landing_url
 
 logger = logging.getLogger("app.news_search")
@@ -147,6 +154,8 @@ def search_url_prefilter_reason(
     url: str,
     is_enabled: Any | None = None,
     order: list[str] | None = None,
+    *,
+    tier_strict: bool = False,
 ) -> str | None:
     """Код отказа до HTTP-проверки (поиск/ингест). None — можно качать страницу."""
     enabled = is_enabled or (lambda _fid: True)
@@ -161,6 +170,7 @@ def search_url_prefilter_reason(
     if not host:
         return "invalid_url" if enabled("invalid_url") else None
     checks: dict[str, bool] = {
+        "non_policy_source": tier_strict and not is_policy_tier_source(u),
         "aggregator_source": is_aggregator_source(u),
         "forbidden_media_source": is_blocked_search_host(u),
         "news_listing_page": (
@@ -179,7 +189,14 @@ def search_url_prefilter_reason(
         "product_tool_page": is_product_tool_landing_url(u),
     }
     sequence = [x for x in (order or []) if x in checks]
-    for fid in ("aggregator_source", "forbidden_media_source", "news_listing_page", "llm_hallucinated_url", "product_tool_page"):
+    for fid in (
+        "non_policy_source",
+        "aggregator_source",
+        "forbidden_media_source",
+        "news_listing_page",
+        "llm_hallucinated_url",
+        "product_tool_page",
+    ):
         if fid not in sequence:
             sequence.append(fid)
     for fid in sequence:
@@ -234,6 +251,8 @@ def fetch_article_urls_raw_merged(
     *,
     proxy: "ProxyApiClient | None" = None,
     search_context_size: str | None = None,
+    include_domains: list[str] | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> list[str]:
     """
     Сырые уникальные URL от всех доступных провайдеров (до _filter_search_urls).
@@ -244,14 +263,26 @@ def fetch_article_urls_raw_merged(
     if settings.enable_web_fetch and settings.proxyapi_web_search_enabled and proxy is not None:
         try:
             merged.extend(
-                proxy.search_news_article_urls(query, limit=fetch_cap, search_context_size=search_context_size)
+                proxy.search_news_article_urls(
+                    query,
+                    limit=fetch_cap,
+                    search_context_size=search_context_size,
+                    allowed_hosts=allowed_hosts,
+                )
             )
         except Exception:
             logger.warning("ProxyAPI web_search: ошибка запроса", exc_info=True)
     if settings.serpapi_api_key:
         merged.extend(_serpapi_google_news_urls(settings.serpapi_api_key, query, fetch_cap))
     if settings.tavily_api_key:
-        merged.extend(_tavily_search_urls(settings.tavily_api_key, query, fetch_cap))
+        merged.extend(
+            _tavily_search_urls(
+                settings.tavily_api_key,
+                query,
+                fetch_cap,
+                include_domains=include_domains or allowed_hosts,
+            )
+        )
     out = _uniq_urls(merged)
     if out:
         logger.info(
@@ -260,6 +291,80 @@ def fetch_article_urls_raw_merged(
             fetch_cap,
         )
     return out
+
+
+def fetch_tier_prioritized_raw_urls(
+    settings: "Settings",
+    *,
+    window_prefix: str,
+    topic_terms: str,
+    product_excludes: str,
+    fetch_limit: int,
+    proxy: "ProxyApiClient | None" = None,
+    search_context_size: str | None = None,
+    policy: Any | None = None,
+    seed_urls: tuple[str, ...] | None = None,
+) -> list[str]:
+    """
+    Поиск строго по tier-1 → tier-4 из source_tiers.txt: батчи site: запросов по хостам политики.
+    URL вне tier-1…4 не попадают в результат.
+    """
+    p = policy or get_source_tiers_policy()
+    seeds = tuple(seed_urls or p.search_seed_urls)
+    per_batch_limit = max(8, min(24, max(fetch_limit // 8, 10)))
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def _accept(urls: list[str]) -> None:
+        for raw in urls:
+            u = str(raw or "").strip()
+            if not u.startswith("http") or not is_policy_tier_source(u, p):
+                continue
+            key = u.lower().rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(u)
+
+    for tier_label, hosts in policy_tier_host_groups(p):
+        if not hosts:
+            continue
+        if len(merged) >= fetch_limit:
+            break
+        for batch in batched_site_host_groups(hosts, batch_size=3):
+            matching_seeds = [s for s in seeds if any(marker in s.lower() for marker in batch)]
+            seed_hint = ""
+            if matching_seeds:
+                seed_hint = " Рекомендуемые разделы: " + ", ".join(matching_seeds[:8]) + ". "
+            site_part = " OR ".join(f"site:{h}" for h in batch)
+            query = (
+                f"{window_prefix}{seed_hint}{topic_terms} "
+                f"Искать ТОЛЬКО на доменах: {', '.join(batch)}. ({site_part}) "
+                f"{product_excludes}"
+            )
+            logger.info(
+                "Tier-поиск: %s | hosts=%s limit=%s",
+                tier_label,
+                ",".join(batch),
+                per_batch_limit,
+            )
+            batch_urls = fetch_article_urls_raw_merged(
+                settings,
+                query,
+                limit=per_batch_limit,
+                proxy=proxy,
+                search_context_size=search_context_size,
+                include_domains=list(batch),
+                allowed_hosts=list(batch),
+            )
+            _accept(batch_urls)
+    if merged:
+        logger.info(
+            "Tier-поиск: итого URL из политики tier-1…4 | count=%s cap=%s",
+            len(merged),
+            fetch_limit,
+        )
+    return merged[:fetch_limit]
 
 
 def fetch_article_urls_from_search(
@@ -383,17 +488,25 @@ def _serpapi_google_news_urls(api_key: str, query: str, limit: int) -> list[str]
         return []
 
 
-def _tavily_search_urls(api_key: str, query: str, limit: int) -> list[str]:
+def _tavily_search_urls(
+    api_key: str,
+    query: str,
+    limit: int,
+    *,
+    include_domains: list[str] | None = None,
+) -> list[str]:
     try:
+        payload: dict[str, Any] = {
+            "api_key": api_key,
+            "query": query,
+            "max_results": min(limit, 20),
+            "search_depth": "basic",
+        }
+        if include_domains:
+            payload["include_domains"] = [str(x).strip() for x in include_domains if str(x).strip()][:20]
         r = requests.post(
             "https://api.tavily.com/search",
-            json={
-                "api_key": api_key,
-                "query": query,
-                "max_results": min(limit, 20),
-                "search_depth": "basic",
-                "include_domains": [],
-            },
+            json=payload,
             timeout=25,
         )
         if r.status_code >= 400:
