@@ -1,0 +1,18 @@
+---
+description: Backend/шаг 1 — предпочитать Codex, не fast-Composer для ядра пайплайна
+globs: backend/**/*.py,backend/tests/**/*
+alwaysApply: false
+---
+
+# Backend: модель Agent
+
+Для правок в этих файлах:
+
+- **gpt-5.3-codex** (Agent) — верификация URL, `run_step_1`, `select_news`, фильтры, tier-search, регрессии.
+- **composer-2.5-fast** — только косметика: строки в `schemas.py`, комментарии, один тест-ассерт.
+
+Не ослабляйте verify без `docs/STEP1_LINKS_RUNBOOK.md`. После существенных правок:
+
+```bash
+cd backend && python -m pytest tests/test_step1_link_validation_smoke.py tests/test_step1_regression_pipeline.py -q
+```

@@ -46,6 +46,10 @@ curl http://127.0.0.1:8000/health
 
 **Browser E2E:** поднять `python main.py`, пройти мастер 0→4 на `/digests/{id}` (шаг 1 — долгий запрос без таймаута в браузере). Ориентиры UI: тексты кнопок на русском, заголовки «Шаг N — …», классы `news-candidate-*`, `btn-rebuild`.
 
+## Модели Cursor (IDE)
+
+Какую модель выбрать в Agent/Chat под задачу — **[docs/CURSOR_MODELS.md](docs/CURSOR_MODELS.md)** и правила `.cursor/rules/cursor-models*.mdc` (кратко: Codex — backend/код, fast Composer — UI, medium — вопросы без правок).
+
 ## Прочее
 
 - Общий запуск и `.env`: [README.md](README.md)

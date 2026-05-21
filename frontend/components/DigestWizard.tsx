@@ -553,7 +553,7 @@ export function DigestWizard({ digestId }: Props) {
   }, []);
 
   const loadDigest = useCallback(
-    async (opts?: { skipProgress?: boolean; label?: string; preserveError?: boolean }) => {
+    async (opts?: { skipProgress?: boolean; label?: string; preserveError?: boolean; preserveSelection?: boolean }) => {
       if (opts?.label) {
         setProgressLabel(opts.label);
         const rk = parseRunningStepFromLabel(opts.label);
@@ -570,7 +570,7 @@ export function DigestWizard({ digestId }: Props) {
               (a.output_position ?? 0) - (b.output_position ?? 0),
           );
           setSelected(sorted.map((s: { candidate_id: number }) => s.candidate_id));
-        } else {
+        } else if (!opts?.preserveSelection) {
           setSelected([]);
         }
       } catch (e) {
@@ -607,6 +607,8 @@ export function DigestWizard({ digestId }: Props) {
   }, [digest?.digest?.news_window_days, digest?.digest?.news_window_day_kind, digest?.digest?.status]);
 
   useEffect(() => {
+    const st = digest?.digest?.status as string | undefined;
+    if (st === "selected" || st === "analytics_ready" || st === "final_ready") return;
     const list = digest?.candidates as
       | { id: number; page_verified?: boolean; link_status?: boolean; headline_editorial_ok?: boolean }[]
       | undefined;
@@ -615,7 +617,7 @@ export function DigestWizard({ digestId }: Props) {
       const row = list.find((x) => x.id === id);
       return row ? candidateSelectableForStep2(row) : false;
     }));
-  }, [digest?.candidates]);
+  }, [digest?.candidates, digest?.digest?.status]);
 
   const candidatesSorted = useMemo(
     () => [...(digest?.candidates || [])].sort((a, b) => a.original_number - b.original_number),
@@ -632,9 +634,7 @@ export function DigestWizard({ digestId }: Props) {
   const canRunStep1 = digestStatus === "step_0" || digestStatus === "step_1_candidates";
   const pastStep2ForRebuild =
     digestStatus === "selected" || digestStatus === "analytics_ready" || digestStatus === "final_ready";
-  const canSelect =
-    digestStatus === "step_1_candidates" ||
-    (digestStatus === "step_0" && hasCandidatePool && hasSelectableInPool);
+  const canSelect = digestStatus === "step_1_candidates";
   const canOrder = digestStatus === "selected";
   const canAnalytics = digestStatus === "selected" || digestStatus === "analytics_ready";
   const analyticsDone = digestStatus === "analytics_ready" || digestStatus === "final_ready";
@@ -667,6 +667,13 @@ export function DigestWizard({ digestId }: Props) {
     const inPool = rows.filter((r: { in_candidate_pool?: boolean }) => r.in_candidate_pool).length;
     return { total: rows.length, inPool, rejected: rows.length - inPool };
   }, [digest?.discovered_news]);
+  const rejectReasonSummary = useMemo(() => {
+    const raw = digest?.rejected_reasons_summary;
+    if (!raw || typeof raw !== "object") return { entries: [] as [string, number][], total: 0 };
+    const entries = Object.entries(raw).filter(([, count]) => Number(count) > 0) as [string, number][];
+    const total = entries.reduce((sum, [, count]) => sum + Number(count), 0);
+    return { entries, total };
+  }, [digest?.rejected_reasons_summary]);
   const step1AuditRows = useMemo(() => {
     const rows = [...(digest?.discovered_news || [])].sort((a: any, b: any) => {
       const ap = a.in_candidate_pool ? 0 : 1;
@@ -912,7 +919,7 @@ export function DigestWizard({ digestId }: Props) {
       pendingScrollToStep2Ref.current = false;
       const errMsg = (e as Error).message;
       try {
-        await loadDigest({ skipProgress: true, preserveError: true });
+        await loadDigest({ skipProgress: true, preserveError: true, preserveSelection: true });
       } catch {
         /* игнорируем вторичную ошибку загрузки */
       }
@@ -1340,7 +1347,7 @@ export function DigestWizard({ digestId }: Props) {
           <a href="#digest-hints" style={{ color: "#7dd3fc" }}>
             блок ниже
           </a>{" "}
-          (по умолчанию свёрнут — нажмите заголовок «Памятка…», чтобы раскрыть).
+          (по умолчанию свёрнута — клик по строке «Памятка: шаги и «под капотом»…», как у журнала проверки ссылок).
         </p>
       </div>
 
@@ -1384,99 +1391,109 @@ export function DigestWizard({ digestId }: Props) {
         </div>
       ) : null}
 
-      {digest?.rejected_reasons_summary && Object.keys(digest.rejected_reasons_summary).length > 0 ? (
-        <div className="card" role="status" style={{ borderColor: "#7c3aed", background: "rgba(124, 58, 237, 0.12)" }}>
-          <h3 style={{ marginTop: 0, fontSize: "1.05rem", color: "#c4b5fd" }}>Статистика отбраковки ссылок (шаг 1)</h3>
-          <WizardWhy summary="Как читать эти цифры">
-            <p style={{ color: "#e9d5ff" }}>
-              Здесь суммы по причинам, по которым ссылка не попала в итоговый пул проверенных кандидатов (поиск дал мусор,
-              агрегатор, не статья, не тема ИИ и т.д.). Если одна причина доминирует — сузьте ручные URL или проверьте .env для
-              поиска.
-            </p>
-          </WizardWhy>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-            {Object.entries(digest.rejected_reasons_summary).map(([code, count]) => (
-              <span key={code} className="news-chip warn" title="Причина отбраковки">
-                {REJECT_REASON_LABELS[code] ?? code}: {String(count)}
-              </span>
-            ))}
-          </div>
+      {rejectReasonSummary.entries.length > 0 ? (
+        <div className="card wizard-collapsible-card" role="status">
+          <details className="digest-step-details">
+            <summary className="digest-step-summary">
+              Статистика отбраковки ссылок (шаг 1) · {rejectReasonSummary.entries.length} причин · всего{" "}
+              {rejectReasonSummary.total}
+            </summary>
+            <div className="digest-step-details-body">
+              <WizardWhy summary="Как читать эти цифры">
+                <p style={{ color: "#cbd5e1" }}>
+                  Здесь суммы по причинам, по которым ссылка не попала в итоговый пул проверенных кандидатов (поиск дал мусор,
+                  агрегатор, не статья, не тема ИИ и т.д.). Если одна причина доминирует — сузьте ручные URL или проверьте
+                  настройки поиска в «Настройки» / <code style={{ color: "#e2e8f0" }}>pipeline_settings.json</code>.
+                </p>
+              </WizardWhy>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {rejectReasonSummary.entries.map(([code, count]) => (
+                  <span key={code} className="news-chip warn" title="Причина отбраковки">
+                    {REJECT_REASON_LABELS[code] ?? code}: {String(count)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </details>
         </div>
       ) : null}
 
       {step1AuditCounts.total > 0 ? (
-        <div className="card" style={{ borderColor: "#475569" }}>
-          <h3 style={{ marginTop: 0, fontSize: "1.05rem" }}>Журнал проверки ссылок (шаг 1)</h3>
-          <p className="wizard-hint-do" style={{ marginTop: 0 }}>
-            Проверено URL: <strong>{step1AuditCounts.total}</strong> · в пул кандидатов:{" "}
-            <strong style={{ color: "#4ade80" }}>{step1AuditCounts.inPool}</strong> · отбраковано:{" "}
-            <strong style={{ color: "#fca5a5" }}>{step1AuditCounts.rejected}</strong>
-          </p>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-            <button
-              type="button"
-              className={step1AuditFilter === "all" ? "news-chip ok" : "news-chip"}
-              onClick={() => setStep1AuditFilter("all")}
-            >
-              Все ({step1AuditCounts.total})
-            </button>
-            <button
-              type="button"
-              className={step1AuditFilter === "in_pool" ? "news-chip ok" : "news-chip"}
-              onClick={() => setStep1AuditFilter("in_pool")}
-            >
-              В пуле ({step1AuditCounts.inPool})
-            </button>
-            <button
-              type="button"
-              className={step1AuditFilter === "rejected" ? "news-chip warn" : "news-chip"}
-              onClick={() => setStep1AuditFilter("rejected")}
-            >
-              Отбраковано ({step1AuditCounts.rejected})
-            </button>
-            <button type="button" onClick={() => setShowAllFoundNews(true)}>
-              Оценки и комментарии →
-            </button>
-          </div>
-          <div style={{ display: "grid", gap: 8, maxHeight: 420, overflow: "auto" }}>
-            {step1AuditRows.map((row: any) => {
-              const codes =
-                Array.isArray(row.reject_codes) && row.reject_codes.length
-                  ? row.reject_codes
-                  : rejectReasonCodes(String(row.verification_comment || ""));
-              return (
-                <div
-                  key={row.id}
-                  style={{
-                    border: "1px solid #334155",
-                    borderRadius: 8,
-                    padding: "10px 12px",
-                    background: row.in_candidate_pool ? "rgba(34, 197, 94, 0.08)" : "rgba(248, 113, 113, 0.06)",
-                  }}
+        <div className="card wizard-collapsible-card">
+          <details className="digest-step-details">
+            <summary className="digest-step-summary">
+              Журнал проверки ссылок (шаг 1) · проверено {step1AuditCounts.total} · в пул{" "}
+              <span style={{ color: "#4ade80" }}>{step1AuditCounts.inPool}</span> · отбраковано{" "}
+              <span style={{ color: "#fca5a5" }}>{step1AuditCounts.rejected}</span>
+            </summary>
+            <div className="digest-step-details-body">
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
+                <button
+                  type="button"
+                  className={step1AuditFilter === "all" ? "news-chip ok" : "news-chip"}
+                  onClick={() => setStep1AuditFilter("all")}
                 >
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
-                    {row.in_candidate_pool ? (
-                      <span className="news-chip ok">В пуле кандидатов</span>
-                    ) : (
-                      <span className="news-chip warn">Не в пуле</span>
-                    )}
-                    {row.source ? <span className="news-chip">{row.source}</span> : null}
-                    <span className="news-chip">{formatNewsPublishedAt(row.published_at)}</span>
-                  </div>
-                  <div style={{ fontWeight: 600, marginBottom: 4 }}>{row.title}</div>
-                  <a href={row.url} target="_blank" rel="noopener noreferrer" style={{ wordBreak: "break-all", fontSize: "0.88rem" }}>
-                    {row.url}
-                  </a>
-                  {!row.in_candidate_pool && codes.length > 0 ? (
-                    <p style={{ margin: "8px 0 0", fontSize: "0.88rem", color: "#e9d5ff", lineHeight: 1.45 }}>
-                      <strong>Причина:</strong>{" "}
-                      {codes.map((x: string) => REJECT_REASON_LABELS[x] ?? x).join("; ")}
-                    </p>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
+                  Все ({step1AuditCounts.total})
+                </button>
+                <button
+                  type="button"
+                  className={step1AuditFilter === "in_pool" ? "news-chip ok" : "news-chip"}
+                  onClick={() => setStep1AuditFilter("in_pool")}
+                >
+                  В пуле ({step1AuditCounts.inPool})
+                </button>
+                <button
+                  type="button"
+                  className={step1AuditFilter === "rejected" ? "news-chip warn" : "news-chip"}
+                  onClick={() => setStep1AuditFilter("rejected")}
+                >
+                  Отбраковано ({step1AuditCounts.rejected})
+                </button>
+                <button type="button" onClick={() => setShowAllFoundNews(true)}>
+                  Оценки и комментарии →
+                </button>
+              </div>
+              <div style={{ display: "grid", gap: 8, maxHeight: 420, overflow: "auto" }}>
+                {step1AuditRows.map((row: any) => {
+                  const codes =
+                    Array.isArray(row.reject_codes) && row.reject_codes.length
+                      ? row.reject_codes
+                      : rejectReasonCodes(String(row.verification_comment || ""));
+                  return (
+                    <div
+                      key={row.id}
+                      style={{
+                        border: "1px solid #334155",
+                        borderRadius: 8,
+                        padding: "10px 12px",
+                        background: row.in_candidate_pool ? "rgba(34, 197, 94, 0.08)" : "rgba(248, 113, 113, 0.06)",
+                      }}
+                    >
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+                        {row.in_candidate_pool ? (
+                          <span className="news-chip ok">В пуле кандидатов</span>
+                        ) : (
+                          <span className="news-chip warn">Не в пуле</span>
+                        )}
+                        {row.source ? <span className="news-chip">{row.source}</span> : null}
+                        <span className="news-chip">{formatNewsPublishedAt(row.published_at)}</span>
+                      </div>
+                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{row.title}</div>
+                      <a href={row.url} target="_blank" rel="noopener noreferrer" style={{ wordBreak: "break-all", fontSize: "0.88rem" }}>
+                        {row.url}
+                      </a>
+                      {!row.in_candidate_pool && codes.length > 0 ? (
+                        <p style={{ margin: "8px 0 0", fontSize: "0.88rem", color: "#e9d5ff", lineHeight: 1.45 }}>
+                          <strong>Причина:</strong>{" "}
+                          {codes.map((x: string) => REJECT_REASON_LABELS[x] ?? x).join("; ")}
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </details>
         </div>
       ) : null}
 

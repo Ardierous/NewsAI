@@ -364,45 +364,21 @@ input[type="checkbox"] {
   height: 7px;
 }
 
-/* Памятка мастера: внешний блок по умолчанию свёрнут; внутри — аккордеоны по шагам */
-.digest-hints-root {
-  margin: 0;
+/* Свернутые информационные блоки мастера (журнал, статистика, памятка) */
+.wizard-collapsible-card {
+  border-color: #475569;
   padding: 0;
+  overflow: hidden;
+}
+
+.wizard-collapsible-card > .digest-step-details {
   border: none;
+  border-radius: 0;
+  background: transparent;
 }
 
-.digest-hints-root > summary.digest-hints-root-summary {
-  list-style: none;
-  cursor: pointer;
-  user-select: none;
-  font-size: 1.05rem;
-  font-weight: 600;
-  color: #f1f5f9;
-  line-height: 1.35;
-  padding: 0;
-}
-
-.digest-hints-root > summary.digest-hints-root-summary::-webkit-details-marker {
-  display: none;
-}
-
-.digest-hints-root > summary.digest-hints-root-summary::before {
-  content: "▸ ";
-  display: inline-block;
-  color: #94a3b8;
-  margin-right: 6px;
-  transition: transform 0.15s ease;
-}
-
-.digest-hints-root[open] > summary.digest-hints-root-summary::before {
-  transform: rotate(90deg);
-}
-
-.digest-hints-root-body {
-  padding-top: 10px;
-}
-
-.digest-hints-panel .digest-hints-stack {
+/* Памятка мастера: внутри — аккордеоны по шагам */
+.digest-hints-stack {
   display: flex;
   flex-direction: column;
   gap: 8px;

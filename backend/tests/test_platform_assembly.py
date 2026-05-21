@@ -1,7 +1,9 @@
 import re
 
 from app.services.platform_assembly import (
+    DZEN_NEWS_SEP,
     DZEN_POST_MAX_CHARS,
+    HEADER_TITLE,
     MAX_NEWS_SEP,
     assemble_dzen,
     assemble_max,
@@ -66,11 +68,17 @@ def test_max_title_link_only_no_duplicate_url():
     text = assemble_max(_sample_payload())
     assert MAX_NEWS_SEP in text
     assert "———" not in text
-    # по одной ссылке на новость (в markdown-заголовке), без дублирующей строки URL
+    assert "⚡" in text and HEADER_TITLE in text
     assert text.count("https://3dnews.ru/1141822/openai-agents") == 5
-    assert subscription_md_inline() in text
+    assert "Telegram: https://t.me/extellect" in text
     assert len(text) <= 4000
-    assert re.search(r"➤ \[OpenAI[^\]]+\]\(https://3dnews\.ru/[^\)]+\)\nКомпания", text)
+    assert re.search(
+        r"➤ OpenAI[^\n]+\nhttps://3dnews\.ru/[^\n]+\n\nКомпания",
+        text,
+    )
+    sub_end = text.index("boosty.to/extellect")
+    tags_start = text.index("#ИИ", sub_end)
+    assert "\n\n" in text[sub_end:tags_start]
 
 
 def test_vk_hashtags_separated_from_subscription():
@@ -82,9 +90,22 @@ def test_vk_hashtags_separated_from_subscription():
     assert "OPENAI ПЕРЕСТРАИВАЕТСЯ" in text
 
 
+def test_dzen_paste_friendly_layout():
+    text = assemble_dzen(_sample_payload())
+    assert DZEN_NEWS_SEP in text
+    assert "⚡" in text and HEADER_TITLE in text
+    assert re.search(r"➤ OpenAI[^\n]+\nhttps://3dnews\.ru/[^\n]+\n\nКомпания", text)
+    assert "Читать подробнее: 3DNews — https://3dnews.ru/" in text
+    assert "Telegram: https://t.me/extellect" in text
+    sub_end = text.index("boosty.to/extellect")
+    tags_start = text.index("#ИИ", sub_end)
+    assert "\n\n" in text[sub_end:tags_start]
+    assert len(text) <= DZEN_POST_MAX_CHARS
+
+
 def test_dzen_subscription_before_hashtags():
     text = assemble_dzen(_sample_payload())
-    sub = subscription_md_inline()
+    sub = "Telegram: https://t.me/extellect"
     assert sub in text
     assert text.index(sub) < text.rfind("#ИИ")
     assert len(text) <= DZEN_POST_MAX_CHARS

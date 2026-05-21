@@ -1,0 +1,14 @@
+---
+description: Frontend мастера — fast-Composer для UI, Codex если трогаете API/контракт шагов
+globs: frontend/**/*.tsx,frontend/**/*.ts,frontend/**/*.css
+alwaysApply: false
+---
+
+# Frontend: модель Agent
+
+| Изменение | Модель |
+|-----------|--------|
+| `DigestWizard.tsx`: плашки, свёртки, тексты, стили | **composer-2.5-fast** |
+| `lib/api.ts`, типы ответов, логика шагов 2–4 | **gpt-5.3-codex** |
+
+Проверка: `cd frontend && npm run build`.

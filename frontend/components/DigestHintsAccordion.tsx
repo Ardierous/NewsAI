@@ -25,143 +25,199 @@ function Acc({ title, children }: { title: string; children: ReactNode }) {
 
 export function DigestHintsAccordion() {
   return (
-    <div
-      id="digest-hints"
-      className="card digest-hints-panel"
-      style={{ borderColor: "#334e68", background: "rgba(30, 41, 59, 0.65)" }}
-    >
-      <details className="digest-hints-root">
-        <summary className="digest-hints-root-summary">Памятка: шаги и «под капотом»</summary>
-        <div className="digest-hints-root-body">
-          <p style={{ fontSize: "0.88rem", color: "#64748b", lineHeight: 1.55, margin: "0 0 12px" }}>
-            Раскройте при необходимости. Внутри — разделы по шагам (каждый открывается отдельно): сначала смысл для редактора,
-            затем куда смотреть в коде.
+    <div id="digest-hints" className="card wizard-collapsible-card">
+      <details className="digest-step-details">
+        <summary className="digest-step-summary">
+          Памятка: шаги и «под капотом» · статусы · шаги 0–4 · конфиг и код
+        </summary>
+        <div className="digest-step-details-body">
+          <p style={{ fontSize: "0.88rem", color: "#94a3b8", lineHeight: 1.55, margin: "0 0 12px" }}>
+            Свернута по умолчанию, как журнал проверки ссылок. Раскройте раздел целиком или отдельный шаг ниже.
           </p>
           <div className="digest-hints-stack">
-        <Acc title="Введение: зачем цепочка и статусы">
-          <p style={{ ...li, marginTop: 0 }}>
-            Конвейер фиксирует тип выпуска, собирает кандидатов, даёт выбрать пять новостей, при необходимости упорядочить
-            их, затем строит аналитику и финальные посты. Поле «Текущий статус» в шапке мастера = тот же статус в базе.
-          </p>
-          <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
-            <li style={li}>
-              <code style={c}>draft</code> — выпуск создан, тип не сохранён; шаг 1 заблокирован.
-            </li>
-            <li style={li}>
-              <code style={c}>step_0</code> — тип сохранён; можно шаг 1.
-            </li>
-            <li style={li}>
-              <code style={c}>step_1_candidates</code> — кандидаты в БД; повтор шага 1 пересоберёт список.
-            </li>
-            <li style={li}>
-              <code style={c}>selected</code> — пять новостей сохранены; блок порядка и шаг 3 доступны.
-            </li>
-            <li style={li}>
-              <code style={c}>analytics_ready</code> — аналитика готова; шаг 4.
-            </li>
-            <li style={{ ...li, marginBottom: 0 }}>
-              <code style={c}>final_ready</code> — тексты и файлы готовы.
-            </li>
-          </ul>
-          <div style={dev}>
-            <strong style={{ color: "#cbd5e1" }}>Код:</strong> модель <code style={c}>Digest</code> в{" "}
-            <code style={c}>backend/app/models.py</code>; смена статусов в <code style={c}>backend/app/services/digest_service.py</code>{" "}
-            (константы <code style={c}>STATUS_*</code>). Сводка выпуска для UI — <code style={c}>GET /digests/{"{id}"}</code> в{" "}
-            <code style={c}>backend/app/api/routes_digests.py</code> (сборка ответа из сервиса).
-          </div>
-        </Acc>
+            <Acc title="Введение: цепочка и статусы">
+              <p style={{ ...li, marginTop: 0 }}>
+                Конвейер: тип выпуска и окно дат → сбор кандидатов → выбор пяти → порядок → аналитика → финальные
+                посты. Поле «Текущий статус» в шапке = статус в базе.
+              </p>
+              <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
+                <li style={li}>
+                  <code style={c}>draft</code> — выпуск создан, тип не сохранён; шаг 1 заблокирован.
+                </li>
+                <li style={li}>
+                  <code style={c}>step_0</code> — тип и окно сохранены; доступен шаг 1.
+                </li>
+                <li style={li}>
+                  <code style={c}>step_1_candidates</code> — пул кандидатов в БД; повтор шага 1 пересоберёт список.
+                </li>
+                <li style={li}>
+                  <code style={c}>selected</code> — пять новостей сохранены; порядок и шаг 3 доступны.
+                </li>
+                <li style={li}>
+                  <code style={c}>analytics_ready</code> — аналитика готова; шаг 4.
+                </li>
+                <li style={{ ...li, marginBottom: 0 }}>
+                  <code style={c}>final_ready</code> — тексты и файлы готовы.
+                </li>
+              </ul>
+              <div style={dev}>
+                <strong style={{ color: "#cbd5e1" }}>Панель:</strong> на главной показываются два выпуска (сегодня по МСК
+                и предыдущий), остальные — в модалке «Все выпуски».{" "}
+                <strong style={{ color: "#cbd5e1" }}>Код:</strong> <code style={c}>Digest</code> в{" "}
+                <code style={c}>backend/app/models.py</code>; статусы — <code style={c}>digest_service.py</code> (
+                <code style={c}>STATUS_*</code>); UI — <code style={c}>GET /digests/{"{id}"}</code>,{" "}
+                <code style={c}>Dashboard.tsx</code>.
+              </div>
+            </Acc>
 
-        <Acc title="Шаг 0 — тип дайджеста">
-          <p style={{ ...li, marginTop: 0 }}>
-            Задаётся тон (серьёзный / курьёзный / по календарю). Без этого сервер не переведёт выпуск в{" "}
-            <code style={c}>step_0</code>, и шаг 1 вернёт 400.
-          </p>
-          <div style={dev}>
-            <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST /digests/{"{id}"}/step0</code> →{" "}
-            <code style={c}>DigestService.run_step_0</code> (<code style={c}>digest_service.py</code>). Тело:{" "}
-            <code style={c}>Step0Request</code> в <code style={c}>backend/app/schemas.py</code>. Тип и флаг «по умолчанию»
-            пишутся в строку <code style={c}>digests</code>.
-          </div>
-        </Acc>
+            <Acc title="Шаг 0 — тип дайджеста и окно новостей">
+              <p style={{ ...li, marginTop: 0 }}>
+                Задаётся тон (серьёзный / курьёзный / по календарю) и окно по дате публикации (календарные или рабочие
+                дни). Без сохранения шага 0 сервер не переведёт выпуск в <code style={c}>step_0</code>, шаг 1 вернёт 400.
+              </p>
+              <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
+                <li style={li}>
+                  Окно ограничивает шаг 1: материалы старше N дней от даты выпуска отсекаются (
+                  <code style={c}>published_before_window</code>).
+                </li>
+                <li style={{ ...li, marginBottom: 0 }}>
+                  Кнопка <strong>Настройки</strong> открывает модалку с параметрами приложения (комментарии «почему так» и
+                  альтернативы) — не путать с «Настройки фильтра новостей» на шаге 1.
+                </li>
+              </ul>
+              <div style={dev}>
+                <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST /digests/{"{id}"}/step0</code> →{" "}
+                <code style={c}>run_step_0</code>. Дефолты шага 0 — <code style={c}>backend/app/digest_defaults.json</code>.
+                Схемы — <code style={c}>backend/app/schemas.py</code>.
+              </div>
+            </Acc>
 
-        <Acc title="Шаг 1 — кандидаты, поиск, проверка ссылок">
-          <p style={{ ...li, marginTop: 0 }}>
-            Сбор URL (ProxyAPI web_search, опционально SerpAPI/Tavily или ручные ссылки), затем Crew при нехватке, для каждого URL: GET
-            страницы, маркеры статьи, согласование заголовка, тема ИИ, «читаемый» заголовок, агрегаторы. Долго — нормально.
-          </p>
-          <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
-            <li style={li}>
-              <strong>С автопоиском:</strong> <code style={c}>ENABLE_WEB_FETCH=true</code>, <code style={c}>PROXYAPI_API_KEY</code> (веб-поиск через ProxyAPI), опционально{" "}
-              <code style={c}>SERPAPI_API_KEY</code> / <code style={c}>TAVILY_API_KEY</code>.
-            </li>
-            <li style={{ ...li, marginBottom: 0 }}>
-              <strong>Без поиска:</strong> <code style={c}>ENABLE_WEB_FETCH=false</code> — обязательны ручные URL в теле запроса шага 1.
-            </li>
-          </ul>
-          <div style={dev}>
-            <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST /digests/{"{id}"}/step1/run</code> →{" "}
-            <code style={c}>DigestService.run_step_1</code>. Ключевые функции в <code style={c}>digest_service.py</code>:{" "}
-            <code style={c}>_fetch_article_page_bundle</code>, <code style={c}>_verify_llm_candidate_dict</code>,{" "}
-            <code style={c}>_ai_digest_topic_matches</code>, <code style={c}>_build_manual_candidates</code>, константы отбраковки{" "}
-            <code style={c}>REJECT_REASON_*</code>. Поиск без LLM: <code style={c}>backend/app/services/news_search.py</code>. Промпты
-            агентов: <code style={c}>backend/app/crew/workflow.py</code> + <code style={c}>backend/app/prompts/digest_contract.txt</code>.
-          </div>
-        </Acc>
+            <Acc title="Шаг 1 — сбор, tier-поиск, проверка ссылок">
+              <p style={{ ...li, marginTop: 0 }}>
+                Итеративный сбор URL батчами, верификация каждой страницы (GET, маркеры статьи, тема ИИ, окно дат,
+                политика источников). Долго — нормально. Журнал проверки ссылок выше — свёрнутая сводка по последнему
+                прогону.
+              </p>
+              <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
+                <li style={li}>
+                  <strong>Tier-strict поиск</strong> (по умолчанию): домены tier-1…tier-4 из{" "}
+                  <code style={c}>source_tiers.txt</code>, запросы с <code style={c}>site:</code>; вне политики —{" "}
+                  <code style={c}>non_policy_source</code>.
+                </li>
+                <li style={li}>
+                  <strong>Telegram-монитор</strong> подмешивает внешние ссылки из каналов (
+                  <code style={c}>pipeline_settings.json</code>) — на карточке «Из Telegram», не «Ручная ссылка».
+                </li>
+                <li style={li}>
+                  <strong>Ручное поле URL</strong> на шаге 1 — отдельный origin «Ручная ссылка (поле URL)»; Telegram-seed
+                  не считается ручным вводом.
+                </li>
+                <li style={li}>
+                  <strong>Фильтры и порог воронки</strong> — «Настройки фильтра новостей»: порядок, вкл/выкл,{" "}
+                  <code style={c}>min_discovered_pages</code> (хранится в{" "}
+                  <code style={c}>step1_filter_settings.json</code>).
+                </li>
+                <li style={{ ...li, marginBottom: 0 }}>
+                  <strong>Автопоиск:</strong> в <code style={c}>.env</code> достаточно{" "}
+                  <code style={c}>PROXYAPI_API_KEY</code>; включение fetch и лимиты — в{" "}
+                  <code style={c}>pipeline_settings.json</code> (перекрываются через <code style={c}>.env</code> при
+                  необходимости). Без поиска — ручные URL обязательны.
+                </li>
+              </ul>
+              <div style={dev}>
+                <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step1/run</code> →{" "}
+                <code style={c}>run_step_1</code>. Ключевые функции: <code style={c}>_fetch_article_page_bundle</code>,{" "}
+                <code style={c}>_verify_llm_candidate_dict</code>, <code style={c}>_build_manual_candidates</code>,{" "}
+                <code style={c}>fetch_tier_prioritized_raw_urls</code> в <code style={c}>news_search.py</code>. Origin
+                карточек: <code style={c}>candidate_origin.py</code>. Документы:{" "}
+                <code style={c}>docs/STEP1_PIPELINE.md</code>, <code style={c}>docs/STEP1_LINKS_RUNBOOK.md</code>.
+              </div>
+            </Acc>
 
-        <Acc title="Шаг 2 — выбор пяти и порядок">
-          <p style={{ ...li, marginTop: 0 }}>
-            Чекбоксы только у строк, прошедших серверные проверки (метки «Читаемый заголовок», «Ссылка рабочая», «Можно в
-            топ‑5»). «Подтвердить 5» или «Оставь топ‑5» переводит в <code style={c}>selected</code>. Перетаскивание + «Применить
-            порядок» вызывает отдельного агента упорядочивания.
-          </p>
-          <div style={dev}>
-            <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step2/select</code> →{" "}
-            <code style={c}>select_news</code>; <code style={c}>POST …/step2/order</code> → <code style={c}>run_step_2_order</code>. Логика
-            выбора и лимиты — в <code style={c}>digest_service.py</code>. Условие «можно в топ‑5» на фронте:{" "}
-            <code style={c}>candidateSelectableForStep2</code> в <code style={c}>frontend/components/DigestWizard.tsx</code>.
-          </div>
-        </Acc>
+            <Acc title="Шаг 2 — выбор пяти, плашки, порядок">
+              <p style={{ ...li, marginTop: 0 }}>
+                Чекбокс только если «Читаемый заголовок», «Ссылка рабочая», «Можно в топ‑5». «Подтвердить 5» / «Оставь
+                топ‑5» → <code style={c}>selected</code>. Порядок — drag-and-drop + «Применить порядок» (отдельный агент).
+              </p>
+              <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
+                <li style={li}>
+                  <strong>Происхождение</strong> (не достоверность): Web-поиск / Из Telegram / Ручная ссылка / LLM-добор.
+                </li>
+                <li style={li}>
+                  <strong>Tier и ✅/⚠️/❗</strong> — политика домена из <code style={c}>source_tiers.txt</code> (
+                  <code style={c}>reliability_status</code>).
+                </li>
+                <li style={li}>
+                  <strong>Иноагент</strong> — явная маркировка по списку доменов; не путать с «Запрещён в РФ» (Tier-5
+                  СМИ) и «Агрегатор».
+                </li>
+                <li style={{ ...li, marginBottom: 0 }}>
+                  Агрегаторы, дубликаты, «❗ без подтверждения» и нерабочие ссылки нельзя выбрать в топ‑5 даже с галочкой
+                  «Ссылка рабочая».
+                </li>
+              </ul>
+              <div style={dev}>
+                <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step2/select</code>,{" "}
+                <code style={c}>POST …/step2/order</code>. Условие выбора на фронте:{" "}
+                <code style={c}>candidateSelectableForStep2</code> в <code style={c}>DigestWizard.tsx</code>. Политика
+                источников: <code style={c}>source_tiers_policy.py</code>.
+              </div>
+            </Acc>
 
-        <Acc title="Шаг 3 — аналитика и шаг 4 — финал">
-          <p style={{ ...li, marginTop: 0 }}>
-            Шаг 3: развёрнутая аналитика по каждой из пяти новостей + хэштеги (достаточно кнопки). Шаг 4: обложки (4 варианта),
-            выбор одной, тексты по отмеченным площадкам и QC — всё запускается кнопками без ввода «Ок» (
-            <code style={c}>digest_contract.txt</code>).
-          </p>
-          <div style={dev}>
-            <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step3/confirm-ready</code> →{" "}
-            <code style={c}>run_step_3_analytics</code>; шаг 4: <code style={c}>generate-images</code>, <code style={c}>select-image</code>,{" "}
-            <code style={c}>generate-texts</code> (см. <code style={c}>schemas.py</code>). Итоговые блоки и ассеты пишутся в БД и отдаются
-            тем же <code style={c}>GET /digests/{"{id}"}</code> и ссылками на <code style={c}>/docx</code> / изображение в{" "}
-            <code style={c}>routes_digests.py</code>.
-          </div>
-        </Acc>
+            <Acc title="Шаги 3–4 — аналитика и финал">
+              <p style={{ ...li, marginTop: 0 }}>
+                Шаг 3: развёрнутая аналитика по каждой из пяти новостей и хэштеги. Шаг 4: обложки (варианты), выбор
+                одной, тексты по площадкам и QC — по кнопкам, без ввода «Ок» (
+                <code style={c}>digest_contract.txt</code>).
+              </p>
+              <div style={dev}>
+                <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step3/confirm-ready</code> →{" "}
+                <code style={c}>run_step_3_analytics</code>; шаг 4: <code style={c}>generate-images</code>,{" "}
+                <code style={c}>select-image</code>, <code style={c}>generate-texts</code>. Итог —{" "}
+                <code style={c}>GET /digests/{"{id}"}</code>, экспорт <code style={c}>/docx</code> и изображения в{" "}
+                <code style={c}>routes_digests.py</code>.
+              </div>
+            </Acc>
 
-        <Acc title="Под капотом: конфиг и фронт">
-          <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
-            <li style={li}>
-              <strong>Бюджеты шагов:</strong> переменные <code style={c}>STEP1_MAX_COST_RUB</code>, <code style={c}>STEP2_MAX_COST_RUB</code> в{" "}
-              <code style={c}>backend/.env</code> → читаются в <code style={c}>backend/app/config.py</code>, используются в{" "}
-              <code style={c}>digest_service.py</code> (сообщения в <code style={c}>budget_notices</code> на UI).
-            </li>
-            <li style={li}>
-              <strong>Очередь запросов к LLM и цены:</strong> <code style={c}>ProxyApiClient</code>,{" "}
-              <code style={c}>app/services/cost_tracker.py</code>, таблица <code style={c}>llm_cost_records</code>.
-            </li>
-            <li style={li}>
-              <strong>Этот мастер (кнопки, аккордеоны):</strong> <code style={c}>frontend/components/DigestWizard.tsx</code>,{" "}
-              <code style={c}>DigestHintsAccordion.tsx</code>, стили <code style={c}>frontend/app/globals.css</code>. Запросы:{" "}
-              <code style={c}>frontend/lib/api.ts</code>.
-            </li>
-            <li style={{ ...li, marginBottom: 0 }}>
-              <strong>Панель списка выпусков:</strong> <code style={c}>frontend/components/Dashboard.tsx</code>. Общая шапка сайта:{" "}
-              <code style={c}>frontend/app/layout.tsx</code>. Маршрут мастера: <code style={c}>frontend/app/digests/[id]/page.tsx</code>.
-            </li>
-          </ul>
-          <p style={{ ...li, marginTop: 12, marginBottom: 0 }}>
-            Навигация: <Link href="/">панель</Link> — список дат; логотип на любой странице ведёт туда же.
-          </p>
-        </Acc>
+            <Acc title="Под капотом: конфиг, файлы, фронт">
+              <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
+                <li style={li}>
+                  <strong>Секреты:</strong> <code style={c}>backend/.env</code> — минимум{" "}
+                  <code style={c}>PROXYAPI_API_KEY</code> (см. <code style={c}>.env.example</code>).
+                </li>
+                <li style={li}>
+                  <strong>Пайплайн:</strong> <code style={c}>backend/app/pipeline_settings.json</code> →{" "}
+                  <code style={c}>config.py</code> (batch, timebox, tier_strict, Telegram, web.fetch; .env поверх JSON).
+                </li>
+                <li style={li}>
+                  <strong>Фильтры шага 1:</strong> <code style={c}>backend/app/step1_filter_settings.json</code> + UI
+                  «Настройки фильтра новостей».
+                </li>
+                <li style={li}>
+                  <strong>Политика источников:</strong> <code style={c}>backend/app/prompts/source_tiers.txt</code> +{" "}
+                  <code style={c}>source_tiers_policy.py</code>.
+                </li>
+                <li style={li}>
+                  <strong>Расходы LLM:</strong> <code style={c}>ProxyApiClient</code>,{" "}
+                  <code style={c}>cost_tracker.py</code>, таблица <code style={c}>llm_cost_records</code>, лимиты{" "}
+                  <code style={c}>step1_max_cost_rub</code> / <code style={c}>step2_max_cost_rub</code>.
+                </li>
+                <li style={li}>
+                  <strong>UI мастера:</strong> <code style={c}>DigestWizard.tsx</code>,{" "}
+                  <code style={c}>DigestHintsAccordion.tsx</code>, <code style={c}>globals.css</code>, запросы —{" "}
+                  <code style={c}>frontend/lib/api.ts</code>.
+                </li>
+                <li style={{ ...li, marginBottom: 0 }}>
+                  <strong>Маршруты:</strong> панель <code style={c}>Dashboard.tsx</code>, мастер{" "}
+                  <code style={c}>app/digests/[id]/page.tsx</code>, общая шапка{" "}
+                  <code style={c}>app/layout.tsx</code>.
+                </li>
+              </ul>
+              <p style={{ ...li, marginTop: 12, marginBottom: 0 }}>
+                Навигация: <Link href="/">панель выпусков</Link> — список дат; логотип на любой странице ведёт туда же.
+                Подробнее по шагу 1 — в <code style={c}>README.md</code> и <code style={c}>docs/STEP1_PIPELINE.md</code>.
+              </p>
+            </Acc>
           </div>
         </div>
       </details>

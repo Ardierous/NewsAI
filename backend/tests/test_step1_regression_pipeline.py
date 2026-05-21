@@ -409,7 +409,11 @@ def test_select_news_top5_picks_best_when_many_mandatory_manual(monkeypatch: pyt
                 tier="Tier-1",
                 published_at="2026-05-20T12:00:00",
                 category="manual" if mandatory else "technology",
-                description="Описание",
+                description=(
+                    "Вставлено в поле URL на шаге 1; материал обязателен к использованию в выпуске."
+                    if mandatory
+                    else "Описание"
+                ),
                 significance_score=2,
                 novelty_score=2,
                 impact_score=2,
@@ -424,6 +428,45 @@ def test_select_news_top5_picks_best_when_many_mandatory_manual(monkeypatch: pyt
     service.db.commit()
 
     selected = service.select_news(digest.id, [], top5=True)
+    assert len(selected) == 5
+    service.db.refresh(digest)
+    assert digest.status == STATUS_SELECTED
+
+
+def test_select_news_manual_picks_ignore_legacy_telegram_manual_required(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    candidates: list[NewsCandidate] = []
+    for idx in range(10):
+        is_legacy_tg = idx < 3
+        c = NewsCandidate(
+            digest_id=digest.id,
+            original_number=idx + 1,
+            title=f"Кандидат {idx + 1}",
+            url=f"https://habr.com/ru/news/{idx + 1}/",
+            source="habr.com",
+            tier="Tier-2",
+            published_at="2026-05-20T12:00:00",
+            category="manual" if is_legacy_tg else "search",
+            description="Старый telegram-seed без поля URL" if is_legacy_tg else "Web-поиск",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=10 - idx,
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+            verification_comment="MANUAL_REQUIRED: добавлено пользователем" if is_legacy_tg else "",
+        )
+        candidates.append(c)
+        service.db.add(c)
+    service.db.commit()
+    pick_ids = [c.id for c in candidates[3:8]]
+
+    selected = service.select_news(digest.id, pick_ids, top5=False)
+
     assert len(selected) == 5
     service.db.refresh(digest)
     assert digest.status == STATUS_SELECTED

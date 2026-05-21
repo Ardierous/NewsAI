@@ -3349,7 +3349,11 @@ class DigestService:
             and not c.is_aggregator
             and not c.is_duplicate
         ]
-        mandatory_manual = [c for c in strict_allowed if self._is_manual_required_candidate(c.verification_comment)]
+        mandatory_manual = [
+            c
+            for c in strict_allowed
+            if self._is_manual_required_candidate(c.verification_comment, c.description)
+        ]
         if top5:
             if len(mandatory_manual) > 5:
                 chosen = sorted(mandatory_manual, key=lambda x: x.total_score, reverse=True)[:5]
@@ -5245,7 +5249,14 @@ class DigestService:
             item["original_number"] = idx
         return merged
 
-    def _is_manual_required_candidate(self, verification_comment: str | None) -> bool:
-        if not verification_comment:
+    def _is_manual_required_candidate(
+        self,
+        verification_comment: str | None,
+        description: str | None = None,
+    ) -> bool:
+        """Обязательны только ссылки, вставленные пользователем в поле URL на шаге 1."""
+        comment = str(verification_comment or "")
+        desc = str(description or "")
+        if "TELEGRAM_SEED:" in comment or "Telegram-монитор" in desc:
             return False
-        return "MANUAL_REQUIRED:" in verification_comment
+        return "поле URL на шаге 1" in desc

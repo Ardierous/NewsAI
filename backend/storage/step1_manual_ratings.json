@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-05-21 17:01:37 МСК",
+  "updated_at": "2026-05-21 18:24:23 МСК",
   "pool_dates": [
     {
       "pool_date": "2026-05-16",
@@ -919,6 +919,16 @@
           "digest_id": 9,
           "discovery_run_id": 30,
           "news_in_pool": 66,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 6,
+          "run_started_at": "2026-05-21 18:19:38 МСК",
+          "pool_formed_at": "2026-05-21 18:24:23 МСК",
+          "digest_id": 9,
+          "discovery_run_id": 31,
+          "news_in_pool": 35,
           "ratings_count": 0,
           "ratings": []
         }
