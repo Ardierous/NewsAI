@@ -176,6 +176,13 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         4,
     )
     spent_today_proxy = proxyapi_spent_today_rub(db, service.cost_tracker)
+    from app.services.digest_service import (
+        _candidate_url_fingerprint_sets,
+        _discovered_row_verification_passed,
+        _discovered_url_in_final_pool,
+    )
+
+    candidate_url_fps, candidate_page_fps = _candidate_url_fingerprint_sets([str(c.url or "") for c in candidates])
     candidates_are_demo_fallback = bool(candidates) and all(_candidate_row_is_demo_placeholder(c) for c in candidates)
     budget_notices = service.build_budget_notices(digest)
     proxyapi_budget_message = service.digest_proxyapi_budget_blocked_message(digest.id)
@@ -194,7 +201,16 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
                 link_status=bool(row.link_status),
                 headline_editorial_ok=bool(row.headline_editorial_ok),
                 page_verified=bool(row.page_verified),
-                in_candidate_pool=bool(row.link_status and row.headline_editorial_ok and row.page_verified),
+                page_verification_passed=_discovered_row_verification_passed(row),
+                in_candidate_pool=(
+                    _discovered_url_in_final_pool(
+                        str(row.url or ""),
+                        url_fps=candidate_url_fps,
+                        page_fps=candidate_page_fps,
+                    )
+                    if candidate_url_fps or candidate_page_fps
+                    else False
+                ),
                 reject_codes=[x for x in str(row.reject_codes or "").split(",") if x],
                 verification_comment=row.verification_comment or "",
                 manual_score=row.manual_score,
@@ -220,6 +236,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
                 "essence": a.essence,
                 "comment": a.comment,
                 "analysis": a.analysis,
+                "reader_text": a.reader_text or "",
             }
             for a in analytics
         ],
@@ -353,7 +370,14 @@ def save_step1_discovered_feedback(
 def select_news(digest_id: int, payload: SelectRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
     rows = service.select_news(digest_id, payload.selected_ids, payload.top5)
-    return {"selected_count": len(rows)}
+    digest = service.get_digest(digest_id)
+    ordered = sorted(rows, key=lambda r: r.output_position)
+    return {
+        "selected_count": len(ordered),
+        "selected_ids": [r.candidate_id for r in ordered],
+        "status": digest.status,
+        "analytics_ready": digest.status in {"analytics_ready", "final_ready"},
+    }
 
 
 @router.post("/{digest_id}/step2/order")

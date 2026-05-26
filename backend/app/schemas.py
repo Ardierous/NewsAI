@@ -98,10 +98,11 @@ class Step1FilterState(BaseModel):
 
 
 class Step1FilterConfig(BaseModel):
-    version: int = 1
+    version: int = 2
     filters: list[Step1FilterState] = Field(default_factory=list)
     min_discovered_pages: int = Field(ge=10, le=200)
     min_collection_iterations: int = Field(ge=1, le=50)
+    digest_type: str | None = None
 
 
 class Step1JournalTotals(BaseModel):
@@ -245,6 +246,7 @@ class Step1DiscoveredNewsOut(BaseModel):
     link_status: bool = False
     headline_editorial_ok: bool = False
     page_verified: bool = False
+    page_verification_passed: bool = False
     in_candidate_pool: bool = False
     reject_codes: list[str] = Field(default_factory=list)
     verification_comment: str = ""
@@ -262,6 +264,7 @@ class AnalyticsItemOut(BaseModel):
     essence: str
     comment: str
     analysis: str
+    reader_text: str = ""
 
 
 class QualityCheckOut(BaseModel):

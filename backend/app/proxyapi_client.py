@@ -198,16 +198,10 @@ class ProxyApiClient:
         Оптимальный порядок пятёрки для удержания читателя (без CrewAI).
         Возвращает список {candidate_id, output_position, ordering_reason}.
         """
+        from app.services.digest_type_policy import normalize_digest_type, step2_order_system_prompt
+
         use_model = model or STEP2_AI_ORDER_MODEL
-        system_prompt = (
-            "Ты выпускающий редактор дайджеста ExTellect про искусственный интеллект. "
-            "Твоя задача — расставить ровно 5 уже отобранных новостей в порядке output_position от 1 до 5 "
-            "так, чтобы максимизировать интерес читателя к выпуску: сильный заход в позиции 1, "
-            "логичный ритм в середине, запоминающийся финал в позиции 5. "
-            "Учитывай заголовки, описания, баллы total_score и tier источника. "
-            "Нельзя добавлять или удалять candidate_id — только переставить. "
-            "Ответ — только JSON-массив из 5 объектов без markdown."
-        )
+        system_prompt = step2_order_system_prompt(normalize_digest_type(digest_type))
         user_prompt = (
             f"digest_type={digest_type}\n"
             f"Новости для упорядочивания:\n{json.dumps(items, ensure_ascii=False)}\n"

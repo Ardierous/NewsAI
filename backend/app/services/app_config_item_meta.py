@@ -170,7 +170,10 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
     ),
     "digest_type_default": ConfigItemMeta(
         why="curious — тип выпуска по умолчанию на шаге 0 (можно сменить перед запуском).",
-        alternatives="serious — более строгий тон и акцент на регулирование/официальные источники в промптах.",
+        alternatives=(
+            "serious — деловой тон; EN-ключи поиска, пресс-релизы в rebalance. "
+            "curious — курьёзы/фейлы/мемы; RU+EN-ключи, без пресс-релизов и без добора press-query."
+        ),
     ),
     "news_window_days_default": ConfigItemMeta(
         why="3 дня — окно «свежих» новостей от даты выпуска; типичный оперативный дайджест.",

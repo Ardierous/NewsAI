@@ -137,17 +137,23 @@ def _item(
 def build_app_config_summary() -> dict[str, Any]:
     settings = get_settings()
     pipeline = get_pipeline_config()
-    step1_cfg = load_step1_filter_settings()
+    step1_serious = load_step1_filter_settings("serious")
+    step1_curious = load_step1_filter_settings("curious")
     step0 = get_digest_defaults().step0
     web = pipeline["web"]
 
-    enabled_filters = []
-    for row in step1_cfg.get("filters") or []:
-        fid = str(row.get("id") or "")
-        if not row.get("enabled"):
-            continue
-        fdef = STEP1_FILTER_DEF_BY_ID.get(fid)
-        enabled_filters.append(fdef.label_ru if fdef else fid)
+    def _enabled_filter_labels(cfg: dict) -> list[str]:
+        labels: list[str] = []
+        for row in cfg.get("filters") or []:
+            fid = str(row.get("id") or "")
+            if not row.get("enabled"):
+                continue
+            fdef = STEP1_FILTER_DEF_BY_ID.get(fid)
+            labels.append(fdef.label_ru if fdef else fid)
+        return labels
+
+    enabled_filters_serious = _enabled_filter_labels(step1_serious)
+    enabled_filters_curious = _enabled_filter_labels(step1_curious)
 
     sections: list[dict[str, Any]] = [
         {
@@ -242,32 +248,58 @@ def build_app_config_summary() -> dict[str, Any]:
         },
         {
             "id": "step1_filters",
-            "title": "Шаг 1 — фильтры и воронка",
+            "title": "Шаг 1 — фильтры и воронка (профили serious / curious)",
             "file": "backend/app/step1_filter_settings.json",
             "items": [
                 _item(
-                    "Мин. страниц (воронка)",
-                    step1_cfg.get("min_discovered_pages"),
-                    "min_discovered_pages",
-                    source="step1_filter_settings.json",
+                    "Мин. страниц — серьёзный",
+                    step1_serious.get("min_discovered_pages"),
+                    "min_discovered_pages_serious",
+                    source="step1_filter_settings.json → serious",
                 ),
                 _item(
-                    "Мин. итераций web-поиска",
-                    step1_cfg.get("min_collection_iterations"),
-                    "min_collection_iterations",
-                    source="step1_filter_settings.json",
+                    "Мин. страниц — курьёзный",
+                    step1_curious.get("min_discovered_pages"),
+                    "min_discovered_pages_curious",
+                    source="step1_filter_settings.json → curious",
                 ),
                 _item(
-                    "Включено фильтров",
-                    len(enabled_filters),
-                    "step1_filters_enabled_count",
-                    source="step1_filter_settings.json",
+                    "Мин. итераций — серьёзный",
+                    step1_serious.get("min_collection_iterations"),
+                    "min_collection_iterations_serious",
+                    source="step1_filter_settings.json → serious",
                 ),
                 _item(
-                    "Активные фильтры",
-                    ", ".join(enabled_filters[:12]) + ("…" if len(enabled_filters) > 12 else ""),
-                    "step1_filters_enabled_list",
-                    source="step1_filter_settings.json",
+                    "Мин. итераций — курьёзный",
+                    step1_curious.get("min_collection_iterations"),
+                    "min_collection_iterations_curious",
+                    source="step1_filter_settings.json → curious",
+                ),
+                _item(
+                    "Включено фильтров (серьёзный)",
+                    len(enabled_filters_serious),
+                    "step1_filters_enabled_count_serious",
+                    source="step1_filter_settings.json → serious",
+                ),
+                _item(
+                    "Активные фильтры (серьёзный)",
+                    ", ".join(enabled_filters_serious[:10])
+                    + ("…" if len(enabled_filters_serious) > 10 else ""),
+                    "step1_filters_enabled_list_serious",
+                    source="step1_filter_settings.json → serious",
+                ),
+                _item(
+                    "Включено фильтров (курьёзный)",
+                    len(enabled_filters_curious),
+                    "step1_filters_enabled_count_curious",
+                    source="step1_filter_settings.json → curious",
+                ),
+                _item(
+                    "Активные фильтры (курьёзный)",
+                    ", ".join(enabled_filters_curious[:10])
+                    + ("…" if len(enabled_filters_curious) > 10 else ""),
+                    "step1_filters_enabled_list_curious",
+                    source="step1_filter_settings.json → curious",
                 ),
             ],
         },

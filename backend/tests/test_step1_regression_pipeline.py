@@ -29,9 +29,12 @@ def _isolated_step1_filter_settings(tmp_path, monkeypatch):
     path = tmp_path / "step1_filter_settings.json"
     monkeypatch.setattr(settings_mod, "_STEP1_FILTER_SETTINGS_PATH", path)
     cfg = _bootstrap_filter_config()
-    cfg["min_discovered_pages"] = 10
-    cfg["min_collection_iterations"] = 1
-    save_step1_filter_settings(cfg)
+    for key in ("serious", "curious"):
+        cfg[key]["min_discovered_pages"] = 10
+        cfg[key]["min_collection_iterations"] = 1
+    import json
+
+    path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     yield
 
 
@@ -65,6 +68,7 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     service = DigestService(db)
     service.settings.enable_web_fetch = True
     service.settings.step1_max_cost_rub = 9999.0
+    service.settings.auto_run_step3_after_order = False
 
     seed_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
     monkeypatch.setattr(
@@ -126,7 +130,7 @@ def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
     score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = False
@@ -159,7 +163,7 @@ def test_step1_success_sets_status_and_candidates(monkeypatch: pytest.MonkeyPatc
     service, digest = _make_service(monkeypatch)
 
     score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
@@ -358,7 +362,8 @@ def test_step1_collect_runs_at_least_min_iterations_before_no_progress(monkeypat
     assert meta["stop_reason"] == "no_progress"
 
 
-def test_select_news_requires_ten_candidate_pool(monkeypatch: pytest.MonkeyPatch):
+def test_select_news_allows_pool_below_step1_min_when_five_selectable(monkeypatch: pytest.MonkeyPatch):
+    """После частичной пересборки в пуле может быть <10 строк — выбор пятёрки всё равно доступен."""
     service, digest = _make_service(monkeypatch)
     digest.status = STATUS_STEP1
     digest.current_step = STATUS_STEP1
@@ -386,11 +391,43 @@ def test_select_news_requires_ten_candidate_pool(monkeypatch: pytest.MonkeyPatch
         )
     service.db.commit()
 
+    selected = service.select_news(digest.id, [], top5=True)
+    assert len(selected) == 5
+
+
+def test_select_news_rejects_when_fewer_than_five_selectable(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    for idx in range(4):
+        service.db.add(
+            NewsCandidate(
+                digest_id=digest.id,
+                original_number=idx + 1,
+                title=f"ИИ новость {idx + 1}",
+                url=f"https://source{idx + 1}.example.com/news/{idx + 1}",
+                source="Example",
+                tier="Tier-2",
+                published_at="2026-05-14T12:00:00",
+                category="technology",
+                description="Описание",
+                significance_score=2,
+                novelty_score=2,
+                impact_score=2,
+                total_score=6,
+                reliability_status="✅ подтверждено",
+                link_status=True,
+                headline_editorial_ok=True,
+                page_verified=True,
+            )
+        )
+    service.db.commit()
+
     with pytest.raises(HTTPException) as ex:
         service.select_news(digest.id, [], top5=True)
 
     assert ex.value.status_code == 400
-    assert "минимум 10 проверенных новостей" in str(ex.value.detail)
+    assert "5" in str(ex.value.detail)
 
 
 def test_select_news_top5_picks_best_when_many_mandatory_manual(monkeypatch: pytest.MonkeyPatch):
@@ -429,6 +466,50 @@ def test_select_news_top5_picks_best_when_many_mandatory_manual(monkeypatch: pyt
 
     selected = service.select_news(digest.id, [], top5=True)
     assert len(selected) == 5
+    service.db.refresh(digest)
+    assert digest.status == STATUS_SELECTED
+
+
+def test_select_news_does_not_auto_run_step3(monkeypatch: pytest.MonkeyPatch):
+    """select_news только сохраняет пятёрку (status=selected), step 3 запускается после order."""
+    service, digest = _make_service(monkeypatch)
+    service.settings.auto_run_step3_after_order = True
+    calls: list[int] = []
+    monkeypatch.setattr(
+        service,
+        "_run_step3_after_order",
+        lambda digest_id: calls.append(digest_id) or {"items": []},
+    )
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    for idx in range(10):
+        service.db.add(
+            NewsCandidate(
+                digest_id=digest.id,
+                original_number=idx + 1,
+                title=f"Новость {idx}",
+                url=f"https://habr.com/ru/news/{idx + 1}/",
+                source="habr.com",
+                tier="Tier-2",
+                published_at="2026-05-20T12:00:00",
+                category="search",
+                description="Описание",
+                significance_score=2,
+                novelty_score=2,
+                impact_score=2,
+                total_score=10 - idx,
+                reliability_status="✅ подтверждено",
+                link_status=True,
+                headline_editorial_ok=True,
+                page_verified=True,
+            )
+        )
+    service.db.commit()
+    pick_ids = [c.id for c in service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).limit(5)]
+
+    service.select_news(digest.id, pick_ids, top5=False)
+
+    assert calls == [], "select_news НЕ должен запускать step 3 — только order"
     service.db.refresh(digest)
     assert digest.status == STATUS_SELECTED
 
@@ -476,7 +557,7 @@ def test_step1_discovered_feedback_saved(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
 
     score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
@@ -578,7 +659,7 @@ def test_step1_keeps_verify_url_when_score_mutates_url(monkeypatch: pytest.Monke
 
     monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: verify_rows)
     monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: verify_rows)
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
@@ -609,7 +690,7 @@ def test_step1_partial_rebuild_keeps_marked_candidates(monkeypatch: pytest.Monke
     service, digest = _make_service(monkeypatch)
 
     score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
@@ -633,6 +714,7 @@ def test_step1_partial_rebuild_keeps_marked_candidates(monkeypatch: pytest.Monke
     assert len(first) == 10
     keep_ids = [first[0].id, first[1].id, first[2].id]
     keep_urls = {first[0].url, first[1].url, first[2].url}
+    dropped_urls = {c.url for c in first[3:]}
 
     new_score_rows = [
         {"original_number": i + 1, "title": f"Fresh {i}", "url": f"https://fresh{i}.example.com/news/{i}"}
@@ -643,13 +725,14 @@ def test_step1_partial_rebuild_keeps_marked_candidates(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         service.workflow,
         "run_candidates_score",
-        lambda verify_rows, now_msk: [dict(x) for x in verify_rows],
+        lambda verify_rows, now_msk, **kw: [dict(x) for x in verify_rows],
     )
 
     rows = service.run_step_1(digest.id, [], rebuild=True, keep_candidate_ids=keep_ids)
     assert 10 <= len(rows) <= 15
     result_urls = {r.url for r in rows}
     assert keep_urls.issubset(result_urls)
+    assert not dropped_urls.intersection(result_urls), "невыбранные из старого пула не должны вернуться"
     assert any("fresh" in u and "example.com" in u for u in result_urls)
 
 
@@ -657,7 +740,7 @@ def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.Monke
     service, digest = _make_service(monkeypatch)
 
     score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
@@ -725,7 +808,7 @@ def test_step1_rebuild_from_analytics_ready(monkeypatch: pytest.MonkeyPatch):
     service.db.commit()
 
     score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
@@ -854,9 +937,9 @@ def test_step1_requires_minimum_discovered_pages_before_pool(monkeypatch: pytest
     service, digest = _make_service(monkeypatch)
     from app.services.step1_filter_settings import load_step1_filter_settings, save_step1_filter_settings
 
-    cfg = load_step1_filter_settings()
+    cfg = load_step1_filter_settings("serious")
     cfg["min_discovered_pages"] = 20
-    save_step1_filter_settings(cfg)
+    save_step1_filter_settings(cfg, digest_type="serious")
 
     rows = []
     for i in range(19):
@@ -876,10 +959,43 @@ def test_step1_requires_minimum_discovered_pages_before_pool(monkeypatch: pytest
     monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: (rows, {}))
     monkeypatch.setattr(service.workflow, "run_candidates_research", lambda *args, **kwargs: [])
     monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda rows: rows)
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: verify_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: verify_rows)
 
     with pytest.raises(HTTPException) as ex:
         service.run_step_1(digest.id, [])
 
     assert ex.value.status_code == 502
     assert "Найдено конкретных проверенных страниц 19 из требуемых 20" in str(ex.value.detail)
+
+
+def test_repair_orphan_step1_status_after_failed_rebuild(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_ANALYTICS
+    digest.current_step = STATUS_ANALYTICS
+    service.db.add(
+        NewsCandidate(
+            digest_id=digest.id,
+            original_number=1,
+            title="Новость",
+            url="https://habr.com/ru/news/1/",
+            source="habr.com",
+            tier="Tier-2",
+            published_at="2026-05-20T12:00:00",
+            category="search",
+            description="Описание",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=6,
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+        )
+    )
+    service.db.commit()
+
+    repaired = service.get_digest(digest.id)
+
+    assert repaired.status == STATUS_STEP1
+    assert repaired.current_step == STATUS_STEP1

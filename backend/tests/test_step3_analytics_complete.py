@@ -1,4 +1,9 @@
-from app.crew.workflow import _ANALYTICS_EDITORIAL, complete_analytics_result
+from app.crew.workflow import (
+    _ANALYTICS_EDITORIAL,
+    _READER_COPY_EDITORIAL,
+    complete_analytics_result,
+    complete_reader_descriptions_result,
+)
 
 
 def test_complete_analytics_result_fills_missing_item():
@@ -14,25 +19,25 @@ def test_complete_analytics_result_fills_missing_item():
             {
                 "candidate_id": 1,
                 "essence": "Суть 1",
-                "comment": "Коммент 1",
+                "comment": "Заметка 1",
                 "analysis": "Анализ 1",
             },
             {
                 "candidate_id": 3,
                 "essence": "Суть 3",
-                "comment": "Коммент 3",
+                "comment": "Заметка 3",
                 "analysis": "Анализ 3",
             },
             {
                 "candidate_id": 4,
                 "essence": "Суть 4",
-                "comment": "Коммент 4",
+                "comment": "Заметка 4",
                 "analysis": "Анализ 4",
             },
             {
                 "candidate_id": 5,
                 "essence": "Суть 5",
-                "comment": "Коммент 5",
+                "comment": "Заметка 5",
                 "analysis": "Анализ 5",
             },
         ],
@@ -59,7 +64,7 @@ def test_complete_analytics_strips_service_markers():
             {
                 "candidate_id": 1,
                 "essence": "Tier-1: суть",
-                "comment": "Ключевая суть: для читателя два предложения. Второе предложение.",
+                "comment": "Ключевая суть: пометка редактора.",
                 "analysis": "Анализ",
             },
         ],
@@ -74,17 +79,13 @@ def test_complete_analytics_strips_service_markers():
     assert "Tier" not in out["overall_analysis"]
 
 
-def test_analytics_prompt_requires_publication_ready_comment():
+def test_analytics_prompt_is_editor_facing():
     prompt = _ANALYTICS_EDITORIAL.lower()
-    assert "готовое описание новости для публикации" in prompt
-    assert "сервер не должен чинить стиль" in prompt
-    assert "source_description" in prompt
-    assert "comment_2_3_sentences" in prompt
-    assert "краткая суть новости" in prompt
-    assert "почему это важно" in prompt
-    assert "для кого это важно" in prompt
-    assert "читателей дайджеста" in prompt
-    assert "какую пользу или вред" in prompt
+    assert "для редактора" in prompt
+    assert "article_excerpt" in prompt
+    assert "analysis_covers_six_angles" in prompt
+    assert "editor_not_reader_copy" in prompt
+    assert "готовое описание новости для публикации" not in prompt
 
 
 def test_analytics_prompt_requires_overall_analysis_on_step3():
@@ -93,3 +94,39 @@ def test_analytics_prompt_requires_overall_analysis_on_step3():
     assert "всех 5 выбранных новостей" in prompt
     assert "общую линию выпуска" in prompt
     assert "overall_analysis_from_selected_five" in prompt
+
+
+def test_reader_copy_prompt_requires_three_to_four_sentences():
+    prompt = _READER_COPY_EDITORIAL.lower()
+    assert "3–4 предложения" in prompt
+    assert "article_excerpt" in prompt
+    assert "reader_text_3_4_sentences" in prompt
+
+
+def test_complete_reader_descriptions_fills_missing():
+    items = [
+        {
+            "candidate_id": 1,
+            "title": "A",
+            "essence": "Суть A.",
+            "analysis": "Анализ A. Второе предложение.",
+            "article_excerpt": "Текст статьи про ИИ.",
+        },
+        {
+            "candidate_id": 2,
+            "title": "B",
+            "essence": "Суть B.",
+            "analysis": "Анализ B.",
+            "article_excerpt": "Другой текст.",
+        },
+    ]
+    partial = {
+        "items": [
+            {"candidate_id": 1, "reader_text": "Первое. Второе. Третье."},
+        ],
+        "self_check": [],
+    }
+    out = complete_reader_descriptions_result(partial, items)
+    assert len(out["items"]) == 2
+    assert out["items"][0]["reader_text"].count(".") >= 2
+    assert out["items"][1]["reader_text"]

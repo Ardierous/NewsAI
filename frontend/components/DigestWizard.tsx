@@ -264,6 +264,78 @@ function candidateSelectableForStep2(c: {
   return true;
 }
 
+/** Те же правила, что `DigestService._is_manual_required_candidate` (обязательные URL с шага 1). */
+function isManualRequiredCandidate(c: { verification_comment?: string; description?: string }): boolean {
+  const comment = String(c.verification_comment || "");
+  const desc = String(c.description || "");
+  if (comment.includes("TELEGRAM_SEED:") || desc.includes("Telegram-монитор")) return false;
+  return desc.includes("поле URL на шаге 1");
+}
+
+type Step2PickCandidate = {
+  id: number;
+  total_score?: number;
+  verification_comment?: string;
+  description?: string;
+  headline_editorial_ok?: boolean;
+  page_verified?: boolean;
+  link_status?: boolean;
+  reliability_status?: string;
+  is_aggregator?: boolean;
+  is_duplicate?: boolean;
+};
+
+/** Зеркало `select_news(..., top5=True)` на бэкенде — для мгновенной отметки чекбоксов. */
+function pickTop5ByRating(candidates: Step2PickCandidate[]): number[] {
+  const strictAllowed = candidates.filter((c) => candidateSelectableForStep2(c));
+  const mandatory = strictAllowed.filter((c) => isManualRequiredCandidate(c));
+  let chosen: Step2PickCandidate[];
+  if (mandatory.length > 5) {
+    chosen = [...mandatory].sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0)).slice(0, 5);
+  } else {
+    chosen = [...mandatory];
+    const chosenIds = new Set(chosen.map((c) => c.id));
+    const rest = [...strictAllowed]
+      .filter((c) => !chosenIds.has(c.id))
+      .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+    chosen = [...chosen, ...rest.slice(0, Math.max(0, 5 - chosen.length))];
+  }
+  return chosen.map((c) => c.id);
+}
+
+/** Тот же отпечаток, что `article_page_fingerprint` в backend/step1_recent_top5.py */
+function articlePageFingerprint(url: string): string {
+  try {
+    const p = new URL((url || "").trim());
+    const host = (p.hostname || "").toLowerCase().replace(/^www\./, "");
+    const path = (p.pathname || "").replace(/\/$/, "") || "/";
+    return `${host}${path.toLowerCase()}`;
+  } catch {
+    return "";
+  }
+}
+
+function resolveKeptCandidateIds(
+  candidates: { id: number; url?: string; headline_editorial_ok?: boolean; page_verified?: boolean; link_status?: boolean; reliability_status?: string; is_aggregator?: boolean; is_duplicate?: boolean }[],
+  keptUrls: string[],
+): number[] {
+  const fps = keptUrls.map(articlePageFingerprint).filter(Boolean);
+  if (!fps.length) return [];
+  const byFp = new Map<string, number>();
+  for (const c of candidates) {
+    const fp = articlePageFingerprint(String(c.url || ""));
+    if (fp && !byFp.has(fp)) byFp.set(fp, c.id);
+  }
+  const out: number[] = [];
+  for (const fp of fps) {
+    const id = byFp.get(fp);
+    if (id == null) continue;
+    const row = candidates.find((c) => c.id === id);
+    if (row && candidateSelectableForStep2(row)) out.push(id);
+  }
+  return out;
+}
+
 const CATEGORY_LABELS: Record<string, string> = {
   manual: "Ручная ссылка (поле URL)",
   telegram_seed: "Из Telegram",
@@ -335,6 +407,10 @@ const REJECT_REASON_LABELS: Record<string, string> = {
     "это лента или рубрика со списком новостей, а не отдельная статья — в дайджест попадут ссылки на материалы из неё",
   non_article_page: "на странице нет нормального заголовка материала (как у обычной статьи)",
   off_topic_not_ai: "по тексту страницы тема не про искусственный интеллект и нейросети — это другая тематика",
+  off_topic_not_curious:
+    "курьёзный выпуск: материал слишком сухой или деловой, без забавного/неожиданного угла (фильтр забавного тона)",
+  excluded_from_final_pool:
+    "страница прошла проверку, но не вошла в финальный список кандидатов (лимит rebalance, квоты источников)",
   headline_low_quality:
     "заголовок выглядит как служебный номер или код (например, номер дела), а не как название новости",
   invalid_url: "адрес ссылки указан неверно или не начинается с http/https",
@@ -356,6 +432,8 @@ const REJECT_REASON_LABELS: Record<string, string> = {
     "домен не входит в tier-1…tier-4 из политики источников — при строгом поиске такие URL не собираются",
   unknown_reject: "точная причина в данных не указана",
   duplicate_url_skip: "ссылка уже проверялась в этом запуске или исключена как дубликат",
+  recent_top5_repeat:
+    "та же страница статьи уже была в топ-5 одного из 7 предыдущих выпусков (другой URL — можно)",
   product_tool_page: "страница продукта/инструмента, а не новостная публикация",
   product_tool_promo: "промо инструмента или функции, а не новостное событие",
 };
@@ -460,9 +538,12 @@ export function DigestWizard({ digestId }: Props) {
   const copyTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const step1CardRef = useRef<HTMLDivElement | null>(null);
   const step2CardRef = useRef<HTMLDivElement | null>(null);
+  const step2OrderCardRef = useRef<HTMLDivElement | null>(null);
   const step3CardRef = useRef<HTMLDivElement | null>(null);
   const step4CardRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToStep2Ref = useRef(false);
+  const pendingPreselectKeptUrlsRef = useRef<string[]>([]);
+  const lastSelectedUrlsRef = useRef<string[]>([]);
   const step3ModeRef = useRef<Step3ProgressMode>("analytics");
   const [step1Elapsed, setStep1Elapsed] = useState(0);
   const [step3Elapsed, setStep3Elapsed] = useState(0);
@@ -570,7 +651,8 @@ export function DigestWizard({ digestId }: Props) {
               (a.output_position ?? 0) - (b.output_position ?? 0),
           );
           setSelected(sorted.map((s: { candidate_id: number }) => s.candidate_id));
-        } else if (!opts?.preserveSelection) {
+          pendingPreselectKeptUrlsRef.current = [];
+        } else if (!opts?.preserveSelection && pendingPreselectKeptUrlsRef.current.length === 0) {
           setSelected([]);
         }
       } catch (e) {
@@ -595,11 +677,6 @@ export function DigestWizard({ digestId }: Props) {
     const d = digest?.digest;
     if (!d) return;
     if (d.news_window_days != null) setNewsWindowDays(Number(d.news_window_days) || 3);
-    const st = d.status as string | undefined;
-    if (!st || st === "draft" || st === "step_0") {
-      setNewsWindowDayKind("working");
-      return;
-    }
     const kind = d.news_window_day_kind;
     if (kind === "working" || kind === "calendar") {
       setNewsWindowDayKind(kind);
@@ -607,22 +684,58 @@ export function DigestWizard({ digestId }: Props) {
   }, [digest?.digest?.news_window_days, digest?.digest?.news_window_day_kind, digest?.digest?.status]);
 
   useEffect(() => {
-    const st = digest?.digest?.status as string | undefined;
-    if (st === "selected" || st === "analytics_ready" || st === "final_ready") return;
     const list = digest?.candidates as
-      | { id: number; page_verified?: boolean; link_status?: boolean; headline_editorial_ok?: boolean }[]
+      | {
+          id: number;
+          url?: string;
+          page_verified?: boolean;
+          link_status?: boolean;
+          headline_editorial_ok?: boolean;
+          reliability_status?: string;
+          is_aggregator?: boolean;
+          is_duplicate?: boolean;
+        }[]
       | undefined;
     if (!list?.length) return;
-    setSelected((prev) => prev.filter((id) => {
-      const row = list.find((x) => x.id === id);
-      return row ? candidateSelectableForStep2(row) : false;
-    }));
+    const validIds = new Set(list.map((c) => c.id));
+    const st = digest?.digest?.status as string | undefined;
+    const pastStep2 = st === "selected" || st === "analytics_ready" || st === "final_ready";
+
+    const pendingUrls = pendingPreselectKeptUrlsRef.current;
+    if (pendingUrls.length > 0) {
+      pendingPreselectKeptUrlsRef.current = [];
+      const remapped = resolveKeptCandidateIds(list, pendingUrls);
+      if (remapped.length) {
+        setSelected(remapped);
+        return;
+      }
+    }
+
+    setSelected((prev) => {
+      const stillValid = prev.filter((id) => validIds.has(id));
+      if (stillValid.length !== prev.length && lastSelectedUrlsRef.current.length) {
+        const remapped = resolveKeptCandidateIds(list, lastSelectedUrlsRef.current);
+        if (remapped.length) return remapped;
+      }
+      return stillValid.filter((id) => {
+        if (pastStep2) return true;
+        const row = list.find((x) => x.id === id);
+        return row ? candidateSelectableForStep2(row) : false;
+      });
+    });
   }, [digest?.candidates, digest?.digest?.status]);
 
   const candidatesSorted = useMemo(
     () => [...(digest?.candidates || [])].sort((a, b) => a.original_number - b.original_number),
     [digest],
   );
+
+  useEffect(() => {
+    lastSelectedUrlsRef.current = selected
+      .map((id) => candidatesSorted.find((c) => c.id === id)?.url)
+      .filter((url): url is string => Boolean(url));
+  }, [selected, candidatesSorted]);
+
   const hasCandidatePool = candidatesSorted.length > 0;
   const hasSelectableInPool = useMemo(
     () => candidatesSorted.some((c) => candidateSelectableForStep2(c)),
@@ -634,7 +747,17 @@ export function DigestWizard({ digestId }: Props) {
   const canRunStep1 = digestStatus === "step_0" || digestStatus === "step_1_candidates";
   const pastStep2ForRebuild =
     digestStatus === "selected" || digestStatus === "analytics_ready" || digestStatus === "final_ready";
-  const canSelect = digestStatus === "step_1_candidates";
+  const hasConfirmedSelection = (digest?.selected?.length ?? 0) > 0;
+  const hasAnalyticsBlocks = (digest?.analytics?.length ?? 0) > 0;
+  const canSelect =
+    digestStatus === "step_1_candidates" ||
+    (hasCandidatePool &&
+      hasSelectableInPool &&
+      !hasConfirmedSelection &&
+      !hasAnalyticsBlocks &&
+      digestStatus !== "final_ready" &&
+      digestStatus !== "draft" &&
+      digestStatus !== "step_0");
   const canOrder = digestStatus === "selected";
   const canAnalytics = digestStatus === "selected" || digestStatus === "analytics_ready";
   const analyticsDone = digestStatus === "analytics_ready" || digestStatus === "final_ready";
@@ -667,6 +790,21 @@ export function DigestWizard({ digestId }: Props) {
     const inPool = rows.filter((r: { in_candidate_pool?: boolean }) => r.in_candidate_pool).length;
     return { total: rows.length, inPool, rejected: rows.length - inPool };
   }, [digest?.discovered_news]);
+  const step1JournalSummaryLine = useMemo(
+    () =>
+      `Журнал проверки ссылок (шаг 1) · проверено ${step1AuditCounts.total} · в списке кандидатов (шаг 2) ${step1AuditCounts.inPool} · отбраковано ${step1AuditCounts.rejected}`,
+    [step1AuditCounts],
+  );
+  const [step1SummaryCopied, setStep1SummaryCopied] = useState(false);
+  const copyStep1JournalSummary = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(step1JournalSummaryLine);
+      setStep1SummaryCopied(true);
+      window.setTimeout(() => setStep1SummaryCopied(false), 2000);
+    } catch {
+      setStep1SummaryCopied(false);
+    }
+  }, [step1JournalSummaryLine]);
   const rejectReasonSummary = useMemo(() => {
     const raw = digest?.rejected_reasons_summary;
     if (!raw || typeof raw !== "object") return { entries: [] as [string, number][], total: 0 };
@@ -786,6 +924,27 @@ export function DigestWizard({ digestId }: Props) {
       if (prev.includes(id)) return prev.filter((x) => x !== id);
       if (prev.length >= 5) return prev;
       return [...prev, id];
+    });
+  };
+
+  const applyTop5AndSelect = async () => {
+    const ids = pickTop5ByRating(candidatesSorted);
+    if (ids.length < 5) {
+      setError(
+        "Недостаточно кандидатов с меткой «Можно в топ‑5» для автоматического выбора. Отметьте пятёрку вручную или пересоберите пул.",
+      );
+      return;
+    }
+    setSelected(ids);
+    requestAnimationFrame(() => {
+      const first = document.getElementById(`news-candidate-${ids[0]}`);
+      first?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+    await run("Шаг 2: топ-5 по рейтингу…", async () => {
+      const res = await api.selectNews(digestId, [], true);
+      if (Array.isArray(res?.selected_ids) && res.selected_ids.length === 5) {
+        setSelected(res.selected_ids);
+      }
     });
   };
 
@@ -909,6 +1068,11 @@ export function DigestWizard({ digestId }: Props) {
         setProgressLabel("Обновление данных…");
       }
       await loadDigest({ skipProgress: true });
+      if (rk === "2pick") {
+        requestAnimationFrame(() => {
+          step2OrderCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      }
       if (pendingScrollToStep2Ref.current) {
         pendingScrollToStep2Ref.current = false;
         requestAnimationFrame(() => {
@@ -961,14 +1125,21 @@ export function DigestWizard({ digestId }: Props) {
       );
       if (!ok) return;
     }
-    void run(label, () =>
-      api.step1Run(digestId, manualUrlList, {
+    const keptUrls = keepIds
+      .map((id) => candidatesSorted.find((c) => c.id === id)?.url)
+      .filter((url): url is string => Boolean(url));
+    void run(label, async () => {
+      if (keptUrls.length > 0) {
+        pendingPreselectKeptUrlsRef.current = keptUrls;
+        lastSelectedUrlsRef.current = keptUrls;
+      }
+      await api.step1Run(digestId, manualUrlList, {
         rebuild,
         keep_candidate_ids: keepIds,
         news_window_days: newsWindowDays,
         news_window_day_kind: newsWindowDayKind,
-      }),
-    );
+      });
+    });
   };
 
   const openStep1FilterSettings = useCallback(async () => {
@@ -1421,10 +1592,24 @@ export function DigestWizard({ digestId }: Props) {
       {step1AuditCounts.total > 0 ? (
         <div className="card wizard-collapsible-card">
           <details className="digest-step-details">
-            <summary className="digest-step-summary">
-              Журнал проверки ссылок (шаг 1) · проверено {step1AuditCounts.total} · в пул{" "}
-              <span style={{ color: "#4ade80" }}>{step1AuditCounts.inPool}</span> · отбраковано{" "}
-              <span style={{ color: "#fca5a5" }}>{step1AuditCounts.rejected}</span>
+            <summary className="digest-step-summary digest-step-summary--with-copy">
+              <span className="digest-step-summary-text">
+                Журнал проверки ссылок (шаг 1) · проверено {step1AuditCounts.total} · в списке кандидатов (шаг 2){" "}
+                <span style={{ color: "#4ade80" }}>{step1AuditCounts.inPool}</span> · отбраковано{" "}
+                <span style={{ color: "#fca5a5" }}>{step1AuditCounts.rejected}</span>
+              </span>
+              <button
+                type="button"
+                className="digest-copy-line-btn"
+                title="Скопировать строку статистики"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void copyStep1JournalSummary();
+                }}
+              >
+                {step1SummaryCopied ? "Скопировано" : "Копировать"}
+              </button>
             </summary>
             <div className="digest-step-details-body">
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
@@ -1440,7 +1625,7 @@ export function DigestWizard({ digestId }: Props) {
                   className={step1AuditFilter === "in_pool" ? "news-chip ok" : "news-chip"}
                   onClick={() => setStep1AuditFilter("in_pool")}
                 >
-                  В пуле ({step1AuditCounts.inPool})
+                  В списке ({step1AuditCounts.inPool})
                 </button>
                 <button
                   type="button"
@@ -1471,9 +1656,11 @@ export function DigestWizard({ digestId }: Props) {
                     >
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
                         {row.in_candidate_pool ? (
-                          <span className="news-chip ok">В пуле кандидатов</span>
+                          <span className="news-chip ok">В списке кандидатов (шаг 2)</span>
+                        ) : row.page_verification_passed ? (
+                          <span className="news-chip">Проверено, не в списке</span>
                         ) : (
-                          <span className="news-chip warn">Не в пуле</span>
+                          <span className="news-chip warn">Не прошло проверку</span>
                         )}
                         {row.source ? <span className="news-chip">{row.source}</span> : null}
                         <span className="news-chip">{formatNewsPublishedAt(row.published_at)}</span>
@@ -1548,6 +1735,23 @@ export function DigestWizard({ digestId }: Props) {
             Календарные
           </label>
         </fieldset>
+        {!isDraft && digest?.digest?.status && digest.digest.status !== "step_0" ? (
+          <button
+            type="button"
+            disabled={loading}
+            style={{ alignSelf: "flex-start" }}
+            onClick={() =>
+              void run("Сохранение окна дат…", () =>
+                api.patchNewsWindow(digestId, {
+                  news_window_days: newsWindowDays,
+                  news_window_day_kind: newsWindowDayKind,
+                }),
+              )
+            }
+          >
+            Сохранить окно дат
+          </button>
+        ) : null}
         <WizardWhy summary="Зачем тип важен и как ведут себя кнопки">
           <p>
             От выбора зависят промпты к ИИ на шагах 1–4 — это не просто «стиль оформления». До первого сохранения ни одна
@@ -1589,7 +1793,7 @@ export function DigestWizard({ digestId }: Props) {
             disabled={loading}
             style={step0BtnStyle("curious")}
             aria-pressed={step0Active === "curious"}
-            title="Более лёгкий тон под курьёзные заметки; выберите осознанно."
+            title="Курьёзный выпуск: поиск и отбор забавных/неожиданных историй про ИИ (без делового официоза). Перед шагом 1 сохраните тип."
             onClick={() =>
               run("Сохранение типа дайджеста: курьёзный…", () =>
                 api.step0(digestId, {
@@ -2021,7 +2225,14 @@ export function DigestWizard({ digestId }: Props) {
           }}
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <h3 style={{ margin: 0 }}>Настройки фильтра новостей</h3>
+            <h3 style={{ margin: 0 }}>
+              Настройки фильтра новостей
+              {row?.digest_type === "curious"
+                ? " (курьёзный выпуск)"
+                : row?.digest_type === "serious"
+                  ? " (серьёзный выпуск)"
+                  : ""}
+            </h3>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button type="button" disabled={step1FilterSaving || step1FilterLoading} onClick={() => void saveStep1FilterSettings()}>
                 {step1FilterSaving ? "Сохраняем..." : "Сохранить"}
@@ -2091,11 +2302,11 @@ export function DigestWizard({ digestId }: Props) {
               />
             </label>
             <span style={{ color: "#94a3b8", fontSize: "0.86rem", lineHeight: 1.45, display: "block" }}>
-              Журнал <strong>последнего</strong> запуска шага 1: проверено URL <strong>{step1ModalJournal.total}</strong>, в пул:{" "}
-              <strong>{step1ModalJournal.inPool}</strong>
+              Журнал <strong>последнего</strong> запуска шага 1: проверено URL <strong>{step1ModalJournal.total}</strong>, в списке
+              кандидатов (шаг 2): <strong>{step1ModalJournal.inPool}</strong>
               {step1ModalJournal.rejected > 0 ? (
                 <>
-                  , не в пул <strong>{step1ModalJournal.rejected}</strong>
+                  , не в списке <strong>{step1ModalJournal.rejected}</strong>
                 </>
               ) : null}
               . Галочки ниже — настройка на <strong>следующий</strong> сбор; цифры в колонке — что записано в журнале{" "}
@@ -2251,7 +2462,7 @@ export function DigestWizard({ digestId }: Props) {
             </p>
           ) : proxyapiBudgetText ? (
             <ProxyapiBudgetAlert message={proxyapiBudgetText} compact />
-          ) : !canSelect && hasCandidatePool && digestStatus === "step_0" && !hasSelectableInPool ? (
+          ) : !canSelect && hasCandidatePool && !hasSelectableInPool ? (
             <p className="wizard-hint-wait">
               В пуле нет строк с меткой «Можно в топ‑5» — отметьте только карточки с зелёными чипами «Читаемый заголовок» и «Ссылка рабочая».
               Ослабьте фильтры в <strong>«Настройках фильтра новостей»</strong> или пересоберите пул.
@@ -2432,15 +2643,19 @@ export function DigestWizard({ digestId }: Props) {
               type="button"
               disabled={!canSelect || selected.length !== 5 || loading}
               title="Сохраняет именно те пять новостей, чьи чекбоксы отмечены"
-              onClick={() => run("Шаг 2: сохранение выбранных пяти новостей…", () => api.selectNews(digestId, selected, false))}
+              onClick={() =>
+                run("Шаг 2: сохранение выбранных пяти новостей…", () =>
+                  api.selectNews(digestId, selected, false),
+                )
+              }
             >
               Подтвердить 5 новостей
             </button>
             <button
               type="button"
               disabled={!canSelect || loading}
-              title="Снимает ручной выбор и берёт пять лучших по баллу из проверенных кандидатов"
-              onClick={() => run("Шаг 2: выбор топ-5 по рейтингу…", () => api.selectNews(digestId, [], true))}
+              title="Отмечает пять лучших по баллу и сохраняет на сервере — после этого можно изменить порядок"
+              onClick={() => applyTop5AndSelect()}
             >
               Оставь топ-5
             </button>
@@ -2448,15 +2663,16 @@ export function DigestWizard({ digestId }: Props) {
           <WizardWhy summary="Разница между «Подтвердить 5» и «Оставь топ‑5»">
             <p>
               <strong>Подтвердить 5</strong> активна только при пяти галочках — вы управляете составом.{" "}
-              <strong>Оставь топ‑5</strong> — доверить выбор системе по рейтингу. После успеха статус станет <code>selected</code>{" "}
-              — откроется блок перетаскивания порядка и шаг 3.
+              <strong>Оставь топ‑5</strong> — сразу отметит пять лучших по баллу (чекбоксы) и сохранит выбор.{" "}
+              После этого откроется блок <strong>перетаскивания порядка</strong> — расставьте новости и нажмите{" "}
+              <strong>«Применить порядок»</strong> или <strong>«Оптимально по мнению ИИ»</strong> — аналитика (шаг 3) запустится автоматически.
             </p>
           </WizardWhy>
         </div>
       )}
 
       {digest?.selected?.length > 0 && (
-        <div className="card">
+        <div className="card" ref={step2OrderCardRef}>
           <h3>Шаг 2 — порядок новостей (drag-and-drop)</h3>
           <StepProgressBar active={runningStepKey === "2order"} />
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
@@ -2513,7 +2729,12 @@ export function DigestWizard({ digestId }: Props) {
             style={{ marginLeft: 10 }}
             title="Сохранить текущий порядок карточек после перетаскивания"
             onClick={() =>
-              run("Шаг 2–3: порядок и аналитика (AI, несколько минут)…", () => api.orderNews(digestId, selected))
+              run("Шаг 2–3: порядок и аналитика (AI, несколько минут)…", () =>
+                api.orderNews(
+                  digestId,
+                  orderedSelectedRows.map((s: { candidate_id: number }) => s.candidate_id),
+                ),
+              )
             }
           >
             Применить порядок
@@ -2554,7 +2775,7 @@ export function DigestWizard({ digestId }: Props) {
         </WizardWhy>
         <button
           type="button"
-          disabled={!canAnalytics || loading || (!analyticsDone && canOrder)}
+          disabled={!canAnalytics || loading}
           title={
             analyticsDone
               ? "Пересобрать аналитику по текущей пятёрке"
@@ -2570,8 +2791,9 @@ export function DigestWizard({ digestId }: Props) {
           <div style={{ marginTop: 12 }}>
             <WizardWhy summary="Как читать блоки по новостям и хэштеги">
               <p>
-                По одному блоку на новость: <strong>суть</strong> (коротко), <strong>комментарий</strong> редакции,{" "}
-                <strong>анализ</strong> (развёрнуто). Хэштеги внизу — для соцсетей.
+                По одному блоку на новость — материал <strong>для редактора</strong>:{" "}
+                <strong>суть</strong> (коротко), <strong>заметка</strong>, <strong>анализ</strong> (развёрнуто, шесть
+                углов). Текст для читателей появится после генерации на шаге 4. Хэштеги внизу — для соцсетей.
               </p>
             </WizardWhy>
             {digest.analytics.map((a: any) => (
@@ -2580,9 +2802,26 @@ export function DigestWizard({ digestId }: Props) {
                   <strong>{a.source_name}</strong>
                   <span> · {formatNewsPublishedAt(a.published_at)}</span>
                 </div>
-                <div>{a.essence}</div>
-                <div>{a.comment}</div>
-                <div>{a.analysis}</div>
+                <div>
+                  <small style={{ color: "#94a3b8" }}>Суть (редактор)</small>
+                  <div>{a.essence}</div>
+                </div>
+                {a.comment ? (
+                  <div>
+                    <small style={{ color: "#94a3b8" }}>Заметка редактора</small>
+                    <div>{a.comment}</div>
+                  </div>
+                ) : null}
+                <div>
+                  <small style={{ color: "#94a3b8" }}>Анализ (редактор)</small>
+                  <div>{a.analysis}</div>
+                </div>
+                {a.reader_text ? (
+                  <div style={{ marginTop: 8 }}>
+                    <small style={{ color: "#94a3b8" }}>Текст для читателя</small>
+                    <div>{a.reader_text}</div>
+                  </div>
+                ) : null}
               </div>
             ))}
             <div>Хэштеги: {(digest.hashtags || []).join(" ")}</div>

@@ -35,12 +35,14 @@ def step1_settings_file(tmp_path, monkeypatch):
 
 
 def test_step1_filter_states_keep_catalog_and_allow_full_toggle(step1_settings_file):
-    save_step1_filter_settings(settings_mod._bootstrap_filter_config())
+    boot = settings_mod._bootstrap_filter_config()
+    step1_settings_file.write_text(json.dumps(boot, ensure_ascii=False), encoding="utf-8")
     states = normalize_step1_filter_states(
         [
             {"id": "http_unreachable", "enabled": False, "order": 1},
             {"id": "product_tool_promo", "enabled": False, "order": 2},
-        ]
+        ],
+        digest_type="serious",
     )
     by_id = {x["id"]: x for x in states}
     assert by_id["http_unreachable"]["enabled"] is False
@@ -49,7 +51,8 @@ def test_step1_filter_states_keep_catalog_and_allow_full_toggle(step1_settings_f
 
 
 def test_step1_filter_settings_roundtrip_via_service(step1_settings_file):
-    save_step1_filter_settings(settings_mod._bootstrap_filter_config())
+    boot = settings_mod._bootstrap_filter_config()
+    step1_settings_file.write_text(json.dumps(boot, ensure_ascii=False), encoding="utf-8")
     db = _make_db()
     digest = Digest(
         date=date(2026, 5, 20),
@@ -90,8 +93,10 @@ def test_step1_filter_settings_roundtrip_via_service(step1_settings_file):
     assert "defaults" not in fetched
 
     raw = json.loads(step1_settings_file.read_text(encoding="utf-8"))
-    assert raw["min_discovered_pages"] == 25
-    assert raw["min_collection_iterations"] == 7
+    assert raw["version"] == 2
+    assert raw["serious"]["min_discovered_pages"] == 25
+    assert raw["serious"]["min_collection_iterations"] == 7
+    assert "off_topic_not_curious" not in {f["id"] for f in raw["serious"]["filters"]}
 
 
 def test_normalize_step1_filter_config_reads_min_pages_from_file(step1_settings_file):
@@ -106,10 +111,8 @@ def test_normalize_step1_filter_config_reads_min_pages_from_file(step1_settings_
         ),
         encoding="utf-8",
     )
-    cfg = normalize_step1_filter_config({"version": 1, "filters": []})
-    assert cfg["min_discovered_pages"] == 30
-    assert get_min_discovered_pages() == 30
-    assert load_step1_filter_settings()["min_discovered_pages"] == 30
+    assert get_min_discovered_pages("serious") == 30
+    assert load_step1_filter_settings("serious")["min_discovered_pages"] == 30
 
 
 def test_search_prefilter_respects_custom_order_for_conflicting_rules():
@@ -159,6 +162,8 @@ def test_verify_skips_date_window_when_filter_disabled(monkeypatch):
     svc._ensure_russian_candidate_title = lambda _d, _u, h: h
 
     def _off(fid: str) -> bool:
+        if fid == "off_topic_not_curious":
+            return False
         return fid != "published_before_window"
 
     ds.DigestService._verify_llm_candidate_dict(svc, digest, item, filter_enabled=_off)

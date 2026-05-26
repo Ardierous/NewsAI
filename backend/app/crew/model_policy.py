@@ -44,6 +44,7 @@ AGENT_MODEL_RECOMMENDATIONS: dict[str, str] = {
     "ScoringAgent": "gpt-4.1-nano",
     "OrderingAgent": "gpt-4.1-nano",
     "AnalyticsAgent": "gpt-4.1-mini",
+    "ReaderCopyAgent": "gpt-4.1-mini",
     "PlatformWriterAgent": "gpt-4.1-mini",
     "ImagePromptAgent": "gpt-4.1-nano",
     "QualityControlAgent": "gpt-4.1-nano",

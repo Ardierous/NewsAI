@@ -18,7 +18,7 @@
 |----------|--------------|
 | Тип и окно выпуска | `POST /digests/{id}/step0`; смена только окна — `PATCH /digests/{id}/news-window` или поля в теле `POST …/step1/run` (UI передаёт их при каждом запуске/пересборке) |
 | Дефолты шага 0 | `backend/app/digest_defaults.json` (`step0`) |
-| Фильтры шага 1 и порог воронки | `backend/app/step1_filter_settings.json`; UI «Настройки фильтра новостей» → `PUT /digests/{id}/step1/filters` |
+| Фильтры шага 1 и порог воронки | `backend/app/step1_filter_settings.json` (профили **serious** и **curious** не смешиваются); UI «Настройки фильтра новостей» → `GET/PUT /digests/{id}/step1/filters` (по `digest_type` выпуска) |
 | Технические лимиты шага 1 | `backend/app/pipeline_settings.json` (`batch_size`, `soft/hard_time_limit_sec`, `max_candidates_for_ui`, `verify_workers`, …); переопределение через `.env` (`STEP1_*`) |
 | Ключи и ProxyAPI web_search | `backend/.env` (`PROXYAPI_WEB_SEARCH_*`, `SERPAPI_API_KEY`, `TAVILY_API_KEY`; `STEP1_MAX_COST_RUB` при необходимости) |
 | Автосбор (`web.enable_fetch`) | `backend/app/pipeline_settings.json` |
@@ -32,6 +32,23 @@
 3. ProxyAPI / SerpAPI / Tavily получают `allowed_hosts` / `include_domains` — URL вне политики отбрасываются на prefilter (`non_policy_source`).
 
 Режим `tier_strict_search: false` возвращает прежнее поведение: один общий запрос + добор tier-1 при нехватке сырых URL (&lt; `STEP1_SEARCH_TIER1_MIN_RAW_URLS`).
+
+### Разделение серьёзный / курьёзный
+
+| | **Серьёзный** (`digest_type=serious`) | **Курьёзный** (`digest_type=curious`) |
+|---|--------------------------------------|----------------------------------------|
+| Домены поиска | `source_tiers.txt` (tier-1…4) | `curious_source_hosts.txt` |
+| Prefilter `non_policy_source` | tier-1…4 | curious-список |
+| Фильтры (настройки) | секция `serious` в `step1_filter_settings.json` | секция `curious` (+ `off_topic_not_curious`) |
+| Фильтр тона | нет | `off_topic_not_curious` |
+| Пресс-релизы в rebalance | 20–35% | 0% |
+| Маршрутизация в коде | `resolve_step1_search_routing` → `serious_tier` | → `curious_hosts` |
+
+Контуры **не пересекаются**: при `serious` функция `fetch_curious_prioritized_raw_urls` не вызывается.
+
+### Курьёзный выпуск (`digest_type=curious`)
+
+На шаге 1 **не используется** `source_tiers.txt`. Поиск идёт по доменам из `backend/app/prompts/curious_source_hosts.txt` (MAXIM, vc.ru, habr, dzen, reddit, 9gag и др.; **без** RIA/Интерфакс/Ведомостей): сначала развлекательные RU, затем tech/lifestyle RU, затем зарубежные; за итерацию — два угла запроса (RU-курьёз + viral/foreign). После HTTP-проверки действует фильтр **`off_topic_not_curious`** (см. `curious_tone.py`): отсекается сухой официоз; допускаются «человеческие» сюжеты про ИИ без слова «смешной». Фильтр **`published_date_undefined`** для курьёза **выключен** (только серьёзный профиль). Пресс-релизы не добираются; в rebalance квота пресс = 0, доля RU 55–85%. Заголовки — на русском.
 
 Дополнительно:
 
@@ -104,6 +121,8 @@ Stop-правила:
 - лимит бюджета `STEP1_MAX_COST_RUB` -> stop.
 
 За одну итерацию запрашивается батч до `STEP1_BATCH_SIZE` (20) URL; в пул попадает меньше из‑за фильтров и HTTP-верификации.
+
+Фильтр **`recent_top5_repeat`** (по умолчанию вкл.): та же страница статьи (отпечаток host+path), что уже была в топ-5 одного из **7 предыдущих** выпусков, не попадает в пул. Другой URL — другая публикация, даже при похожем сюжете.
 
 ### 3) Crew fallback (только если нужно)
 

@@ -14,6 +14,13 @@ if TYPE_CHECKING:
     from app.config import Settings
     from app.proxyapi_client import ProxyApiClient
 
+from app.curious_source_policy import (
+    curious_host_search_groups,
+    get_curious_source_policy,
+    is_curious_aggregator_source,
+    is_curious_blocked_host,
+    is_curious_policy_source,
+)
 from app.source_tiers_policy import (
     batched_site_host_groups,
     get_source_tiers_policy,
@@ -156,6 +163,7 @@ def search_url_prefilter_reason(
     order: list[str] | None = None,
     *,
     tier_strict: bool = False,
+    curious_strict: bool = False,
 ) -> str | None:
     """Код отказа до HTTP-проверки (поиск/ингест). None — можно качать страницу."""
     enabled = is_enabled or (lambda _fid: True)
@@ -170,9 +178,16 @@ def search_url_prefilter_reason(
     if not host:
         return "invalid_url" if enabled("invalid_url") else None
     checks: dict[str, bool] = {
-        "non_policy_source": tier_strict and not is_policy_tier_source(u),
-        "aggregator_source": is_aggregator_source(u),
-        "forbidden_media_source": is_blocked_search_host(u),
+        "non_policy_source": (
+            curious_strict and not is_curious_policy_source(u)
+        )
+        or (tier_strict and not curious_strict and not is_policy_tier_source(u)),
+        "aggregator_source": (
+            is_curious_aggregator_source(u) if curious_strict else is_aggregator_source(u)
+        ),
+        "forbidden_media_source": (
+            is_curious_blocked_host(u) if curious_strict else is_blocked_search_host(u)
+        ),
         "news_listing_page": (
             path in ("", "/")
             or any(x in path for x in ("/search", "/tag/", "/tags/", "/category/", "/topics/"))
@@ -361,6 +376,80 @@ def fetch_tier_prioritized_raw_urls(
     if merged:
         logger.info(
             "Tier-поиск: итого URL из политики tier-1…4 | count=%s cap=%s",
+            len(merged),
+            fetch_limit,
+        )
+    return merged[:fetch_limit]
+
+
+def fetch_curious_prioritized_raw_urls(
+    settings: "Settings",
+    *,
+    window_prefix: str,
+    topic_terms_ru: str,
+    topic_terms_foreign: str,
+    product_excludes: str,
+    fetch_limit: int,
+    proxy: "ProxyApiClient | None" = None,
+    search_context_size: str | None = None,
+    policy: Any | None = None,
+) -> list[str]:
+    """
+    Поиск для курьёзного выпуска: сначала RU-домены из curious_source_hosts.txt, затем зарубежные.
+    """
+    p = policy or get_curious_source_policy()
+    seeds = p.search_seed_urls
+    per_batch_limit = max(14, min(36, max(fetch_limit // 4, 16)))
+    merged: list[str] = []
+    seen: set[str] = set()
+
+    def _accept(urls: list[str]) -> None:
+        for raw in urls:
+            u = str(raw or "").strip()
+            if not u.startswith("http") or not is_curious_policy_source(u, p):
+                continue
+            key = u.lower().rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(u)
+
+    for tier_label, hosts in curious_host_search_groups(p):
+        if not hosts:
+            continue
+        if len(merged) >= fetch_limit:
+            break
+        terms = topic_terms_foreign if tier_label == "Curious-Foreign" else topic_terms_ru
+        for batch in batched_site_host_groups(hosts, batch_size=3):
+            matching_seeds = [s for s in seeds if any(marker in s.lower() for marker in batch)]
+            seed_hint = ""
+            if matching_seeds:
+                seed_hint = " Рекомендуемые разделы: " + ", ".join(matching_seeds[:8]) + ". "
+            site_part = " OR ".join(f"site:{h}" for h in batch)
+            query = (
+                f"{window_prefix}{seed_hint}{terms} "
+                f"Искать ТОЛЬКО на доменах: {', '.join(batch)}. ({site_part}) "
+                f"{product_excludes}"
+            )
+            logger.info(
+                "Курьёз-поиск: %s | hosts=%s limit=%s",
+                tier_label,
+                ",".join(batch),
+                per_batch_limit,
+            )
+            batch_urls = fetch_article_urls_raw_merged(
+                settings,
+                query,
+                limit=per_batch_limit,
+                proxy=proxy,
+                search_context_size=search_context_size,
+                include_domains=list(batch),
+                allowed_hosts=list(batch),
+            )
+            _accept(batch_urls)
+    if merged:
+        logger.info(
+            "Курьёз-поиск: итого URL | count=%s cap=%s",
             len(merged),
             fetch_limit,
         )

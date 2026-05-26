@@ -33,6 +33,11 @@ def ensure_digest_schema_migrations() -> None:
             if nc_names and "headline_editorial_ok" not in nc_names:
                 conn.execute(text("ALTER TABLE news_candidates ADD COLUMN headline_editorial_ok INTEGER NOT NULL DEFAULT 0"))
                 conn.commit()
+            rows_nc = conn.execute(text("PRAGMA table_info(news_candidates)")).fetchall()
+            nc_names = {row[1] for row in rows_nc}
+            if nc_names and "article_excerpt" not in nc_names:
+                conn.execute(text("ALTER TABLE news_candidates ADD COLUMN article_excerpt TEXT NOT NULL DEFAULT ''"))
+                conn.commit()
                 conn.execute(
                     text(
                         "UPDATE news_candidates SET headline_editorial_ok = 1 "
@@ -57,6 +62,13 @@ def ensure_digest_schema_migrations() -> None:
             if "step4_selected_image_variant" not in names:
                 conn.execute(text("ALTER TABLE digests ADD COLUMN step4_selected_image_variant INTEGER"))
                 conn.commit()
+            if "analytics" in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                an_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(analytics)")).fetchall()}
+                if an_cols and "reader_text" not in an_cols:
+                    conn.execute(text("ALTER TABLE analytics ADD COLUMN reader_text TEXT NOT NULL DEFAULT ''"))
+                    conn.commit()
             rows = conn.execute(text("PRAGMA table_info(digests)")).fetchall()
             names = {row[1] for row in rows}
             if "proxyapi_balance_session_start" not in names:
@@ -218,6 +230,12 @@ def ensure_digest_schema_migrations() -> None:
                         "WHERE headline_editorial_ok IS NOT DISTINCT FROM false"
                     )
                 )
+        nc_cols = {c["name"] for c in insp.get_columns("news_candidates")}
+        if "article_excerpt" not in nc_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE news_candidates ADD COLUMN article_excerpt TEXT NOT NULL DEFAULT ''")
+                )
     if "step1_budget_capped" not in cols:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE digests ADD COLUMN step1_budget_capped BOOLEAN NOT NULL DEFAULT false"))
@@ -238,6 +256,11 @@ def ensure_digest_schema_migrations() -> None:
     if "step4_selected_image_variant" not in cols:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE digests ADD COLUMN step4_selected_image_variant INTEGER"))
+    if insp.has_table("analytics"):
+        an_cols = {c["name"] for c in insp.get_columns("analytics")}
+        if "reader_text" not in an_cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE analytics ADD COLUMN reader_text TEXT NOT NULL DEFAULT ''"))
     cols = {c["name"] for c in insp.get_columns("digests")}
     if "proxyapi_balance_session_start" not in cols:
         with engine.begin() as conn:

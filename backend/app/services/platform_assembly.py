@@ -8,7 +8,7 @@ from typing import Any
 
 MAX_NEWS_SEP = "..."
 DZEN_NEWS_SEP = "—"
-SEP_VK = "──────────"
+SEP_VK = "· · ·"
 HEADER_TITLE = "⚡Пять актуальных новостей про ИИ"
 DEFAULT_LEAD = "Коротко: главные сдвиги в мире ИИ и вокруг экосистемы продуктов за сегодня."
 

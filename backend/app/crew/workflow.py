@@ -10,31 +10,48 @@ from crewai.types.usage_metrics import UsageMetrics
 
 from app.crew.agents import create_agents
 from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS
+from app.services.digest_type_policy import (
+    normalize_digest_type,
+    step1_research_editorial_block,
+    step1_scoring_editorial_block,
+)
 from app.services.platform_assembly import assemble_platform_outputs, subscription_md_inline
-from app.services.reader_copy import sanitize_reader_description
+from app.services.reader_copy import build_reader_text_fallback, sanitize_reader_description
 
 _ANALYTICS_EDITORIAL = (
     "Для каждого items[] верни candidate_id, essence, comment, analysis. "
-    "Пиши сразу финальный редакционный текст, не черновик: сервер не должен чинить стиль после тебя. "
-    "Используй title и source_description как фактическую опору, но не пересказывай их механически. "
-    "essence — одно короткое предложение с главной новостью для карточки в UI. "
-    "comment — ГОТОВОЕ описание новости для публикации: 2–3 предложения, живой русский язык, "
-    "без канцелярита, без рекламного тона, без фраз, похожих на генерацию ИИ. "
-    "В каждом comment обязательно ответь на четыре вопроса: краткая суть новости; почему это важно; "
-    "для кого это важно; как это касается читателей дайджеста — какую пользу или вред это может нести "
-    "или уже несёт. Не обязательно перечислять вопросы явно, но все четыре смысла должны быть в тексте. "
+    "Это материал ДЛЯ РЕДАКТОРА дайджеста, не для публикации читателям. "
+    "Используй title, source_description и article_excerpt как фактическую опору; "
+    "article_excerpt — основной источник фактов из текста статьи. "
+    "essence — одна строка с главной новостью для быстрого просмотра в UI. "
+    "analysis — развёрнутая редакторская записка (4–8 предложений, можно структурированно): "
+    "суть; почему важно; для кого важно; польза/вред; последствия; что делать читателю или редакции. "
+    "comment — необязательная короткая пометка редактора (0–2 предложения), не текст для публикации. "
     "Запрещено писать Tier, баллы, статусы верификации, коды отказа, имена агентов, поля JSON и любую внутреннюю кухню. "
-    "Запрещены штампы: «ключевая суть», «важно для рынка ИИ», «меняет расстановку сил», "
-    "«ускорение внедрения», «игроки экосистемы», «инсайт», «в контексте». "
-    "analysis — развёрнутый комментарий для редактора (4–6 предложений), тоже без служебки. "
     "overall_analysis сформируй здесь же, на шаге аналитики, после анализа всех 5 выбранных новостей: "
     "это не вступление для площадок, а общий вывод выпуска на 3–5 предложений. Покажи общую линию выпуска, "
     "какие сдвиги видны по пяти новостям вместе, кому стоит обратить внимание и что это даёт или чем рискует "
     "аудитория дайджеста. "
-    "self_check[] — добавь проверки: comment_2_3_sentences, comment_has_what_why_who_reader_impact, "
-    "overall_analysis_from_selected_five, no_service_info, no_ai_cliches. "
+    "self_check[] — добавь проверки: analysis_covers_six_angles, editor_not_reader_copy, "
+    "overall_analysis_from_selected_five, no_service_info. "
     "hashtags[] — 4–6 тегов с #. "
     "Ответ — только JSON, без markdown и текста вокруг."
+)
+
+_READER_COPY_EDITORIAL = (
+    "Для каждого items[] верни candidate_id и reader_text. "
+    "reader_text — ГОТОВОЕ описание новости для читателей финального дайджеста: 2–4 коротких простых "
+    "предложения (НЕ БОЛЕЕ 450 символов, без учёта заголовка новости). "
+    "Пиши простым разговорным русским языком, как будто объясняешь другу. "
+    "НЕ используй официальный, канцелярский или «новостной» стиль. "
+    "Синтезируй essence, analysis и article_excerpt: суть + почему это важно + что из этого следует. "
+    "Без маркированных списков, подзаголовков и вводных оборотов типа «стоит отметить», «важно понимать». "
+    "Допустима лёгкая ирония, если она не искажает факты. "
+    "Без канцелярита, официоза, штампов и признаков генерации ИИ. "
+    "Не копируй article_excerpt дословно; не ссылайся на «редактора», «аналитику» или внутренние поля. "
+    "Только проверяемые факты из article_excerpt и analysis. "
+    "self_check[] — reader_text_max_450_chars, simple_language, no_service_info, no_ai_cliches, facts_from_excerpt. "
+    "Ответ — только JSON: items[], self_check[], без markdown и текста вокруг."
 )
 
 
@@ -80,15 +97,62 @@ def _fallback_analytics_item(news: dict[str, Any]) -> dict[str, Any]:
     return {
         "candidate_id": int(news["candidate_id"]),
         "essence": short,
-        "comment": (
-            f"{short} Стоит открыть первоисточник и решить, "
-            "затрагивает ли это ваши продукты, бюджет или конкурентов."
-        ),
+        "comment": "Проверить факты по первоисточнику перед финальным текстом для читателя.",
         "analysis": (
-            f"По заголовку: {short} Для полной картины нужен текст статьи — "
-            "сверьте факты с планами команды и сроками, если тема в вашем поле."
+            f"Суть: {short} "
+            "Почему важно: оценить по тексту статьи. "
+            "Для кого: команды, которым затрагивает тема ИИ. "
+            "Польза/вред и последствия — уточнить по article_excerpt. "
+            "Что делать: сверить с планами и сроками, если тема в вашем поле."
         ),
     }
+
+
+def _fallback_reader_text_item(news: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": int(news["candidate_id"]),
+        "reader_text": build_reader_text_fallback(
+            str(news.get("essence") or news.get("title") or ""),
+            str(news.get("analysis") or ""),
+        ),
+    }
+
+
+def complete_reader_descriptions_result(
+    result: dict[str, Any], reader_items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    expected = [int(x["candidate_id"]) for x in reader_items]
+    news_by_id = {int(x["candidate_id"]): x for x in reader_items}
+    items = result.get("items")
+    if not isinstance(items, list):
+        items = []
+    by_id: dict[int, dict[str, Any]] = {}
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        try:
+            cid = int(row.get("candidate_id"))
+        except (TypeError, ValueError):
+            continue
+        if cid not in news_by_id:
+            continue
+        by_id[cid] = {
+            "candidate_id": cid,
+            "reader_text": sanitize_reader_description(str(row.get("reader_text") or "")),
+        }
+    complete_items: list[dict[str, Any]] = []
+    for cid in expected:
+        news = news_by_id[cid]
+        if cid in by_id and by_id[cid]["reader_text"]:
+            complete_items.append(by_id[cid])
+        else:
+            complete_items.append(_fallback_reader_text_item(news))
+    out = dict(result)
+    out["items"] = complete_items
+    checks = out.get("self_check", [])
+    if not isinstance(checks, list) or not checks:
+        out["self_check"] = [{"check_name": "reader_text_fallback", "status": "pass", "comment": "Ок"}]
+    return out
 
 
 def complete_analytics_result(result: dict[str, Any], selected_news: list[dict[str, Any]]) -> dict[str, Any]:
@@ -169,11 +233,13 @@ class CrewWorkflow:
         return f"Контракт поведения (обязательно):\n{self.contract_prompt}\n\nЗадача:\n{text}"
 
     def run_candidates_pipeline(self, digest_type: str, now_msk: str, manual_urls: list[str]) -> list[dict[str, Any]]:
-        research_rows = self.run_candidates_research(digest_type, now_msk, manual_urls)
+        dtype = normalize_digest_type(digest_type)
+        research_rows = self.run_candidates_research(dtype, now_msk, manual_urls)
         verify_rows = self.run_candidates_verify(research_rows)
-        return self.run_candidates_score(verify_rows, now_msk)
+        return self.run_candidates_score(verify_rows, now_msk=now_msk, digest_type=dtype)
 
     def run_candidates_research(self, digest_type: str, now_msk: str, manual_urls: list[str]) -> list[dict[str, Any]]:
+        dtype = normalize_digest_type(digest_type)
         prompt = (
             "Подготовь массив из 10 кандидатов новостей про ИИ в JSON. "
             "Поля: original_number,title,url,source,published_at,category,description,tier,"
@@ -186,13 +252,10 @@ class CrewWorkflow:
             "Поле tier заполняй как Tier-1..Tier-5 по наилучшему соответствию. "
             "URL агрегаторов, лент и поисковых страниц не подбирай — "
             "если URL попал из manual_urls, пометь is_aggregator и низкий балл. "
-            "При равной новизне отдавай предпочтение более высокому Tier (меньший номер). "
-            "Включай корпоративные пресс-релизы и официальные заявления только как НОВОСТИ: факты, планы, прорывы, "
-            "регулирование, крупные внедрения, инвестиции, партнёрства — не страницы инструментов и не «новая функция бота». "
+            "При равной новизне отдавай предпочтение более высокому Tier (меньший номер), если режим serious; "
+            "в режиме curious — предпочтение более забавному/неожиданному углу, а не официозу. "
             "Не подбирай URL разделов /product, /tools, /features, /pricing, /demo, лендинги сервисов и обзоры «как пользоваться». "
-            "В пуле таких новостных пресс/официальных материалов — 20-35% (для 10 новостей это 2-3). "
-            "Из одного источника — не более 2 новостей. "
-            "Доля российских источников — 30-50% (для 10 новостей это 3-5). "
+            f"{step1_research_editorial_block(dtype)} "
             "Каждый объект: поле url должно быть прямой ссылкой на ту же HTML-страницу, что описывает title "
             "(после открытия url в браузере заголовок вкладки/статьи должен соответствовать title); "
             "не подставляй URL главной сайта, поиска или ленты вместо URL материала. "
@@ -201,7 +264,7 @@ class CrewWorkflow:
             "КРИТИЧНО: не выдумывай URL. Каждый url должен быть реальной страницей, которую можно открыть в браузере прямо сейчас. "
             "Если не уверен в существовании ссылки — не включай кандидата. "
             "Ответ — только один JSON-массив из 10 объектов, без markdown-ограждений и без текста до/после JSON. "
-            f"digest_type={digest_type}, now_msk={now_msk}, manual_urls={manual_urls}"
+            f"digest_type={dtype}, now_msk={now_msk}, manual_urls={manual_urls}"
         )
         research_task = Task(
             description=self._with_contract(prompt),
@@ -214,6 +277,7 @@ class CrewWorkflow:
 
     def run_candidates_refill(self, digest_type: str, now_msk: str, excluded_urls: list[str]) -> list[dict[str, Any]]:
         """Дополнительный проход LLM: новые URL, не пересекающиеся с excluded_urls."""
+        dtype = normalize_digest_type(digest_type)
         excluded_preview = excluded_urls[:40]
         prompt = (
             "Подготовь массив из 10 НОВЫХ кандидатов новостей про ИИ в JSON. "
@@ -221,9 +285,7 @@ class CrewWorkflow:
             "significance_score,novelty_score,impact_score,total_score,reliability_status,"
             "is_aggregator,is_duplicate,is_foreign_agent,verification_comment,link_status. "
             "Нельзя использовать URL из списка исключений (ни один из них, ни очевидные дубликаты того же материала). "
-            "Соблюдай баланс пула: новостные пресс-релизы/официальные заявления (факты, планы, прорывы) — 20-35%, "
-            "без промо инструментов и страниц функционала, "
-            "российские источники — 30-50%, из одного источника не более 2 новостей. "
+            f"{step1_research_editorial_block(dtype)} "
             "Не выдумывай несуществующие адреса — только реальные прямые ссылки на страницы статей. "
             "Каждый url должен вести на ту же публикацию, что и title. "
             "Агрегаторы и дайджесты можно использовать только для обнаружения первоисточников; "
@@ -232,7 +294,7 @@ class CrewWorkflow:
             "Предпочитай страницы с признаками article-page (og:type=article, article:published_time, JSON-LD NewsArticle/Article). "
             f"Исключённые URL: {excluded_preview}. "
             "Ответ — только один JSON-массив без markdown и без текста до/после JSON. "
-            f"digest_type={digest_type}, now_msk={now_msk}"
+            f"digest_type={dtype}, now_msk={now_msk}"
         )
         research_task = Task(
             description=self._with_contract(prompt),
@@ -264,11 +326,19 @@ class CrewWorkflow:
         raw = self._kickoff(verify_crew)
         return _extract_candidate_list(raw)[:15]
 
-    def run_candidates_score(self, verify_rows: list[dict[str, Any]], now_msk: str) -> list[dict[str, Any]]:
+    def run_candidates_score(
+        self,
+        verify_rows: list[dict[str, Any]],
+        now_msk: str,
+        *,
+        digest_type: str = "serious",
+    ) -> list[dict[str, Any]]:
+        dtype = normalize_digest_type(digest_type)
         score_task = Task(
             description=self._with_contract(
                 "Оцени и проставь scoring 1-3, total_score 3-9, сохрани баланс категорий. "
                 "Учитывай Tier из контракта: при прочих равных более высокий приоритет у Tier-1, затем Tier-2 и т.д. "
+                f"{step1_scoring_editorial_block(dtype)} "
                 "Не меняй поля идентичности материала: original_number, url, title, source, published_at, category. "
                 "Не добавляй новые URL и не удаляй существующие: можно менять только оценочные поля и служебные флаги пригодности. "
                 "Ответ — только один JSON-массив из 10 объектов, без markdown-ограждений и без текста до/после JSON. "
@@ -331,6 +401,24 @@ class CrewWorkflow:
                 "self_check": [],
             },
             selected_news,
+        )
+
+    def run_reader_descriptions(self, reader_items: list[dict[str, Any]]) -> dict[str, Any]:
+        task = Task(
+            description=self._with_contract(
+                "Сформируй JSON: items[], self_check[]. "
+                f"{_READER_COPY_EDITORIAL} Вход: {json.dumps(reader_items, ensure_ascii=False)}"
+            ),
+            expected_output="JSON объект с reader_text по каждой новости",
+            agent=self.agents.reader_copy,
+        )
+        crew = Crew(agents=[self.agents.reader_copy], tasks=[task], process=Process.sequential, verbose=False)
+        parsed = _extract_json(self._kickoff(crew), {})
+        if isinstance(parsed, dict) and parsed.get("items"):
+            return complete_reader_descriptions_result(parsed, reader_items)
+        return complete_reader_descriptions_result(
+            {"items": [_fallback_reader_text_item(item) for item in reader_items], "self_check": []},
+            reader_items,
         )
 
     def run_image_prompt(self, hook_variant: str, selected_news: list[dict[str, Any]]) -> str:

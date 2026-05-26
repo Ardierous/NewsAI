@@ -401,6 +401,38 @@ input[type="checkbox"] {
   user-select: none;
 }
 
+.digest-step-summary--with-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.digest-step-summary-text {
+  user-select: text;
+  cursor: text;
+  flex: 1 1 240px;
+}
+
+.digest-copy-line-btn {
+  flex: 0 0 auto;
+  font-size: 0.82rem;
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: 6px;
+  border: 1px solid #475569;
+  background: #1e293b;
+  color: #e2e8f0;
+  cursor: pointer;
+  user-select: none;
+}
+
+.digest-copy-line-btn:hover {
+  border-color: #64748b;
+  background: #334155;
+}
+
 .digest-step-summary::-webkit-details-marker {
   display: none;
 }

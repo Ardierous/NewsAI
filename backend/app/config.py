@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     step1_manual_ratings_path: Path = BASE_DIR / "storage" / "step1_manual_ratings.json"
     prompts_path: Path = BASE_DIR / "app" / "prompts" / "digest_contract.txt"
     source_tiers_path: Path = BASE_DIR / "app" / "prompts" / "source_tiers.txt"
+    curious_source_hosts_path: Path = BASE_DIR / "app" / "prompts" / "curious_source_hosts.txt"
 
 
 def _apply_pipeline_settings(settings: Settings) -> None:

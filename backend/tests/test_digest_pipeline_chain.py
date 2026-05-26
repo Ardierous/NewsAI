@@ -1,5 +1,6 @@
 """Сквозной офлайн-тест пайплайна шагов 0→4 без live ProxyAPI."""
 
+import json
 from datetime import date
 from types import SimpleNamespace
 
@@ -28,9 +29,10 @@ def _isolated_step1_filter_settings(tmp_path, monkeypatch):
     path = tmp_path / "step1_filter_settings.json"
     monkeypatch.setattr(settings_mod, "_STEP1_FILTER_SETTINGS_PATH", path)
     cfg = _bootstrap_filter_config()
-    cfg["min_discovered_pages"] = 10
-    cfg["min_collection_iterations"] = 1
-    save_step1_filter_settings(cfg)
+    for key in ("serious", "curious"):
+        cfg[key]["min_discovered_pages"] = 10
+        cfg[key]["min_collection_iterations"] = 1
+    path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
     yield
 
 
@@ -89,7 +91,7 @@ def _make_chain_service(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[Dige
     monkeypatch.setattr(ds, "_expand_listing_url_candidates", _fake_expand_listing)
 
     score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
-    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk: score_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
 
     def fake_verify(_digest, item: dict, **_kwargs) -> None:
         item["headline_editorial_ok"] = True
@@ -102,6 +104,7 @@ def _make_chain_service(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[Dige
         item["published_at"] = "2026-05-14T12:00:00"
         item["category"] = "technology"
         item["description"] = "Описание"
+        item["article_excerpt"] = "искусственный интеллект нейросети машинное обучение " * 20
         item["significance_score"] = 2
         item["novelty_score"] = 2
         item["impact_score"] = 2
@@ -129,8 +132,8 @@ def _make_chain_service(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[Dige
                 {
                     "candidate_id": row["candidate_id"],
                     "essence": f"Суть {row['title'][:40]}",
-                    "comment": "Комментарий для публикации.",
-                    "analysis": "Анализ последствий.",
+                    "comment": "Заметка редактора.",
+                    "analysis": "Анализ последствий для редактора.",
                 }
                 for row in payload
             ],
@@ -140,6 +143,24 @@ def _make_chain_service(monkeypatch: pytest.MonkeyPatch, tmp_path) -> tuple[Dige
         }
 
     monkeypatch.setattr(service.workflow, "run_analytics", fake_analytics)
+
+    def fake_reader_descriptions(items):
+        return {
+            "items": [
+                {
+                    "candidate_id": row["candidate_id"],
+                    "reader_text": (
+                        f"{row['title'][:60]}. "
+                        "Это важно тем, кто следит за ИИ. "
+                        "Стоит проверить детали в первоисточнике."
+                    ),
+                }
+                for row in items
+            ],
+            "self_check": [{"check_name": "reader_text", "status": "pass", "comment": "ok"}],
+        }
+
+    monkeypatch.setattr(service.workflow, "run_reader_descriptions", fake_reader_descriptions)
 
     monkeypatch.setattr(
         service.workflow,
@@ -188,6 +209,8 @@ def test_digest_pipeline_steps_0_to_4(monkeypatch: pytest.MonkeyPatch, tmp_path)
     assert digest.status == STATUS_FINAL
     assert "telegram" in texts["platforms"]
     assert service.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).count() >= 2
+    analytics_rows = service.db.query(Analytics).filter(Analytics.digest_id == digest.id).all()
+    assert all((row.reader_text or "").strip() for row in analytics_rows)
     docx_asset = (
         service.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "docx").order_by(Asset.id.desc()).first()
     )

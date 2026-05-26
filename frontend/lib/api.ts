@@ -187,13 +187,20 @@ export const api = {
     }
   },
   selectNews: (id: number, selected_ids: number[], top5: boolean) =>
-    request<any>(`/digests/${id}/step2/select`, { method: "POST", body: JSON.stringify({ selected_ids, top5 }) }),
+    request<any>(`/digests/${id}/step2/select`, {
+      method: "POST",
+      body: JSON.stringify({ selected_ids, top5 }),
+    }),
   orderNews: (id: number, ordered_candidate_ids: number[]) =>
-    request<any>(`/digests/${id}/step2/order`, { method: "POST", body: JSON.stringify({ ordered_candidate_ids }) }),
+    request<any>(`/digests/${id}/step2/order`, {
+      method: "POST",
+      body: JSON.stringify({ ordered_candidate_ids }),
+      timeoutMs: LONG_POST_MS,
+    }),
   orderNewsAiOptimal: (id: number) =>
     request<{ ordered: { candidate_id: number; output_position: number; ordering_reason: string; title?: string }[] }>(
       `/digests/${id}/step2/order/ai-optimal`,
-      { method: "POST", body: "{}" },
+      { method: "POST", body: "{}", timeoutMs: LONG_POST_MS },
     ),
   confirmReady: (id: number, command: string) =>
     request<any>(`/digests/${id}/step3/confirm-ready`, {
