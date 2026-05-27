@@ -73,6 +73,20 @@ def escape_md_link_label(title: str) -> str:
     return title.strip().replace("\\", "\\\\").replace("[", "\\[")
 
 
+def escape_html_text(text: str) -> str:
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def escape_html_attr(text: str) -> str:
+    return escape_html_text(text).replace("'", "&#39;")
+
+
 def compress_paragraphs(text: str, max_blank: int = 1) -> str:
     lines = text.replace("\r\n", "\n").split("\n")
     out: list[str] = []
@@ -94,6 +108,18 @@ def subscription_md_inline() -> str:
         "[ВКонтакте](https://vk.com/extellect) • "
         "[MAX](https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY) • "
         "[Дзен](https://dzen.ru/extellect) • [Boosty](https://boosty.to/extellect)"
+    )
+
+
+def subscription_html_inline() -> str:
+    """Подпись для веб-редактора MAX (вставка HTML из буфера)."""
+    return (
+        "👉 Подпишитесь на ExTellect: "
+        '<a href="https://t.me/extellect">Telegram</a> • '
+        '<a href="https://vk.com/extellect">ВКонтакте</a> • '
+        '<a href="https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY">MAX</a> • '
+        '<a href="https://dzen.ru/extellect">Дзен</a> • '
+        '<a href="https://boosty.to/extellect">Boosty</a>'
     )
 
 
@@ -147,6 +173,47 @@ def resolve_lead(payload: dict[str, Any], platform: str = "telegram") -> str:
     return DEFAULT_LEAD
 
 
+HTML_LAYOUT_PLATFORMS = frozenset({"max", "dzen"})
+
+
+def needs_html_layout_refresh(platform: str, content: str) -> bool:
+    """True, если текст MAX/Дзен сохранён в старом markdown/plain формате."""
+    if platform not in HTML_LAYOUT_PLATFORMS:
+        return False
+    text = str(content or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    if "<a href=" in lower and "<b>" in lower:
+        return False
+    if "**" in text:
+        return True
+    return bool(re.search(r"\[[^\]]+\]\([^)]+\)", text))
+
+
+def extract_lead_from_legacy_platform_text(content: str) -> str:
+    """Вводный абзац из текста до первой новости (➤) или хэштегов."""
+    lines = str(content or "").replace("\r\n", "\n").split("\n")
+    idx = 0
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    if idx >= len(lines):
+        return ""
+    idx += 1
+    while idx < len(lines) and not lines[idx].strip():
+        idx += 1
+    lead_lines: list[str] = []
+    while idx < len(lines):
+        stripped = lines[idx].strip()
+        if stripped.startswith("➤") or stripped.startswith("#"):
+            break
+        if stripped in {MAX_NEWS_SEP, DZEN_NEWS_SEP, SEP_VK}:
+            break
+        lead_lines.append(lines[idx].rstrip())
+        idx += 1
+    return "\n".join(lead_lines).strip()
+
+
 def _item_summary_short(item: dict[str, Any]) -> str:
     short = str(item.get("summary_short") or "").strip()
     if short:
@@ -159,11 +226,24 @@ def _news_link_line(title: str, url: str) -> str:
     return f"➤ [{safe_title}]({url.strip()})"
 
 
-def _max_news_block(item: dict[str, Any]) -> str:
+def _news_link_html(title: str, url: str) -> str:
+    safe_title = escape_html_text(title.strip())
+    safe_url = escape_html_attr(url.strip())
+    return f'➤ <a href="{safe_url}">{safe_title}</a>'
+
+
+def _html_news_block(item: dict[str, Any], *, max_body_chars: int | None = None) -> str:
     title = str(item["title"]).strip()
     url = str(item["url"]).strip()
-    summary = " ".join(_item_summary_short(item).split())
-    return f"{_news_link_line(title, url)}\n{summary}"
+    body_raw = " ".join(_item_summary_short(item).split())
+    if max_body_chars is not None:
+        body_raw = _truncate_at_word(body_raw, max_body_chars)
+    summary = escape_html_text(body_raw)
+    return f"{_news_link_html(title, url)}<br><br>{summary}"
+
+
+def _max_news_block(item: dict[str, Any]) -> str:
+    return _html_news_block(item)
 
 
 def _truncate_at_word(text: str, max_len: int) -> str:
@@ -188,12 +268,22 @@ def truncate_platform_text(text: str, max_chars: int, *, tail_marker: str = "…
     return chunk.rstrip() + tail_marker
 
 
+def truncate_platform_html(text: str, max_chars: int, *, tail_marker: str = "…") -> str:
+    if len(text) <= max_chars:
+        return text
+    cut = max_chars - len(tail_marker)
+    if cut < 100:
+        return text[:max_chars]
+    chunk = text[:cut]
+    last_break = chunk.rfind("<br><br>")
+    if last_break > cut // 2:
+        chunk = chunk[:last_break]
+    return chunk.rstrip() + tail_marker
+
+
 def _dzen_post_news_block(item: dict[str, Any], *, max_body_chars: int) -> str:
     """Компактный блок для поста Дзена (лимит 4096 на весь пост)."""
-    title = str(item["title"]).strip()
-    url = str(item["url"]).strip()
-    body = _truncate_at_word(" ".join(_item_summary_short(item).split()), max_body_chars)
-    return f"{_news_link_line(title, url)}\n\n{body}"
+    return _html_news_block(item, max_body_chars=max_body_chars)
 
 
 def assemble_telegram(payload: dict[str, Any]) -> str:
@@ -216,19 +306,20 @@ def assemble_telegram(payload: dict[str, Any]) -> str:
 
 
 def assemble_max(payload: dict[str, Any]) -> str:
+    """HTML для веб-редактора MAX: жирная шапка, ссылки в заголовках, отступы через <br>."""
     date_ru = format_digest_date_ru(payload.get("date"))
     lead = resolve_lead(payload, "max")
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
     news_blocks = [_max_news_block(item) for item in payload.get("selected_news") or []]
-    body = f"\n\n{MAX_NEWS_SEP}\n\n".join(news_blocks)
+    body = f"<br><br>{MAX_NEWS_SEP}<br><br>".join(news_blocks)
     text = (
-        f"**{HEADER_TITLE} | {date_ru}**\n\n"
-        f"{lead}\n\n"
-        f"{body}\n\n"
-        f"{subscription_md_inline()}\n\n"
-        f"{tags}"
+        f"<b>{escape_html_text(HEADER_TITLE)} | {escape_html_text(date_ru)}</b><br><br>"
+        f"{escape_html_text(lead)}<br><br>"
+        f"{body}<br><br>"
+        f"{subscription_html_inline()}<br><br>"
+        f"{escape_html_text(tags)}"
     )
-    return truncate_platform_text(compress_paragraphs(fix_markdown_links(text)), MAX_PLATFORM_MAX_CHARS)
+    return truncate_platform_html(text, MAX_PLATFORM_MAX_CHARS)
 
 
 def assemble_vk(payload: dict[str, Any]) -> str:
@@ -254,25 +345,27 @@ def assemble_vk(payload: dict[str, Any]) -> str:
 
 
 def assemble_dzen(payload: dict[str, Any]) -> str:
-    """Пост для поля «Пост» в Дзене — не более 4096 символов (см. справку Дзена)."""
+    """HTML для веб-редактора Дзена — не более 4096 символов (см. справку Дзена)."""
     date_ru = format_digest_date_ru(payload.get("date"))
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 3, 5)
     intro = str(payload.get("dzen_intro") or "").strip()
     if not intro:
         intro = DEFAULT_LEAD
     intro = _truncate_at_word(intro, 280)
-    footer = f"\n\n{subscription_md_inline()}\n\n{tags}"
-    header = f"**{HEADER_TITLE} | {date_ru}**\n\n{intro}\n\n"
+    footer = f"<br><br>{subscription_html_inline()}<br><br>{escape_html_text(tags)}"
+    header = (
+        f"<b>{escape_html_text(HEADER_TITLE)} | {escape_html_text(date_ru)}</b><br><br>"
+        f"{escape_html_text(intro)}<br><br>"
+    )
     news = list(payload.get("selected_news") or [])
     n = max(len(news), 1)
     budget = DZEN_POST_MAX_CHARS - len(header) - len(footer)
-    per_news = max(180, (budget // n) - 80)
+    per_news = max(180, (budget // n) - 120)
     dzen_blocks = [_dzen_post_news_block(item, max_body_chars=per_news) for item in news]
-    body = f"\n\n{DZEN_NEWS_SEP}\n\n".join(dzen_blocks)
+    sep = f"<br><br>{escape_html_text(DZEN_NEWS_SEP)}<br><br>"
+    body = sep.join(dzen_blocks)
     text = header + body + footer
-    if len(text) > DZEN_POST_MAX_CHARS:
-        text = truncate_platform_text(text, DZEN_POST_MAX_CHARS)
-    return compress_paragraphs(fix_markdown_links(text))
+    return truncate_platform_html(text, DZEN_POST_MAX_CHARS)
 
 
 def assemble_platform_outputs(payload: dict[str, Any], platforms: list[str] | None = None) -> dict[str, str]:

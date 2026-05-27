@@ -84,6 +84,7 @@ def download_step1_manual_ratings_export(db: Session = Depends(get_db)) -> FileR
 def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     service = DigestService(db)
     digest = service.get_digest(digest_id)
+    service.refresh_stale_html_platform_outputs(digest)
     candidates = db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).order_by(NewsCandidate.original_number).all()
     selected_rows = (
         db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).order_by(SelectedNews.output_position.asc()).all()

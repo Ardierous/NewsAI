@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-05-26 18:31:43 МСК",
+  "updated_at": "2026-05-27 13:09:45 МСК",
   "pool_dates": [
     {
       "pool_date": "2026-05-16",
@@ -1104,6 +1104,31 @@
           "digest_id": 14,
           "discovery_run_id": 46,
           "news_in_pool": 51,
+          "ratings_count": 0,
+          "ratings": []
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-05-27",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-05-27 10:18:21 МСК",
+          "pool_formed_at": "2026-05-27 10:57:29 МСК",
+          "digest_id": 15,
+          "discovery_run_id": 47,
+          "news_in_pool": 85,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 2,
+          "run_started_at": "2026-05-27 11:01:30 МСК",
+          "pool_formed_at": "2026-05-27 11:19:55 МСК",
+          "digest_id": 15,
+          "discovery_run_id": 48,
+          "news_in_pool": 104,
           "ratings_count": 0,
           "ratings": []
         }

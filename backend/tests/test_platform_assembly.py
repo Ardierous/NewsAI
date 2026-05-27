@@ -12,7 +12,10 @@ from app.services.platform_assembly import (
     assemble_vk,
     compress_paragraphs,
     digest_docx_filename,
+    extract_lead_from_legacy_platform_text,
     format_digest_date_ru,
+    needs_html_layout_refresh,
+    subscription_html_inline,
     subscription_md_inline,
 )
 
@@ -64,20 +67,24 @@ def test_telegram_hashtags_separated_from_subscription():
     assert "\n\n" in between
 
 
-def test_max_markdown_header_links_and_inline_subscription():
+def test_max_html_header_links_and_inline_subscription():
     text = assemble_max(_sample_payload())
     assert MAX_NEWS_SEP in text
     assert "———" not in text
     assert text.count("⚡") == 1
-    assert f"**{HEADER_TITLE} | 16 мая 2026**" in text
-    assert re.search(r"➤ \[OpenAI[^\]]+\]\(https://3dnews\.ru/[^\)]+\)\nКомпания объединяет", text)
-    assert subscription_md_inline() in text
+    assert "**" not in text
+    assert f"<b>{HEADER_TITLE} | 16 мая 2026</b>" in text
+    assert re.search(
+        r'➤ <a href="https://3dnews\.ru/1141822/openai-agents">OpenAI[^<]+</a><br><br>Компания объединяет',
+        text,
+    )
+    assert subscription_html_inline() in text
     assert "Telegram: https://t.me/extellect" not in text
     assert text.count("https://3dnews.ru/1141822/openai-agents") == 5
     assert len(text) <= 4000
     sub_end = text.index("boosty.to/extellect")
     tags_start = text.index("#ИИ", sub_end)
-    assert "\n\n" in text[sub_end:tags_start]
+    assert "<br><br>" in text[sub_end:tags_start]
 
 
 def test_vk_hashtags_separated_from_subscription():
@@ -89,25 +96,29 @@ def test_vk_hashtags_separated_from_subscription():
     assert "OPENAI ПЕРЕСТРАИВАЕТСЯ" in text
 
 
-def test_dzen_markdown_header_links_and_inline_subscription():
+def test_dzen_html_header_links_and_inline_subscription():
     text = assemble_dzen(_sample_payload())
     assert DZEN_NEWS_SEP in text
     assert text.count("⚡") == 1
-    assert f"**{HEADER_TITLE} | 16 мая 2026**" in text
-    assert re.search(r"➤ \[OpenAI[^\]]+\]\(https://3dnews\.ru/[^\)]+\)\n\nКомпания объединяет", text)
-    assert subscription_md_inline() in text
+    assert "**" not in text
+    assert f"<b>{HEADER_TITLE} | 16 мая 2026</b>" in text
+    assert re.search(
+        r'➤ <a href="https://3dnews\.ru/1141822/openai-agents">OpenAI[^<]+</a><br><br>Компания объединяет',
+        text,
+    )
+    assert subscription_html_inline() in text
     assert "Telegram: https://t.me/extellect" not in text
     assert "Читать подробнее:" not in text
     assert text.count("https://3dnews.ru/1141822/openai-agents") == 5
     sub_end = text.index("boosty.to/extellect")
     tags_start = text.index("#ИИ", sub_end)
-    assert "\n\n" in text[sub_end:tags_start]
+    assert "<br><br>" in text[sub_end:tags_start]
     assert len(text) <= DZEN_POST_MAX_CHARS
 
 
 def test_dzen_subscription_before_hashtags():
     text = assemble_dzen(_sample_payload())
-    sub = subscription_md_inline()
+    sub = subscription_html_inline()
     assert sub in text
     assert text.index(sub) < text.rfind("#ИИ")
     assert len(text) <= DZEN_POST_MAX_CHARS
@@ -121,3 +132,18 @@ def test_assemble_platform_outputs_all_keys():
     out = assemble_platform_outputs(_sample_payload())
     assert set(out.keys()) == {"telegram", "max", "vk", "dzen"}
     assert all(len(v) > 200 for v in out.values())
+
+
+def test_needs_html_layout_refresh_detects_legacy_markdown():
+    legacy = assemble_telegram(_sample_payload())
+    assert needs_html_layout_refresh("max", legacy)
+    assert needs_html_layout_refresh("dzen", legacy)
+    assert not needs_html_layout_refresh("max", assemble_max(_sample_payload()))
+    assert not needs_html_layout_refresh("telegram", legacy)
+
+
+def test_extract_lead_from_legacy_platform_text():
+    legacy = assemble_telegram(_sample_payload())
+    lead = extract_lead_from_legacy_platform_text(legacy)
+    assert lead.startswith("Коротко:")
+    assert "➤" not in lead

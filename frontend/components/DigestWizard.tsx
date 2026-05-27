@@ -485,6 +485,34 @@ async function copyPlainTextToClipboard(text: string): Promise<void> {
   }
 }
 
+function htmlToPlainText(html: string): string {
+  if (typeof document === "undefined") return html;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  return (doc.body.textContent ?? html).replace(/\u00a0/g, " ").trim();
+}
+
+async function copyHtmlToClipboard(html: string, plainFallback: string): Promise<void> {
+  const wrapped = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
+  try {
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.clipboard?.write &&
+      typeof ClipboardItem !== "undefined"
+    ) {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([wrapped], { type: "text/html" }),
+          "text/plain": new Blob([plainFallback], { type: "text/plain" }),
+        }),
+      ]);
+      return;
+    }
+  } catch {
+    /* fallback на plain text */
+  }
+  await copyPlainTextToClipboard(plainFallback);
+}
+
 type Props = { digestId: number };
 
 type RunningStepKey = "init" | "0" | "1" | "2pick" | "2order" | "3" | "4" | "4img" | "4txt";
@@ -619,7 +647,11 @@ export function DigestWizard({ digestId }: Props) {
   const handleCopyPlatform = useCallback(
     async (platform: string, text: string) => {
       try {
-        await copyPlainTextToClipboard(text);
+        if ((platform === "max" || platform === "dzen") && /<a\s+href=/i.test(text)) {
+          await copyHtmlToClipboard(text, htmlToPlainText(text));
+        } else {
+          await copyPlainTextToClipboard(text);
+        }
         flashCopyFeedback(platform, true);
       } catch {
         flashCopyFeedback(platform, false);
@@ -764,11 +796,11 @@ export function DigestWizard({ digestId }: Props) {
   const canOrder =
     (digest?.selected?.length ?? 0) === 5 &&
     (digestStatus === "selected" || orderEditMode);
+  const analyticsDone = digestStatus === "analytics_ready" || digestStatus === "final_ready";
   const canChangeOrderFromLaterSteps =
     (digest?.selected?.length ?? 0) === 5 &&
     (digestStatus === "analytics_ready" || digestStatus === "final_ready" || analyticsDone);
   const canAnalytics = digestStatus === "selected" || digestStatus === "analytics_ready";
-  const analyticsDone = digestStatus === "analytics_ready" || digestStatus === "final_ready";
   const canStep4 = analyticsDone;
   const isFinal = digestStatus === "final_ready";
   const hasStep4Images = (digest?.image_variants?.length ?? 0) > 0;
@@ -1085,6 +1117,11 @@ export function DigestWizard({ digestId }: Props) {
       await loadDigest({ skipProgress: true });
       if (label.includes("порядок") || label.includes("оптимальн")) {
         setOrderEditMode(false);
+      }
+      if (label.includes("оптимальный порядок по мнению ИИ")) {
+        requestAnimationFrame(() => {
+          step2OrderCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
       }
       if (rk === "2pick") {
         requestAnimationFrame(() => {
@@ -2245,9 +2282,9 @@ export function DigestWizard({ digestId }: Props) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <h3 style={{ margin: 0 }}>
               Настройки фильтра новостей
-              {row?.digest_type === "curious"
+              {digest?.digest?.digest_type === "curious"
                 ? " (курьёзный выпуск)"
-                : row?.digest_type === "serious"
+                : digest?.digest?.digest_type === "serious"
                   ? " (серьёзный выпуск)"
                   : ""}
             </h3>
@@ -2716,7 +2753,8 @@ export function DigestWizard({ digestId }: Props) {
             ) : (
               <>
                 Перетащите карточки в нужной последовательности (1 — верхняя новость выпуска) и сохраните порядок одной из
-                кнопок ниже — после этого обычно автоматически стартует шаг 3.
+                кнопок ниже. Кнопка «Оптимально по мнению ИИ» только переставляет шаг 2; шаг 3 запускается после «Применить
+                порядок».
               </>
             )}
           </p>
@@ -2741,8 +2779,7 @@ export function DigestWizard({ digestId }: Props) {
               ритм, финал) и пишет общую аргументацию плюс пояснение к каждой позиции.{" "}
               <strong>«Применить порядок»</strong> — сохраняет порядок после вашего drag-and-drop.{" "}
               <strong>«Изменить порядок»</strong> — включает редактирование после шага 3 (аналитика и финал сбросятся при
-              сохранении нового порядка). После любой из первых двух кнопок шаг 3 запускается автоматически, если так настроен
-              сервер.
+              сохранении нового порядка). Шаг 3 запускается только после кнопки <strong>«Применить порядок»</strong>.
             </p>
           </WizardWhy>
           {orderedSelectedRows.map((s: any) => (
@@ -2774,7 +2811,7 @@ export function DigestWizard({ digestId }: Props) {
               disabled={!canOrder || selected.length !== 5 || loading}
               title="ProxyAPI gpt-4.1-mini: порядок для удержания читателя (сильный заход, ритм, финал)"
               onClick={() =>
-                run("Шаг 2–3: оптимальный порядок и аналитика (AI, несколько минут)…", async () => {
+                run("Шаг 2: оптимальный порядок по мнению ИИ…", async () => {
                   await api.orderNewsAiOptimal(digestId);
                 })
               }
@@ -2823,7 +2860,7 @@ export function DigestWizard({ digestId }: Props) {
         ) : null}
         <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
           Аналитика — материал <strong>для редактора</strong> (суть, заметки, разбор по каждой новости). Обычно запускается
-          сама сразу после сохранения порядка на шаге 2; дождитесь заполнения блоков ниже (несколько минут).
+          после кнопки «Применить порядок» на шаге 2; дождитесь заполнения блоков ниже (несколько минут).
         </p>
         {!canOrder && !analyticsDone ? (
           <p className="wizard-hint-wait">
@@ -3090,6 +3127,18 @@ export function DigestWizard({ digestId }: Props) {
             return (
               <div key={o.platform} className="card">
                 <h4>{label}</h4>
+                {o.platform === "max" || o.platform === "dzen" ? (
+                  <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
+                    HTML для веб-редактора {label}: жирная шапка, кликабельные заголовки, отступы между абзацами.
+                    Нажмите «Скопировать» и вставьте в поле поста (Ctrl+V) — не копируйте вручную из поля, если нужны
+                    ссылки и жирный текст.
+                    {/\*\*|\\]\(/.test(String(o.content ?? "")) && !/<a\s+href=/i.test(String(o.content ?? "")) ? (
+                      <span style={{ display: "block", color: "#fbbf24", marginTop: 6 }}>
+                        В поле ещё старый markdown — обновите страницу или перезапустите «Шаг 4 — тексты».
+                      </span>
+                    ) : null}
+                  </p>
+                ) : null}
                 <textarea
                   readOnly
                   value={o.content ?? ""}
@@ -3115,7 +3164,11 @@ export function DigestWizard({ digestId }: Props) {
                     Скопировать текст для {label}
                   </button>
                   {st === "ok" ? (
-                    <span style={{ color: "#4ade80", fontSize: "0.9rem" }}>Скопировано — вставьте в редактор площадки (Ctrl+V).</span>
+                    <span style={{ color: "#4ade80", fontSize: "0.9rem" }}>
+                      {o.platform === "max" || o.platform === "dzen"
+                        ? `Скопировано с форматированием — вставьте в веб-редактор ${label} (Ctrl+V).`
+                        : "Скопировано — вставьте в редактор площадки (Ctrl+V)."}
+                    </span>
                   ) : null}
                   {st === "err" ? (
                     <span style={{ color: "#f87171", fontSize: "0.9rem" }}>

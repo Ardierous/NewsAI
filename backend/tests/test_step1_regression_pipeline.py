@@ -678,6 +678,79 @@ def test_select_news_does_not_auto_run_step3(monkeypatch: pytest.MonkeyPatch):
     assert digest.status == STATUS_SELECTED
 
 
+def test_ai_optimal_order_does_not_auto_run_step3(monkeypatch: pytest.MonkeyPatch):
+    """AI-оптимизация меняет только порядок шага 2; шаг 3 не должен стартовать сам."""
+    service, digest = _make_service(monkeypatch)
+    service.settings.auto_run_step3_after_order = True
+    digest.status = STATUS_SELECTED
+    digest.current_step = STATUS_SELECTED
+    calls: list[int] = []
+    monkeypatch.setattr(
+        service,
+        "_run_step3_after_order",
+        lambda digest_id: calls.append(digest_id) or {"items": []},
+    )
+
+    candidate_ids: list[int] = []
+    for idx in range(5):
+        row = NewsCandidate(
+            digest_id=digest.id,
+            original_number=idx + 1,
+            title=f"Новость {idx + 1}",
+            url=f"https://source{idx + 1}.example.com/news/{idx + 1}",
+            source=f"source{idx + 1}.example.com",
+            tier="Tier-2",
+            published_at="2026-05-20T12:00:00",
+            category="search",
+            description="Описание",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=10 - idx,
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+        )
+        service.db.add(row)
+        service.db.flush()
+        candidate_ids.append(row.id)
+        service.db.add(
+            SelectedNews(
+                digest_id=digest.id,
+                candidate_id=row.id,
+                original_number=row.original_number,
+                output_position=idx + 1,
+                ordering_reason="old",
+            )
+        )
+    service.db.commit()
+
+    monkeypatch.setattr(
+        service.proxy,
+        "suggest_news_order",
+        lambda order_input, digest_type, model: {
+            "items": [
+                {
+                    "candidate_id": row["candidate_id"],
+                    "output_position": pos + 1,
+                    "ordering_reason": f"Причина {pos + 1}",
+                }
+                for pos, row in enumerate(reversed(order_input))
+            ],
+            "overall_rationale": "Сильный заход, затем развитие и ясный финал.",
+        },
+    )
+
+    ordered = service.run_step_2_order_ai_optimal(digest.id)
+    service.db.refresh(digest)
+
+    assert calls == []
+    assert digest.status == STATUS_SELECTED
+    assert [row.candidate_id for row in ordered] == list(reversed(candidate_ids))
+    assert service.load_step2_order_rationale(digest.id).startswith("Сильный заход")
+
+
 def test_select_news_manual_picks_ignore_legacy_telegram_manual_required(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
     digest.status = STATUS_STEP1
@@ -963,6 +1036,58 @@ def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.Monke
     assert service.db.query(Analytics).filter(Analytics.digest_id == digest.id).count() == 0
     assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 10
     assert len(rows) >= 10
+
+
+def test_step1_keeps_rebalanced_pool_below_ten_if_top5_is_possible(monkeypatch: pytest.MonkeyPatch):
+    """Если после квот осталось <10, но >=5 кандидатов, шаг 1 не должен падать."""
+    service, digest = _make_service(monkeypatch)
+
+    score_rows: list[dict[str, str]] = []
+    for i in range(16):
+        host_no = (i % 3) + 1
+        score_rows.append(
+            {
+                "original_number": i + 1,
+                "title": f"Candidate {i}",
+                "url": f"https://host{host_no}.example.com/news/{i}",
+            }
+        )
+    monkeypatch.setattr(
+        service.workflow,
+        "run_candidates_research",
+        lambda digest_type, now_msk, manual_urls: score_rows,
+    )
+    monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: [dict(x) for x in research_rows])
+    monkeypatch.setattr(
+        service.workflow,
+        "run_candidates_score",
+        lambda verify_rows, now_msk, **kw: [dict(x) for x in verify_rows],
+    )
+
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["is_aggregator"] = False
+        item["verification_comment"] = ""
+        item["title"] = f"ИИ: {item.get('title', 'Новость')}"
+        item["source"] = "Example"
+        item["published_at"] = "2026-05-12T10:00:00+03:00"
+        item["category"] = "technology"
+        item["description"] = "Описание"
+        item["significance_score"] = 2
+        item["novelty_score"] = 2
+        item["impact_score"] = 2
+        item["total_score"] = 6
+        item["reliability_status"] = "✅ подтверждено"
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+
+    rows = service.run_step_1(digest.id, [])
+    service.db.refresh(digest)
+
+    assert digest.status == STATUS_STEP1
+    assert len(rows) == 6  # 3 источника * лимит 2 новости с источника
+    assert all(bool(r.page_verified) for r in rows)
 
 
 def test_step1_rebuild_from_analytics_ready(monkeypatch: pytest.MonkeyPatch):

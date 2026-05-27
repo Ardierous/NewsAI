@@ -30,7 +30,13 @@ from app.source_tiers_policy import (
 from app.crew.model_policy import AGENT_MODEL_RECOMMENDATIONS, PRICING_RUB, STEP2_AI_ORDER_MODEL
 from app.crew.workflow import CrewWorkflow, complete_analytics_result, current_msk_iso
 from app.services.reader_copy import build_platform_description, sanitize_reader_description
-from app.services.platform_assembly import digest_docx_filename, format_digest_date_ru
+from app.services.platform_assembly import (
+    assemble_platform_outputs,
+    digest_docx_filename,
+    extract_lead_from_legacy_platform_text,
+    format_digest_date_ru,
+    needs_html_layout_refresh,
+)
 from app.models import (
     Analytics,
     Asset,
@@ -2278,6 +2284,67 @@ class DigestService:
         self._repair_orphan_step1_status(digest)
         return digest
 
+    def refresh_stale_html_platform_outputs(self, digest: Digest) -> bool:
+        """Пересобрать MAX/Дzen из данных выпуска, если в БД остался старый markdown."""
+        rows = self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).all()
+        stale_rows = [row for row in rows if needs_html_layout_refresh(row.platform, row.content or "")]
+        if not stale_rows:
+            return False
+        selected_payload = self._step4_selected_payload(digest)
+        if not selected_payload:
+            return False
+
+        by_platform = {row.platform: row.content or "" for row in rows}
+        assembly_payload: dict[str, Any] = {
+            "selected_news": selected_payload,
+            "hashtags": self._step4_hashtags(digest),
+            "date": format_digest_date_ru(digest.date),
+            "overall_analysis": self._step4_overall_analysis(digest),
+        }
+        tg_lead = extract_lead_from_legacy_platform_text(by_platform.get("telegram", ""))
+        if tg_lead:
+            assembly_payload["telegram_lead"] = tg_lead
+        max_lead = extract_lead_from_legacy_platform_text(by_platform.get("max", ""))
+        if max_lead:
+            assembly_payload["max_lead"] = max_lead
+        dzen_intro = extract_lead_from_legacy_platform_text(by_platform.get("dzen", ""))
+        if dzen_intro:
+            assembly_payload["dzen_intro"] = dzen_intro
+
+        platforms = sorted({row.platform for row in stale_rows})
+        regenerated = assemble_platform_outputs(assembly_payload, platforms=platforms)
+        changed = False
+        for row in stale_rows:
+            new_content = regenerated.get(row.platform, "")
+            if not new_content or new_content == row.content:
+                continue
+            row.content = new_content
+            row.character_count = len(new_content)
+            row.qc_status = "layout_refreshed"
+            changed = True
+
+        if not changed:
+            return False
+
+        self.db.commit()
+        docx_asset = (
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest.id, Asset.type == "docx")
+            .order_by(Asset.id.desc())
+            .first()
+        )
+        if docx_asset:
+            docx_path = self.settings.docx_dir / digest_docx_filename(digest.date, digest.id)
+            build_docx(self.db, digest, docx_path)
+            docx_asset.path = str(docx_path)
+            self.db.commit()
+        logger.info(
+            "Обновлена HTML-вёрстка площадок | digest_id=%s platforms=%s",
+            digest.id,
+            ",".join(platforms),
+        )
+        return True
+
     def _repair_orphan_step1_status(self, digest: Digest) -> None:
         """Пул кандидатов есть, а шаги 2–3 пусты — вернуть выбор топ-5."""
         if digest.status in {STATUS_DRAFT, STATUS_STEP0, STATUS_STEP1, STATUS_FINAL}:
@@ -3544,20 +3611,39 @@ class DigestService:
                     ),
                 )
             if len(verified_pool) < STEP1_MIN_VERIFIED:
-                for item in verified_pool_before_rebalance:
-                    fp = _url_fingerprint(str(item.get("url") or ""))
-                    if fp:
-                        preview_by_fp[fp] = dict(item)
-                self._persist_step1_preview_candidates(digest.id, preview_by_fp)
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        f"Подтверждено {len(verified_pool_before_rebalance)} материалов, но в пул с квотами "
-                        f"вошло только {len(verified_pool)} (нужно {STEP1_MIN_VERIFIED}). "
-                        "В шаге 2 показаны все проверенные и отбракованные карточки — добавьте ручные URL с других источников "
-                        "или пересоберите пул."
-                    ),
-                )
+                min_selectable_pool = 5
+                if (
+                    len(verified_pool_before_rebalance) >= STEP1_MIN_VERIFIED
+                    and len(verified_pool) >= min_selectable_pool
+                ):
+                    logger.warning(
+                        "Шаг 1: после квот и лимита источников пул стал меньше минимума, но пригоден для выбора топ-5 | "
+                        "digest_id=%s before_rebalance=%s after_rebalance=%s required=%s",
+                        digest.id,
+                        len(verified_pool_before_rebalance),
+                        len(verified_pool),
+                        STEP1_MIN_VERIFIED,
+                    )
+                    for item in verified_pool_before_rebalance:
+                        fp = _url_fingerprint(str(item.get("url") or ""))
+                        if fp:
+                            preview_by_fp[fp] = dict(item)
+                    self._persist_step1_preview_candidates(digest.id, preview_by_fp)
+                else:
+                    for item in verified_pool_before_rebalance:
+                        fp = _url_fingerprint(str(item.get("url") or ""))
+                        if fp:
+                            preview_by_fp[fp] = dict(item)
+                    self._persist_step1_preview_candidates(digest.id, preview_by_fp)
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            f"Подтверждено {len(verified_pool_before_rebalance)} материалов, но в пул с квотами "
+                            f"вошло только {len(verified_pool)} (нужно {STEP1_MIN_VERIFIED}). "
+                            "В шаге 2 показаны все проверенные и отбракованные карточки — добавьте ручные URL с других источников "
+                            "или пересоберите пул."
+                        ),
+                    )
 
             # Кандидатов удаляем только после успешного rebalance.
             self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
@@ -3935,8 +4021,7 @@ class DigestService:
             digest.id,
             [(r.candidate_id, r.output_position) for r in ordered],
         )
-        if self.settings.auto_run_step3_after_order:
-            self._run_step3_after_order(digest.id)
+        # После AI-оптимизации остаёмся на шаге 2: редактор должен подтвердить порядок вручную.
         return ordered
 
     def _run_step3_after_order(self, digest_id: int) -> dict[str, Any]:
