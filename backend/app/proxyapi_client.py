@@ -205,35 +205,66 @@ class ProxyApiClient:
         user_prompt = (
             f"digest_type={digest_type}\n"
             f"Новости для упорядочивания:\n{json.dumps(items, ensure_ascii=False)}\n"
-            "Поля ответа каждого объекта: candidate_id (int), output_position (1..5, все уникальны), "
-            "ordering_reason (1–2 предложения на русском: почему эта позиция удерживает читателя)."
+            "Ответ — JSON-объект: overall_rationale (3–5 предложений, почему этот порядок оптимален для читателя), "
+            "items — массив из 5 объектов с полями candidate_id (int), output_position (1..5, все уникальны), "
+            "ordering_reason (1–2 предложения: почему эта позиция удерживает читателя)."
         )
         raw = self.chat(system_prompt, user_prompt, model=use_model)
-        parsed = _parse_ordering_response(raw)
+        parsed_items, overall_rationale = _parse_ordering_payload(raw)
         allowed_ids = {int(x["candidate_id"]) for x in items if x.get("candidate_id") is not None}
-        if not isinstance(parsed, list) or len(parsed) != 5:
-            return _fallback_news_order(items)
+        if not isinstance(parsed_items, list) or len(parsed_items) != 5:
+            fallback_items = _fallback_news_order(items)
+            return {
+                "items": fallback_items,
+                "overall_rationale": (
+                    "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                ),
+            }
         out: list[dict[str, Any]] = []
         seen_pos: set[int] = set()
         seen_ids: set[int] = set()
-        for row in parsed:
+        for row in parsed_items:
             if not isinstance(row, dict):
-                return _fallback_news_order(items)
+                fallback_items = _fallback_news_order(items)
+                return {
+                    "items": fallback_items,
+                    "overall_rationale": (
+                        "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                    ),
+                }
             try:
                 cid = int(row.get("candidate_id"))
                 pos = int(row.get("output_position"))
             except (TypeError, ValueError):
-                return _fallback_news_order(items)
+                fallback_items = _fallback_news_order(items)
+                return {
+                    "items": fallback_items,
+                    "overall_rationale": (
+                        "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                    ),
+                }
             if cid not in allowed_ids or cid in seen_ids or pos < 1 or pos > 5 or pos in seen_pos:
-                return _fallback_news_order(items)
+                fallback_items = _fallback_news_order(items)
+                return {
+                    "items": fallback_items,
+                    "overall_rationale": (
+                        "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                    ),
+                }
             seen_ids.add(cid)
             seen_pos.add(pos)
             reason = str(row.get("ordering_reason") or "").strip() or f"Позиция {pos}: редакционный ритм выпуска."
             out.append({"candidate_id": cid, "output_position": pos, "ordering_reason": reason[:500]})
         if seen_ids != allowed_ids or seen_pos != {1, 2, 3, 4, 5}:
-            return _fallback_news_order(items)
+            fallback_items = _fallback_news_order(items)
+            return {
+                "items": fallback_items,
+                "overall_rationale": (
+                    "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                ),
+            }
         out.sort(key=lambda x: int(x["output_position"]))
-        return out
+        return {"items": out, "overall_rationale": overall_rationale[:2000]}
 
     def response_json(self, system_prompt: str, user_prompt: str, response_schema: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -260,11 +291,15 @@ def _parse_ordering_response(raw: str) -> Any:
     if m:
         text = m.group(1).strip()
     try:
-        if text.startswith("["):
+        if text.startswith("[") or text.startswith("{"):
             return json.loads(text)
     except json.JSONDecodeError:
         pass
     try:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            return json.loads(text[start : end + 1])
         start = text.find("[")
         end = text.rfind("]")
         if start >= 0 and end > start:
@@ -272,6 +307,18 @@ def _parse_ordering_response(raw: str) -> Any:
     except json.JSONDecodeError:
         return []
     return []
+
+
+def _parse_ordering_payload(raw: str) -> tuple[list[Any], str]:
+    parsed = _parse_ordering_response(raw)
+    if isinstance(parsed, dict):
+        items = parsed.get("items")
+        rationale = str(parsed.get("overall_rationale") or "").strip()
+        if isinstance(items, list):
+            return items, rationale
+    if isinstance(parsed, list):
+        return parsed, ""
+    return [], ""
 
 
 def _fallback_news_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:

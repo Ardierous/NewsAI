@@ -525,6 +525,7 @@ export function DigestWizard({ digestId }: Props) {
   const [error, setError] = useState("");
   const [manualUrls, setManualUrls] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
+  const [orderEditMode, setOrderEditMode] = useState(false);
   const [hookVariant, setHookVariant] = useState<"A" | "B" | "V" | "">("");
   const [step4Platforms, setStep4Platforms] = useState<Record<string, boolean>>({
     telegram: true,
@@ -750,15 +751,22 @@ export function DigestWizard({ digestId }: Props) {
   const hasConfirmedSelection = (digest?.selected?.length ?? 0) > 0;
   const hasAnalyticsBlocks = (digest?.analytics?.length ?? 0) > 0;
   const canSelect =
-    digestStatus === "step_1_candidates" ||
-    (hasCandidatePool &&
-      hasSelectableInPool &&
-      !hasConfirmedSelection &&
-      !hasAnalyticsBlocks &&
-      digestStatus !== "final_ready" &&
-      digestStatus !== "draft" &&
-      digestStatus !== "step_0");
-  const canOrder = digestStatus === "selected";
+    hasCandidatePool &&
+    hasSelectableInPool &&
+    digestStatus !== "draft" &&
+    digestStatus !== "step_0";
+  const selectionWasSaved =
+    hasConfirmedSelection ||
+    hasAnalyticsBlocks ||
+    digestStatus === "selected" ||
+    digestStatus === "analytics_ready" ||
+    digestStatus === "final_ready";
+  const canOrder =
+    (digest?.selected?.length ?? 0) === 5 &&
+    (digestStatus === "selected" || orderEditMode);
+  const canChangeOrderFromLaterSteps =
+    (digest?.selected?.length ?? 0) === 5 &&
+    (digestStatus === "analytics_ready" || digestStatus === "final_ready" || analyticsDone);
   const canAnalytics = digestStatus === "selected" || digestStatus === "analytics_ready";
   const analyticsDone = digestStatus === "analytics_ready" || digestStatus === "final_ready";
   const canStep4 = analyticsDone;
@@ -1021,6 +1029,13 @@ export function DigestWizard({ digestId }: Props) {
     }
   }, []);
 
+  const scrollToOrderEdit = useCallback(() => {
+    setOrderEditMode(true);
+    requestAnimationFrame(() => {
+      step2OrderCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }, []);
+
   const manualUrlList = useMemo(
     () =>
       manualUrls
@@ -1068,6 +1083,9 @@ export function DigestWizard({ digestId }: Props) {
         setProgressLabel("Обновление данных…");
       }
       await loadDigest({ skipProgress: true });
+      if (label.includes("порядок") || label.includes("оптимальн")) {
+        setOrderEditMode(false);
+      }
       if (rk === "2pick") {
         requestAnimationFrame(() => {
           step2OrderCardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1491,8 +1509,8 @@ export function DigestWizard({ digestId }: Props) {
               : "—"}
         </div>
         <p className="wizard-hint-do">
-          Идите по шагам сверху вниз: <strong>0 → 1 → 2</strong> (выбор и при желании порядок) → <strong>3 → 4</strong>. Поле
-          статуса в шапке показывает, на каком этапе вы сейчас.
+          Идите по шагам сверху вниз: <strong>0 → 1</strong> → <strong>2</strong> (сначала выбор пятёрки, затем порядок) →{" "}
+          <strong>3 → 4</strong>. Статус в шапке показывает, на каком этапе выпуск на сервере.
         </p>
         <WizardWhy summary="Что означают статус и суммы в рублях">
           <p>
@@ -2451,8 +2469,8 @@ export function DigestWizard({ digestId }: Props) {
           <StepProgressBar active={runningStepKey === "2pick"} />
           {showRebuildPoolButton && pastStep2ForRebuild ? (
             <p className="wizard-hint-warn" style={{ marginTop: 0, marginBottom: 12, fontSize: "0.92rem" }}>
-              Выпуск уже прошёл выбор или аналитику. Пересборка пула сбросит шаги 2–4 — затем снова отметьте пятёрку и пройдите
-              порядок и аналитику.
+              Выпуск уже прошёл выбор или аналитику. Полная пересборка пула сбросит шаги 2–4 — снова отметьте пятёрку,
+              задайте порядок и дождитесь аналитики.
             </p>
           ) : null}
           {step1CollectionInProgress && candidatesSorted.length === 0 ? (
@@ -2477,8 +2495,19 @@ export function DigestWizard({ digestId }: Props) {
           ) : null}
           {canSelect && candidatesSorted.length > 0 ? (
             <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-              Отметьте ровно <strong>пять</strong> чекбоксов у строк с зелёной меткой «Можно в топ‑5», затем нажмите{" "}
-              <strong>«Подтвердить 5 новостей»</strong> или <strong>«Оставь топ‑5»</strong>.
+              {selectionWasSaved ? (
+                <>
+                  Пятёрку можно изменить в любой момент: отметьте новые галочки и нажмите{" "}
+                  <strong>«Подтвердить 5 новостей»</strong>. Если аналитика или финал уже были — они сбросятся. Дальше —
+                  порядок и шаг 3.
+                </>
+              ) : (
+                <>
+                  Отметьте ровно <strong>пять</strong> чекбоксов у строк с «Можно в топ‑5», затем{" "}
+                  <strong>«Подтвердить 5 новостей»</strong> (ваш выбор) или <strong>«Оставь топ‑5»</strong> (лучшие по
+                  баллу). Это только сохраняет состав — аналитика пойдёт после порядка ниже.
+                </>
+              )}
             </p>
           ) : null}
           {candidatesSorted.length > 0 ? (
@@ -2654,7 +2683,7 @@ export function DigestWizard({ digestId }: Props) {
             <button
               type="button"
               disabled={!canSelect || loading}
-              title="Отмечает пять лучших по баллу и сохраняет на сервере — после этого можно изменить порядок"
+              title="Отмечает пять лучших по баллу и сохраняет состав на сервере"
               onClick={() => applyTop5AndSelect()}
             >
               Оставь топ-5
@@ -2662,10 +2691,9 @@ export function DigestWizard({ digestId }: Props) {
           </div>
           <WizardWhy summary="Разница между «Подтвердить 5» и «Оставь топ‑5»">
             <p>
-              <strong>Подтвердить 5</strong> активна только при пяти галочках — вы управляете составом.{" "}
-              <strong>Оставь топ‑5</strong> — сразу отметит пять лучших по баллу (чекбоксы) и сохранит выбор.{" "}
-              После этого откроется блок <strong>перетаскивания порядка</strong> — расставьте новости и нажмите{" "}
-              <strong>«Применить порядок»</strong> или <strong>«Оптимально по мнению ИИ»</strong> — аналитика (шаг 3) запустится автоматически.
+              <strong>Подтвердить 5</strong> — сохраняет ровно те строки, где стоят галочки. <strong>Оставь топ‑5</strong> —
+              отмечает пять лучших по баллу и сразу сохраняет на сервере. Обе кнопки только фиксируют состав; блок{" "}
+              <strong>порядка</strong> ниже — для расстановки и запуска аналитики.
             </p>
           </WizardWhy>
         </div>
@@ -2676,20 +2704,45 @@ export function DigestWizard({ digestId }: Props) {
           <h3>Шаг 2 — порядок новостей (drag-and-drop)</h3>
           <StepProgressBar active={runningStepKey === "2order"} />
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-            Перетащите карточки в нужном порядке и нажмите <strong>«Применить порядок»</strong>.
+            {orderEditMode && canChangeOrderFromLaterSteps ? (
+              <>
+                Режим изменения порядка: перетащите карточки и нажмите <strong>«Применить порядок»</strong> или{" "}
+                <strong>«Оптимально по мнению ИИ»</strong>. Аналитика и финал пересоберутся заново.
+              </>
+            ) : canChangeOrderFromLaterSteps && !canOrder ? (
+              <>
+                Порядок уже сохранён. Нажмите <strong>«Изменить порядок»</strong> ниже, чтобы снова перетаскивать карточки.
+              </>
+            ) : (
+              <>
+                Перетащите карточки в нужной последовательности (1 — верхняя новость выпуска) и сохраните порядок одной из
+                кнопок ниже — после этого обычно автоматически стартует шаг 3.
+              </>
+            )}
           </p>
-          {!canOrder ? (
+          {!canOrder && !canChangeOrderFromLaterSteps ? (
             <p className="wizard-hint-wait">
-              Кнопка станет активной, когда сервер зафиксирует пятёрку (статус <code>selected</code>) — обычно сразу после
-              «Подтвердить 5» / «Оставь топ-5».
+              Сначала сохраните пятёрку кнопкой «Подтвердить 5 новостей» или «Оставь топ‑5» — затем станет доступно
+              перетаскивание.
             </p>
           ) : null}
-          <WizardWhy summary="Зачем менять порядок до шага 3">
+          {digest?.step2_order_rationale ? (
+            <div
+              className="wizard-hint-why-body"
+              style={{ marginBottom: 12, padding: "10px 12px", borderRadius: 8, background: "#0f172a" }}
+            >
+              <strong>Аргументация ИИ за этот порядок:</strong>
+              <p style={{ margin: "8px 0 0", lineHeight: 1.45 }}>{digest.step2_order_rationale}</p>
+            </div>
+          ) : null}
+          <WizardWhy summary="Кнопки порядка и аргументация ИИ">
             <p>
-              Порядок задаёт очередь тем в выпуске (1 — самая верхняя).{" "}
-              <strong>«Оптимально по мнению ИИ»</strong> расставит пятёрку с упором на интерес читателя и сохранит
-              обоснования позиций, затем <strong>автоматически запускается аналитика (шаг 3)</strong>.{" "}
-              <strong>«Применить порядок»</strong> — сохранить ваш порядок после перетаскивания.
+              <strong>«Оптимально по мнению ИИ»</strong> — ProxyAPI расставляет пятёрку под интерес читателя (сильный заход,
+              ритм, финал) и пишет общую аргументацию плюс пояснение к каждой позиции.{" "}
+              <strong>«Применить порядок»</strong> — сохраняет порядок после вашего drag-and-drop.{" "}
+              <strong>«Изменить порядок»</strong> — включает редактирование после шага 3 (аналитика и финал сбросятся при
+              сохранении нового порядка). После любой из первых двух кнопок шаг 3 запускается автоматически, если так настроен
+              сервер.
             </p>
           </WizardWhy>
           {orderedSelectedRows.map((s: any) => (
@@ -2708,37 +2761,52 @@ export function DigestWizard({ digestId }: Props) {
               }}
             >
               <strong>{s.output_position}.</strong> {s.title}
-              <div>{s.ordering_reason}</div>
+              {s.ordering_reason ? (
+                <div style={{ marginTop: 4, fontSize: "0.88rem", color: "#94a3b8", lineHeight: 1.4 }}>
+                  {s.ordering_reason}
+                </div>
+              ) : null}
             </div>
           ))}
-          <button
-            type="button"
-            disabled={!canOrder || selected.length !== 5 || loading}
-            title="ProxyAPI gpt-4.1-mini: порядок для удержания читателя (сильный заход, ритм, финал)"
-            onClick={() =>
-              run("Шаг 2–3: оптимальный порядок и аналитика (AI, несколько минут)…", async () => {
-                await api.orderNewsAiOptimal(digestId);
-              })
-            }
-          >
-            Оптимально по мнению ИИ
-          </button>
-          <button
-            type="button"
-            disabled={!canOrder || selected.length !== 5 || loading}
-            style={{ marginLeft: 10 }}
-            title="Сохранить текущий порядок карточек после перетаскивания"
-            onClick={() =>
-              run("Шаг 2–3: порядок и аналитика (AI, несколько минут)…", () =>
-                api.orderNews(
-                  digestId,
-                  orderedSelectedRows.map((s: { candidate_id: number }) => s.candidate_id),
-                ),
-              )
-            }
-          >
-            Применить порядок
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+            <button
+              type="button"
+              disabled={!canOrder || selected.length !== 5 || loading}
+              title="ProxyAPI gpt-4.1-mini: порядок для удержания читателя (сильный заход, ритм, финал)"
+              onClick={() =>
+                run("Шаг 2–3: оптимальный порядок и аналитика (AI, несколько минут)…", async () => {
+                  await api.orderNewsAiOptimal(digestId);
+                })
+              }
+            >
+              Оптимально по мнению ИИ
+            </button>
+            <button
+              type="button"
+              disabled={!canOrder || selected.length !== 5 || loading}
+              title="Сохранить текущий порядок карточек после перетаскивания"
+              onClick={() =>
+                run("Шаг 2–3: сохраняем ваш порядок и запускаем аналитику…", () =>
+                  api.orderNews(
+                    digestId,
+                    orderedSelectedRows.map((s: { candidate_id: number }) => s.candidate_id),
+                  ),
+                )
+              }
+            >
+              Применить порядок
+            </button>
+            {canChangeOrderFromLaterSteps && !orderEditMode ? (
+              <button
+                type="button"
+                onClick={scrollToOrderEdit}
+                disabled={loading}
+                title="Снова перетаскивать карточки; при сохранении порядка аналитика и финал пересоберутся"
+              >
+                Изменить порядок
+              </button>
+            ) : null}
+          </div>
         </div>
       )}
 
@@ -2754,23 +2822,26 @@ export function DigestWizard({ digestId }: Props) {
           />
         ) : null}
         <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-          После <strong>«Применить порядок»</strong> или <strong>«Оптимально по мнению ИИ»</strong> аналитика запускается
-          автоматически — дождитесь заполнения блоков ниже (обычно несколько минут).
+          Аналитика — материал <strong>для редактора</strong> (суть, заметки, разбор по каждой новости). Обычно запускается
+          сама сразу после сохранения порядка на шаге 2; дождитесь заполнения блоков ниже (несколько минут).
         </p>
         {!canOrder && !analyticsDone ? (
           <p className="wizard-hint-wait">
-            Сначала подтвердите пятёрку («Подтвердить 5» / «Оставь топ-5»), затем сохраните порядок — аналитика пойдёт сама.
+            Сначала сохраните пятёрку и порядок на шаге 2 — тогда аналитика стартует автоматически или её можно запустить
+            кнопкой ниже.
           </p>
         ) : null}
         {analyticsDone && !loading ? (
           <p className="wizard-hint-do" style={{ fontSize: "0.95rem" }}>
-            Аналитика уже готова. Кнопка ниже — только если нужно пересобрать блоки заново.
+            Аналитика готова. «Повторить аналитику» — пересобрать блоки по текущей пятёрке и порядку. Порядок меняют в
+            блоке drag-and-drop на шаге 2 («Изменить порядок»).
           </p>
         ) : null}
         <WizardWhy summary="Что появится в результате аналитики">
           <p>
-            Для каждой из пяти новостей: суть, комментарий редакции, развёрнутый анализ; плюс общий контекст и хэштеги внизу
-            блока.
+            По каждой из пяти новостей: <strong>суть</strong>, необязательная <strong>заметка</strong>,{" "}
+            <strong>развёрнутый анализ</strong> для редакции; внизу — общий контекст выпуска и хэштеги. Простые тексты для
+            читателей на площадках (до 450 символов без заголовка) формируются на <strong>шаге 4</strong>.
           </p>
         </WizardWhy>
         <button
@@ -2791,9 +2862,9 @@ export function DigestWizard({ digestId }: Props) {
           <div style={{ marginTop: 12 }}>
             <WizardWhy summary="Как читать блоки по новостям и хэштеги">
               <p>
-                По одному блоку на новость — материал <strong>для редактора</strong>:{" "}
-                <strong>суть</strong> (коротко), <strong>заметка</strong>, <strong>анализ</strong> (развёрнуто, шесть
-                углов). Текст для читателей появится после генерации на шаге 4. Хэштеги внизу — для соцсетей.
+                Блоки шага 3 — для редактора: <strong>суть</strong>, <strong>заметка</strong>, <strong>анализ</strong> (можно
+                развёрнуто). Тексты для публикации читателям — на шаге 4: коротко, простым языком, до 450 символов под
+                заголовком. Хэштеги внизу — для соцсетей.
               </p>
             </WizardWhy>
             {digest.analytics.map((a: any) => (
@@ -2851,13 +2922,13 @@ export function DigestWizard({ digestId }: Props) {
         ) : (
           <>
             <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-              Сначала сгенерируйте <strong>4 варианта обложки</strong> и выберите одну для всех площадок. Затем отметьте
-              нужные площадки и нажмите кнопку генерации текстов.
+              Сначала обложки (если включены на сервере), затем тексты площадок. Под каждым заголовком в постах — 2–4
+              простых предложения для читателей (до 450 символов, без учёта заголовка).
             </p>
             <WizardWhy summary="Зачем раздельные действия">
               <p>
-                Обложки и тексты — отдельные запросы к AI: можно перегенерировать картинки, не трогая посты, и наоборот.
-                Выбранная обложка копируется в финальный файл и попадает в .docx.
+                Обложки и тексты — отдельные запросы к ИИ: можно перегенерировать картинки, не трогая посты, и наоборот.
+                Выбранная обложка попадает в .docx. Тексты площадок собираются из аналитики шага 3 через ReaderCopyAgent.
               </p>
             </WizardWhy>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
@@ -2994,8 +3065,8 @@ export function DigestWizard({ digestId }: Props) {
         <div className="card">
           <h3>Шаг 4 — результат</h3>
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-            Скачайте файлы по ссылкам и для каждой площадки нажмите <strong>«Скопировать текст»</strong>, затем вставьте в
-            редактор (Ctrl+V). При ошибке буфера выделите текст в поле и Ctrl+C.
+            Скопируйте тексты кнопкой «Скопировать текст» и вставьте в редактор площадки (Ctrl+V). Описания под заголовками —
+            короткие, разговорные, без канцелярита. Скачайте .docx или обложку по ссылкам ниже.
           </p>
           <div style={{ marginBottom: 10 }}>
             {digest?.step4_selected_image_variant || digest?.image_path ? (

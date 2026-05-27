@@ -357,21 +357,31 @@ class CrewWorkflow:
     def get_agent_models(self) -> dict[str, str]:
         return AGENT_MODEL_RECOMMENDATIONS.copy()
 
-    def run_ordering(self, selected_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def run_ordering(self, selected_items: list[dict[str, Any]]) -> dict[str, Any]:
         task = Task(
             description=self._with_contract(
-                "Верни JSON-массив 5 объектов: candidate_id,output_position,ordering_reason. "
+                "Верни JSON-объект: overall_rationale (3–5 предложений, почему этот порядок оптимален для читателя), "
+                "items — массив из 5 объектов с полями candidate_id, output_position, ordering_reason. "
                 "Нельзя менять candidate_id список, только порядок."
                 f"Вход:{selected_items}"
             ),
-            expected_output="JSON массив с порядком и причинами",
+            expected_output="JSON объект с overall_rationale и items",
             agent=self.agents.ordering,
         )
         crew = Crew(agents=[self.agents.ordering], tasks=[task], process=Process.sequential, verbose=False)
-        parsed = _extract_json(self._kickoff(crew), [])
-        if isinstance(parsed, list) and len(parsed) == 5:
-            return parsed
-        return [
+        parsed = _extract_json(self._kickoff(crew), {})
+        items: list[dict[str, Any]] = []
+        overall_rationale = ""
+        if isinstance(parsed, dict):
+            overall_rationale = str(parsed.get("overall_rationale") or "").strip()
+            raw_items = parsed.get("items")
+            if isinstance(raw_items, list) and len(raw_items) == 5:
+                items = raw_items
+        elif isinstance(parsed, list) and len(parsed) == 5:
+            items = parsed
+        if items:
+            return {"items": items, "overall_rationale": overall_rationale}
+        fallback_items = [
             {
                 "candidate_id": item["candidate_id"],
                 "output_position": idx + 1,
@@ -379,6 +389,10 @@ class CrewWorkflow:
             }
             for idx, item in enumerate(selected_items)
         ]
+        return {
+            "items": fallback_items,
+            "overall_rationale": overall_rationale,
+        }
 
     def run_analytics(self, selected_news: list[dict[str, Any]]) -> dict[str, Any]:
         task = Task(

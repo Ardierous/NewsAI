@@ -94,6 +94,10 @@ STATUS_SELECTED = "selected"
 STATUS_ANALYTICS = "analytics_ready"
 STATUS_FINAL = "final_ready"
 
+SELECT_NEWS_ALLOWED = {STATUS_STEP1, STATUS_SELECTED, STATUS_ANALYTICS, STATUS_FINAL}
+ORDER_STEP2_ALLOWED = {STATUS_SELECTED, STATUS_ANALYTICS, STATUS_FINAL}
+STEP2_ORDER_RATIONALE_ASSET = "step2_order_rationale"
+
 
 def _catalog_step1_filter_enabled(filter_id: str) -> bool:
     """Дефолты каталога фильтров, когда нет контекста выпуска (smoke-тесты, утилиты)."""
@@ -3634,10 +3638,70 @@ class DigestService:
             )
             self._finalize_step1_discovery_run_metrics(discovery_run, digest)
 
+    def _clear_downstream_for_reselect(self, digest: Digest) -> None:
+        """Сброс шагов 3–4 при новом выборе пятёрки (аналитика, финал, картинки)."""
+        for asset in self.db.query(Asset).filter(Asset.digest_id == digest.id).all():
+            if asset.path:
+                path = Path(asset.path)
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+        self.db.query(Asset).filter(Asset.digest_id == digest.id).delete()
+        self.db.query(Analytics).filter(Analytics.digest_id == digest.id).delete()
+        self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).delete()
+        self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).delete()
+        digest.step4_selected_image_variant = None
+        digest.step2_budget_capped = False
+
+    def _save_step2_order_rationale(self, digest_id: int, rationale: str) -> None:
+        text = str(rationale or "").strip()
+        self.db.query(Asset).filter(
+            Asset.digest_id == digest_id,
+            Asset.type == STEP2_ORDER_RATIONALE_ASSET,
+        ).delete()
+        if text:
+            self.db.add(
+                Asset(
+                    digest_id=digest_id,
+                    type=STEP2_ORDER_RATIONALE_ASSET,
+                    path="",
+                    prompt=text[:2000],
+                )
+            )
+
+    def load_step2_order_rationale(self, digest_id: int) -> str:
+        row = (
+            self.db.query(Asset)
+            .filter(Asset.digest_id == digest_id, Asset.type == STEP2_ORDER_RATIONALE_ASSET)
+            .order_by(Asset.id.desc())
+            .first()
+        )
+        return str(row.prompt or "").strip() if row else ""
+
+    def _prepare_for_reorder(self, digest: Digest) -> None:
+        """Перед сменой порядка после шага 3+ — сбросить аналитику и финал, вернуть status=selected."""
+        has_analytics = (
+            self.db.query(Analytics.id).filter(Analytics.digest_id == digest.id).first() is not None
+        )
+        has_final = (
+            self.db.query(FinalOutput.id).filter(FinalOutput.digest_id == digest.id).first() is not None
+        )
+        if digest.status in {STATUS_ANALYTICS, STATUS_FINAL} or has_analytics or has_final:
+            self._clear_downstream_for_reselect(digest)
+        digest.status = STATUS_SELECTED
+        digest.current_step = "step_2"
+
     def select_news(self, digest_id: int, selected_ids: list[int], top5: bool) -> list[SelectedNews]:
         digest = self.get_digest(digest_id)
+        if digest.status not in SELECT_NEWS_ALLOWED:
+            raise HTTPException(
+                status_code=400,
+                detail="Выбор пятёрки доступен после шага 1 (step_1_candidates) и на следующих шагах выпуска.",
+            )
         if digest.status != STATUS_STEP1:
-            raise HTTPException(status_code=400, detail="Selection requires step_1_candidates")
+            self._clear_downstream_for_reselect(digest)
 
         candidates = self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).all()
         candidate_by_id = {c.id: c for c in candidates}
@@ -3725,10 +3789,24 @@ class DigestService:
         )
         return created
 
+    def _fallback_order_rationale(
+        self, agent_order: list[dict[str, Any]], order_payload: list[dict[str, Any]]
+    ) -> str:
+        reasons = [
+            str(row.get("ordering_reason") or "").strip()
+            for row in sorted(agent_order, key=lambda x: int(x.get("output_position") or 0))
+            if str(row.get("ordering_reason") or "").strip()
+        ]
+        if reasons:
+            return " ".join(reasons[:3])[:2000]
+        return "Порядок выстроен так, чтобы удержать внимание: сильный заход, ритм в середине и запоминающийся финал."
+
     def run_step_2_order(self, digest_id: int, ordered_candidate_ids: list[int]) -> list[SelectedNews]:
         digest = self.get_digest(digest_id)
+        if digest.status not in ORDER_STEP2_ALLOWED:
+            raise HTTPException(status_code=400, detail="Ordering requires a confirmed top-5 selection")
         if digest.status != STATUS_SELECTED:
-            raise HTTPException(status_code=400, detail="Ordering requires selected status")
+            self._prepare_for_reorder(digest)
         selected = self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).order_by(SelectedNews.id).all()
         if len(selected) != 5:
             raise HTTPException(status_code=400, detail="Need exactly 5 selected news")
@@ -3741,38 +3819,26 @@ class DigestService:
         else:
             order_payload = [{"candidate_id": cid} for cid in selected_ids]
 
-        with self._digest_cost_session(
-            digest,
-            step="step_2",
-            agent_name="OrderingAgent",
-            request_label="step_2_ordering",
-            model=AGENT_MODEL_RECOMMENDATIONS["OrderingAgent"],
-        ):
-            spent_step2_before = self._digest_proxyapi_spent_rub(digest)
-            if spent_step2_before >= self.settings.step2_max_cost_rub:
-                logger.warning(
-                    "Шаг 2: порядок без OrderingAgent — достигнут STEP2_MAX_COST_RUB (%s ₽) | digest_id=%s spent=%.4f",
-                    self.settings.step2_max_cost_rub,
-                    digest.id,
-                    spent_step2_before,
-                )
-                agent_order = [
-                    {
-                        "candidate_id": item["candidate_id"],
-                        "output_position": idx + 1,
-                        "ordering_reason": "Порядок без ИИ: достигнут лимит расходов на упорядочивание (настройка сервера).",
-                    }
-                    for idx, item in enumerate(order_payload)
-                ]
-                digest.step2_budget_capped = True
-            else:
-                agent_order = self.workflow.run_ordering(order_payload)
-                digest.step2_budget_capped = False
+        # "Применить порядок" должен строго сохранять порядок после drag-and-drop.
+        # ИИ-перестановка выполняется только в run_step_2_order_ai_optimal.
+        agent_order = [
+            {
+                "candidate_id": item["candidate_id"],
+                "output_position": idx + 1,
+                "ordering_reason": "Порядок задан редактором вручную.",
+            }
+            for idx, item in enumerate(order_payload)
+        ]
+        digest.step2_budget_capped = False
         for row in selected:
             for ord_item in agent_order:
                 if ord_item["candidate_id"] == row.candidate_id:
                     row.output_position = int(ord_item["output_position"])
                     row.ordering_reason = str(ord_item["ordering_reason"])
+        self._save_step2_order_rationale(
+            digest.id,
+            "Порядок задан вручную: редактор расставил новости после перетаскивания.",
+        )
         self.db.commit()
         ordered = self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).order_by(SelectedNews.output_position).all()
         logger.info(
@@ -3787,8 +3853,10 @@ class DigestService:
     def run_step_2_order_ai_optimal(self, digest_id: int) -> list[SelectedNews]:
         """Оптимальный порядок пятёрки через ProxyAPI (gpt-4.1-mini), без CrewAI."""
         digest = self.get_digest(digest_id)
+        if digest.status not in ORDER_STEP2_ALLOWED:
+            raise HTTPException(status_code=400, detail="AI ordering requires a confirmed top-5 selection")
         if digest.status != STATUS_SELECTED:
-            raise HTTPException(status_code=400, detail="AI ordering requires selected status")
+            self._prepare_for_reorder(digest)
         selected = (
             self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).order_by(SelectedNews.output_position).all()
         )
@@ -3837,17 +3905,27 @@ class DigestService:
                     ),
                 )
 
-            agent_order = self.proxy.suggest_news_order(
+            agent_order_result = self.proxy.suggest_news_order(
                 order_input,
                 digest_type=digest.digest_type or "serious",
                 model=STEP2_AI_ORDER_MODEL,
             )
+            if isinstance(agent_order_result, dict):
+                agent_order = agent_order_result.get("items") or []
+                overall_rationale = str(agent_order_result.get("overall_rationale") or "").strip()
+            else:
+                agent_order = agent_order_result
+                overall_rationale = ""
             digest.step2_budget_capped = False
         for row in selected:
             for ord_item in agent_order:
                 if int(ord_item["candidate_id"]) == row.candidate_id:
                     row.output_position = int(ord_item["output_position"])
                     row.ordering_reason = str(ord_item["ordering_reason"])[:500]
+        self._save_step2_order_rationale(
+            digest.id,
+            overall_rationale or self._fallback_order_rationale(agent_order, order_input),
+        )
         self.db.commit()
         ordered = (
             self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).order_by(SelectedNews.output_position).all()

@@ -123,6 +123,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     image_variants: list[ImageVariantOut] = []
     rejected_reasons_summary: dict[str, int] = {}
     step1_collection_meta: dict[str, object] = {}
+    step2_order_rationale = ""
     for a in assets:
         if a.type == "hashtags":
             hashtags = a.prompt.split()
@@ -152,6 +153,8 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
                     step1_collection_meta = raw
             except Exception:
                 pass
+        if a.type == "step2_order_rationale":
+            step2_order_rationale = str(a.prompt or "").strip()
     image_variants.sort(key=lambda x: x.variant)
     digest_cost = service.digest_proxyapi_cost_rub(digest)
     total_cost_rub = round(
@@ -274,6 +277,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         enable_step4_image_generation=get_settings().enable_step4_image_generation,
         model_recommendations=service.get_model_recommendations(),
         pool_collection_stats=pool_collection_stats,
+        step2_order_rationale=step2_order_rationale,
     )
 
 

@@ -395,6 +395,170 @@ def test_select_news_allows_pool_below_step1_min_when_five_selectable(monkeypatc
     assert len(selected) == 5
 
 
+def test_select_news_allows_reselection_when_status_selected(monkeypatch: pytest.MonkeyPatch):
+    """После сохранения пятёрки (status=selected) можно изменить выбор до запуска аналитики."""
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    candidate_ids: list[int] = []
+    for idx in range(6):
+        row = NewsCandidate(
+            digest_id=digest.id,
+            original_number=idx + 1,
+            title=f"ИИ новость {idx + 1}",
+            url=f"https://source{idx + 1}.example.com/news/{idx + 1}",
+            source="Example",
+            tier="Tier-2",
+            published_at="2026-05-14T12:00:00",
+            category="technology",
+            description="Описание",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=6 - (0 if idx < 5 else 1),
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+        )
+        service.db.add(row)
+        service.db.flush()
+        candidate_ids.append(row.id)
+    service.db.commit()
+
+    first_pick = candidate_ids[:5]
+    service.select_news(digest.id, first_pick, top5=False)
+    service.db.refresh(digest)
+    assert digest.status == STATUS_SELECTED
+
+    new_pick = candidate_ids[1:6]
+    updated = service.select_news(digest.id, new_pick, top5=False)
+    assert len(updated) == 5
+    assert {row.candidate_id for row in updated} == set(new_pick)
+
+
+def test_select_news_clears_analytics_on_reselection(monkeypatch: pytest.MonkeyPatch):
+    """После аналитики можно перевыбрать пятёрку — шаги 3–4 сбрасываются, статус возвращается к selected."""
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_ANALYTICS
+    candidate_ids: list[int] = []
+    for idx in range(6):
+        row = NewsCandidate(
+            digest_id=digest.id,
+            original_number=idx + 1,
+            title=f"ИИ новость {idx + 1}",
+            url=f"https://source{idx + 1}.example.com/news/{idx + 1}",
+            source="Example",
+            tier="Tier-2",
+            published_at="2026-05-14T12:00:00",
+            category="technology",
+            description="Описание",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=6,
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+        )
+        service.db.add(row)
+        service.db.flush()
+        candidate_ids.append(row.id)
+        if idx < 5:
+            service.db.add(
+                SelectedNews(
+                    digest_id=digest.id,
+                    candidate_id=row.id,
+                    original_number=row.original_number,
+                    output_position=idx + 1,
+                    ordering_reason="test",
+                )
+            )
+            service.db.add(
+                Analytics(
+                    digest_id=digest.id,
+                    candidate_id=row.id,
+                    essence="e",
+                    comment="c",
+                    analysis="a",
+                    source_url=row.url,
+                    source_name=row.source,
+                    published_at=row.published_at,
+                )
+            )
+    service.db.commit()
+
+    new_pick = candidate_ids[1:6]
+    updated = service.select_news(digest.id, new_pick, top5=False)
+    service.db.refresh(digest)
+
+    assert digest.status == STATUS_SELECTED
+    assert len(updated) == 5
+    assert {row.candidate_id for row in updated} == set(new_pick)
+    assert service.db.query(Analytics).filter(Analytics.digest_id == digest.id).count() == 0
+
+
+def test_run_step_2_order_from_analytics_ready_clears_downstream(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_ANALYTICS
+    candidate_ids: list[int] = []
+    for idx in range(5):
+        row = NewsCandidate(
+            digest_id=digest.id,
+            original_number=idx + 1,
+            title=f"ИИ новость {idx + 1}",
+            url=f"https://source{idx + 1}.example.com/news/{idx + 1}",
+            source="Example",
+            tier="Tier-2",
+            published_at="2026-05-14T12:00:00",
+            category="technology",
+            description="Описание",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=6,
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+        )
+        service.db.add(row)
+        service.db.flush()
+        candidate_ids.append(row.id)
+        service.db.add(
+            SelectedNews(
+                digest_id=digest.id,
+                candidate_id=row.id,
+                original_number=row.original_number,
+                output_position=idx + 1,
+                ordering_reason="old",
+            )
+        )
+        service.db.add(
+            Analytics(
+                digest_id=digest.id,
+                candidate_id=row.id,
+                essence="e",
+                comment="c",
+                analysis="a",
+                source_url=row.url,
+                source_name=row.source,
+                published_at=row.published_at,
+            )
+        )
+    service.db.commit()
+
+    ordered = service.run_step_2_order(digest.id, list(reversed(candidate_ids)))
+    service.db.refresh(digest)
+
+    assert digest.status == STATUS_SELECTED
+    assert len(ordered) == 5
+    assert [row.candidate_id for row in ordered] == list(reversed(candidate_ids))
+    assert service.db.query(Analytics).filter(Analytics.digest_id == digest.id).count() == 0
+    assert service.load_step2_order_rationale(digest.id).startswith("Порядок задан вручную")
+
+
 def test_select_news_rejects_when_fewer_than_five_selectable(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
     digest.status = STATUS_STEP1

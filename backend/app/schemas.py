@@ -357,3 +357,4 @@ class DigestDetail(BaseModel):
     enable_step4_image_generation: bool = False
     model_recommendations: list[AgentModelRecommendationOut]
     pool_collection_stats: PoolCollectionStatsOut | None = None
+    step2_order_rationale: str = ""

@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from app.proxyapi_client import ProxyApiClient, _fallback_news_order, _parse_ordering_response
+from app.proxyapi_client import ProxyApiClient, _fallback_news_order, _parse_ordering_payload, _parse_ordering_response
 
 
 def test_parse_ordering_response_json_array():
@@ -20,6 +20,16 @@ def test_fallback_news_order_by_score():
     assert out[0]["output_position"] == 1
 
 
+def test_parse_ordering_response_json_object():
+    raw = (
+        '{"overall_rationale": "Сильный заход и ритм.", '
+        '"items": [{"candidate_id": 3, "output_position": 1, "ordering_reason": "Сильный заход"}]}'
+    )
+    items, rationale = _parse_ordering_payload(raw)
+    assert items[0]["candidate_id"] == 3
+    assert "заход" in rationale.lower()
+
+
 def test_suggest_news_order_validates_ids():
     client = ProxyApiClient.__new__(ProxyApiClient)
     client.chat = MagicMock(
@@ -35,6 +45,6 @@ def test_suggest_news_order_validates_ids():
     )
     items = [{"candidate_id": i, "title": f"N{i}", "total_score": i} for i in range(1, 6)]
     out = client.suggest_news_order(items, digest_type="serious", model="gpt-4.1-mini")
-    assert len(out) == 5
-    assert out[0]["candidate_id"] == 5
-    assert out[0]["output_position"] == 1
+    assert len(out["items"]) == 5
+    assert out["items"][0]["candidate_id"] == 5
+    assert out["items"][0]["output_position"] == 1

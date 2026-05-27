@@ -159,16 +159,11 @@ def _news_link_line(title: str, url: str) -> str:
     return f"➤ [{safe_title}]({url.strip()})"
 
 
-def _paste_friendly_headline(title: str, url: str) -> str:
-    """Заголовок + URL отдельными строками (Дзен/MAX веб не парсят [text](url) при вставке)."""
-    return f"➤ {title.strip()}\n{url.strip()}"
-
-
 def _max_news_block(item: dict[str, Any]) -> str:
     title = str(item["title"]).strip()
     url = str(item["url"]).strip()
     summary = " ".join(_item_summary_short(item).split())
-    return f"{_paste_friendly_headline(title, url)}\n\n{summary}"
+    return f"{_news_link_line(title, url)}\n{summary}"
 
 
 def _truncate_at_word(text: str, max_len: int) -> str:
@@ -197,13 +192,8 @@ def _dzen_post_news_block(item: dict[str, Any], *, max_body_chars: int) -> str:
     """Компактный блок для поста Дзена (лимит 4096 на весь пост)."""
     title = str(item["title"]).strip()
     url = str(item["url"]).strip()
-    source = str(item.get("source") or "Источник").strip()
     body = _truncate_at_word(" ".join(_item_summary_short(item).split()), max_body_chars)
-    return (
-        f"{_paste_friendly_headline(title, url)}\n\n"
-        f"{body}\n\n"
-        f"Читать подробнее: {source} — {url}"
-    )
+    return f"{_news_link_line(title, url)}\n\n{body}"
 
 
 def assemble_telegram(payload: dict[str, Any]) -> str:
@@ -232,10 +222,10 @@ def assemble_max(payload: dict[str, Any]) -> str:
     news_blocks = [_max_news_block(item) for item in payload.get("selected_news") or []]
     body = f"\n\n{MAX_NEWS_SEP}\n\n".join(news_blocks)
     text = (
-        f"⚡ {HEADER_TITLE} | {date_ru}\n\n"
+        f"**{HEADER_TITLE} | {date_ru}**\n\n"
         f"{lead}\n\n"
         f"{body}\n\n"
-        f"{subscription_vk_block()}\n\n"
+        f"{subscription_md_inline()}\n\n"
         f"{tags}"
     )
     return truncate_platform_text(compress_paragraphs(fix_markdown_links(text)), MAX_PLATFORM_MAX_CHARS)
@@ -271,8 +261,8 @@ def assemble_dzen(payload: dict[str, Any]) -> str:
     if not intro:
         intro = DEFAULT_LEAD
     intro = _truncate_at_word(intro, 280)
-    footer = f"\n\n{subscription_vk_block()}\n\n{tags}"
-    header = f"⚡ {HEADER_TITLE} | {date_ru}\n\n{intro}\n\n"
+    footer = f"\n\n{subscription_md_inline()}\n\n{tags}"
+    header = f"**{HEADER_TITLE} | {date_ru}**\n\n{intro}\n\n"
     news = list(payload.get("selected_news") or [])
     n = max(len(news), 1)
     budget = DZEN_POST_MAX_CHARS - len(header) - len(footer)

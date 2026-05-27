@@ -113,7 +113,10 @@ def step2_order_system_prompt(digest_type: str | None) -> str:
         "логичный ритм в середине, запоминающийся финал в позиции 5. "
         "Учитывай заголовки, описания, баллы total_score и tier источника. "
         "Нельзя добавлять или удалять candidate_id — только переставить. "
-        "Ответ — только JSON-массив из 5 объектов без markdown."
+        "Ответ — только JSON-объект без markdown: "
+        "overall_rationale (3–5 простых предложений на русском — почему именно этот порядок лучше удержит читателя выпуска), "
+        "items — массив из 5 объектов с полями candidate_id, output_position, ordering_reason "
+        "(ordering_reason: 1–2 предложения, почему новость на этой позиции)."
     )
     if is_curious_digest(digest_type):
         return (

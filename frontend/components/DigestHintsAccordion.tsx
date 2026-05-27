@@ -51,7 +51,7 @@ export function DigestHintsAccordion() {
                   <code style={c}>step_1_candidates</code> — пул кандидатов в БД; повтор шага 1 пересоберёт список.
                 </li>
                 <li style={li}>
-                  <code style={c}>selected</code> — пять новостей сохранены; порядок и шаг 3 доступны.
+                  <code style={c}>selected</code> — пятёрка сохранена; доступны порядок и (после него) аналитика.
                 </li>
                 <li style={li}>
                   <code style={c}>analytics_ready</code> — аналитика готова; шаг 4.
@@ -134,12 +134,22 @@ export function DigestHintsAccordion() {
               </div>
             </Acc>
 
-            <Acc title="Шаг 2 — выбор пяти, плашки, порядок">
+            <Acc title="Шаг 2 — выбор пяти и порядок">
               <p style={{ ...li, marginTop: 0 }}>
-                Чекбокс только если «Читаемый заголовок», «Ссылка рабочая», «Можно в топ‑5». «Подтвердить 5» / «Оставь
-                топ‑5» → <code style={c}>selected</code>. Порядок — drag-and-drop + «Применить порядок» (отдельный агент).
+                Два подблока в мастере: <strong>выбор пятёрки</strong> (чекбоксы) и <strong>порядок</strong> (drag-and-drop).
+                «Подтвердить 5» / «Оставь топ‑5» только сохраняют состав → <code style={c}>selected</code>. Аналитика
+                запускается после «Применить порядок» или «Оптимально по мнению ИИ» (если включён автозапуск на сервере).
               </p>
               <ul style={{ margin: "0 0 0 1.1rem", padding: 0 }}>
+                <li style={li}>
+                  Чекбокс активен только при «Читаемый заголовок», «Ссылка рабочая», «Можно в топ‑5». Пятёрку можно
+                  перевыбрать на любом этапе — сбросятся аналитика и финал.
+                </li>
+                <li style={li}>
+                  <strong>Порядок:</strong> перетаскивание, «Применить порядок», «Оптимально по мнению ИИ» (ProxyAPI). ИИ
+                  даёт общую аргументацию порядка и пояснение к каждой позиции. После шага 3 — кнопка «Изменить порядок»
+                  рядом с «Применить порядок».
+                </li>
                 <li style={li}>
                   <strong>Происхождение</strong> (не достоверность): Web-поиск / Из Telegram / Ручная ссылка / LLM-добор.
                 </li>
@@ -147,28 +157,26 @@ export function DigestHintsAccordion() {
                   <strong>Tier и ✅/⚠️/❗</strong> — политика домена из <code style={c}>source_tiers.txt</code> (
                   <code style={c}>reliability_status</code>).
                 </li>
-                <li style={li}>
-                  <strong>Иноагент</strong> — явная маркировка по списку доменов; не путать с «Запрещён в РФ» (Tier-5
-                  СМИ) и «Агрегатор».
-                </li>
                 <li style={{ ...li, marginBottom: 0 }}>
-                  Агрегаторы, дубликаты, «❗ без подтверждения» и нерабочие ссылки нельзя выбрать в топ‑5 даже с галочкой
-                  «Ссылка рабочая».
+                  Агрегаторы, дубликаты, «❗ без подтверждения» и нерабочие ссылки нельзя выбрать в топ‑5.
                 </li>
               </ul>
               <div style={dev}>
                 <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step2/select</code>,{" "}
-                <code style={c}>POST …/step2/order</code>. Условие выбора на фронте:{" "}
-                <code style={c}>candidateSelectableForStep2</code> в <code style={c}>DigestWizard.tsx</code>. Политика
-                источников: <code style={c}>source_tiers_policy.py</code>.
+                <code style={c}>POST …/step2/order</code>, <code style={c}>POST …/step2/order/ai-optimal</code>. Условие
+                выбора на фронте: <code style={c}>candidateSelectableForStep2</code> в{" "}
+                <code style={c}>DigestWizard.tsx</code>. Обоснование порядка — asset{" "}
+                <code style={c}>step2_order_rationale</code>.
               </div>
             </Acc>
 
             <Acc title="Шаги 3–4 — аналитика и финал">
               <p style={{ ...li, marginTop: 0 }}>
-                Шаг 3: развёрнутая аналитика по каждой из пяти новостей и хэштеги. Шаг 4: обложки (варианты), выбор
-                одной, тексты по площадкам и QC — по кнопкам, без ввода «Ок» (
-                <code style={c}>digest_contract.txt</code>).
+                <strong>Шаг 3</strong> — редакторская аналитика по каждой из пяти новостей (суть, заметка, развёрнутый
+                анализ) и хэштеги; материал для редактора, не для публикации читателям. <strong>Шаг 4</strong> — обложки
+                (если включены), тексты площадок и QC. Под каждым заголовком в постах — простой текст для читателей: 2–4
+                коротких предложения, до 450 символов без заголовка (<code style={c}>reader_copy.py</code>,{" "}
+                <code style={c}>ReaderCopyAgent</code>).
               </p>
               <div style={dev}>
                 <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step3/confirm-ready</code> →{" "}
