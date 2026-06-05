@@ -32,9 +32,32 @@ def test_parse_channel_posts_extracts_external_only(sample_html: str):
     assert len(posts) == 2
     newest = posts[0]
     assert newest.post_id == 3377
+    assert "Дайджест" in tcm.message_plain_text(newest.text_html)
     assert "vc.ru" in newest.urls[0]
     assert "habr.com" in newest.urls[1]
     assert all("t.me" not in u for u in newest.urls)
+
+
+def test_post_matches_digest_filter(sample_html: str):
+    posts = tcm.parse_channel_posts_html(sample_html, "technokratos")
+    digest_post = posts[0]
+    other_post = posts[1]
+    assert tcm.post_matches_text_filter(digest_post, "Дайджест")
+    assert not tcm.post_matches_text_filter(other_post, "Дайджест")
+
+
+def test_collect_only_digest_posts(sample_html: str):
+    with patch.object(tcm, "fetch_channel_html", return_value=sample_html):
+        urls = tcm.collect_external_links_from_channels(
+            ("technokratos",),
+            earliest_date=date(2026, 4, 1),
+            max_pages=1,
+            max_links=20,
+            max_digest_posts=3,
+            post_text_filter="Дайджест",
+        )
+    assert any("vc.ru" in u for u in urls)
+    assert not any("ria.ru" in u for u in urls)
 
 
 def test_collect_respects_earliest_date(sample_html: str):
@@ -44,9 +67,45 @@ def test_collect_respects_earliest_date(sample_html: str):
             earliest_date=date(2026, 5, 5),
             max_pages=1,
             max_links=20,
+            post_text_filter="Дайджест",
         )
     assert "vc.ru" in urls[0] or any("vc.ru" in u for u in urls)
     assert not any("ria.ru" in u for u in urls)
+
+
+def test_collect_telegram_seed_prefers_proxyapi(monkeypatch: pytest.MonkeyPatch, sample_html: str):
+    from types import SimpleNamespace
+
+    settings = SimpleNamespace(
+        step1_telegram_monitor_enabled=True,
+        step1_telegram_monitor_channels="technokratos",
+        step1_telegram_max_pages=1,
+        step1_telegram_max_links=20,
+        step1_telegram_max_digest_posts=3,
+        step1_telegram_post_text_filter="Дайджест",
+        step1_telegram_timeout_sec=10.0,
+        step1_telegram_via_proxyapi=True,
+        step1_telegram_direct_fallback=False,
+        proxyapi_web_search_enabled=True,
+        proxyapi_web_search_context_size="high",
+        step1_telegram_proxyapi_context_size="high",
+    )
+
+    class FakeProxy:
+        def fetch_telegram_digest_seed_urls(self, channel, **kwargs):
+            assert channel == "technokratos"
+            return (
+                ["https://vc.ru/chatgpt/2913363-openai-chatgpt", "https://habr.com/ru/news/1032110/"],
+                [sample_html],
+            )
+
+    urls = tcm.collect_telegram_seed_urls_for_digest(
+        settings,
+        earliest_date=date(2026, 5, 1),
+        proxy=FakeProxy(),
+    )
+    assert any("vc.ru" in u for u in urls)
+    assert any("habr.com" in u for u in urls)
 
 
 def test_parse_monitor_channels_default():

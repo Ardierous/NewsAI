@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     proxyapi_web_search_enabled: bool = True
     proxyapi_web_search_model: str = "gpt-4o-mini"
     proxyapi_web_search_preview_model: str = "gpt-4o-mini-search-preview"
-    proxyapi_web_search_context_size: str = "medium"
+    proxyapi_web_search_context_size: str = "low"
     proxyapi_web_search_context_size_supplement: str = "low"
     serpapi_api_key: str | None = None
     tavily_api_key: str | None = None
@@ -46,11 +46,11 @@ class Settings(BaseSettings):
     # --- Пайплайн (дефолты; основной источник — app/pipeline_settings.json) ---
     step1_search_tier1_min_raw_urls: int = 15
     step1_max_cost_rub: float = 50.0
-    step1_batch_size: int = 20
-    step1_search_fetch_limit: int = 100
-    step1_urls_checked_per_collect: int = 80
-    step1_soft_time_limit_sec: int = 180
-    step1_hard_time_limit_sec: int = 300
+    step1_batch_size: int = 10
+    step1_search_fetch_limit: int = 36
+    step1_urls_checked_per_collect: int = 24
+    step1_soft_time_limit_sec: int = 90
+    step1_hard_time_limit_sec: int = 150
     step1_max_candidates_for_ui: int = 15
     step1_verify_workers: int = 6
     step1_crew_fallback_only_if_empty: bool = True
@@ -59,6 +59,15 @@ class Settings(BaseSettings):
     step1_telegram_monitor_channels: str = "technokratos"
     step1_telegram_max_pages: int = 2
     step1_telegram_max_links: int = 30
+    step1_telegram_max_digest_posts: int = 3
+    step1_telegram_post_text_filter: str = "Дайджест"
+    step1_telegram_timeout_sec: float = 10.0
+    step1_telegram_via_proxyapi: bool = False
+    step1_telegram_direct_fallback: bool = True
+    step1_telegram_proxyapi_context_size: str = "low"
+    step1_tier_max_web_search_batches: int = 6
+    step1_min_urls_before_proxyapi: int = 5
+    step1_web_search_prefer_alt_providers: bool = False
     step1_seed_urls_max: int = 35
     step2_max_cost_rub: float = 50.0
     auto_run_step3_after_order: bool = True

@@ -93,23 +93,23 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
         alternatives="1–100 (clamp в JSON); меньше — больше итераций, больше — длиннее один проход HTTP.",
     ),
     "step1_soft_time_limit_sec": ConfigItemMeta(
-        why="180 с — мягкий стоп после min_collection_iterations, если пул уже близок к цели.",
+        why="150 с — мягкий стоп после min_collection_iterations, если пул уже близок к цели.",
         alternatives="30–7200 с; меньше — быстрее stop, больше — дольше добор кандидатов.",
     ),
     "step1_hard_time_limit_sec": ConfigItemMeta(
-        why="300 с — жёсткий потолок прогона шага 1; защита от бесконечного цикла и перерасхода API.",
+        why="240 с — жёсткий потолок прогона шага 1; защита от бесконечного цикла и перерасхода API.",
         alternatives="60–14400 с; должен быть ≥ soft; увеличивайте, если tier-поиск не успевает за 5 мин.",
     ),
     "step1_verify_workers": ConfigItemMeta(
-        why="6 параллельных HTTP-проверок — ускорение verify без перегрузки сайтов-источников.",
+        why="8 параллельных HTTP-проверок — ускорение verify без заметного перегруза источников.",
         alternatives="1–24; на слабом канале или при блокировках лучше 3–4, на мощном сервере — до 12.",
     ),
     "step1_urls_checked_per_collect": ConfigItemMeta(
-        why="80 URL на collect — верхняя граница HTTP-проверок за один вызов поиска.",
+        why="28 URL на collect — верхняя граница HTTP-проверок за один вызов поиска.",
         alternatives="10–500; больше — шире воронка, но дольше и дороже один collect.",
     ),
     "step1_search_fetch_limit": ConfigItemMeta(
-        why="100 сырых URL из всех провайдеров — запас до prefilter и dedup.",
+        why="40 сырых URL из всех провайдеров — баланс между полнотой и стоимостью шага 1.",
         alternatives="10–500; при tier-strict раскладывается на батчи site: по доменам политики.",
     ),
     "step1_search_tier1_min_raw_urls": ConfigItemMeta(
@@ -129,7 +129,7 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
         alternatives="false — Crew может добирать даже при частично заполненном пуле (дороже).",
     ),
     "step1_tier_strict_search": ConfigItemMeta(
-        why="Да — поиск только по tier-1…4 из source_tiers.txt (site: батчи, allowed_hosts).",
+        why="Да — поиск по tier-1…4 и aggregator_hosts (Tier-2) из source_tiers.txt (site: батчи).",
         alternatives="false — общий web_search + legacy добор tier-1; шире выдача, но вне политики источников.",
     ),
     "step1_telegram_monitor_enabled": ConfigItemMeta(
@@ -147,6 +147,30 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
     "step1_telegram_max_links": ConfigItemMeta(
         why="30 ссылок — верхняя граница внешних URL из Telegram за прогон.",
         alternatives="1–200; после нормализации merge с ручными URL и dedup.",
+    ),
+    "step1_telegram_max_digest_posts": ConfigItemMeta(
+        why="3 — последних поста «Утро-Дайджест» technokratos; вакансии и прочие посты не берутся.",
+        alternatives="1–10; больше — шире окно seed URL, но дольше verify.",
+    ),
+    "step1_telegram_post_text_filter": ConfigItemMeta(
+        why="«Дайджест» — отбирает только утренние дайджесты technokratos, не вакансии.",
+        alternatives="пустая строка — без фильтра по тексту (все посты с внешними ссылками).",
+    ),
+    "step1_telegram_timeout_sec": ConfigItemMeta(
+        why="10 секунд — t.me часто отвечает медленно; используется только при direct fallback.",
+        alternatives="1–30; при telegram_via_proxyapi=true direct часто не нужен.",
+    ),
+    "step1_telegram_via_proxyapi": ConfigItemMeta(
+        why="Да — seed из t.me/s/ через ProxyAPI web_search; backend не ходит на t.me напрямую.",
+        alternatives="false — только прямой парсинг t.me/s/ (нужен VPN/доступ с хоста backend).",
+    ),
+    "step1_telegram_direct_fallback": ConfigItemMeta(
+        why="false — если t.me недоступен с backend, не тратить 10 с на ConnectTimeout.",
+        alternatives="true — после пустого ProxyAPI повторить прямой fetch t.me/s/.",
+    ),
+    "step1_telegram_proxyapi_context_size": ConfigItemMeta(
+        why="high — больше контекста web_search для извлечения ссылок из ленты technokratos.",
+        alternatives="low / medium / high; выше — точнее, но дороже запрос.",
     ),
     "step1_seed_urls_max": ConfigItemMeta(
         why="35 — лимит объединённых seed (ручные + telegram) перед verify.",
@@ -188,12 +212,12 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
         alternatives="1–10000 ₽; при превышении порядок сохраняется без LLM-оптимизации.",
     ),
     "auto_run_step3_after_order": ConfigItemMeta(
-        why="Да — после «Применить порядок» или AI-порядка автоматически стартует аналитика.",
+        why="Да — после «Применить порядок» автоматически стартует аналитика (не после «Оптимально по мнению ИИ»).",
         alternatives="false — шаг 3 только вручную; удобно для проверки порядка перед расходом API.",
     ),
     "enable_step4_image_generation": ConfigItemMeta(
-        why="Нет — генерация обложек отключена (экономия и скорость; текст шага 4 без картинок).",
-        alternatives="true — вызов image-модели ProxyAPI при финальной сборке DOCX/платформ.",
+        why="Нет — AI-обложки не генерируются; для публикации используйте JPG из images/ или загрузите свою.",
+        alternatives="true — 4 варианта обложки через image-модель ProxyAPI; скачивание отдельно от текста поста.",
     ),
     "log_level": ConfigItemMeta(
         why="INFO — достаточно для диагностики шага 1 (Tier-поиск, воронка) без шума DEBUG.",
@@ -257,14 +281,14 @@ def config_item_meta(field: str, value: Any | None = None) -> tuple[str, str]:
     elif field == "auto_run_step3_after_order":
         why = _bool_why(
             value,
-            "После сохранения порядка шаг 3 запускается автоматически.",
-            "Шаг 3 нужно запускать вручную после выбора порядка.",
+            "После «Применить порядок» шаг 3 запускается автоматически.",
+            "Шаг 3 нужно запускать вручную после сохранения порядка.",
         )
     elif field == "enable_step4_image_generation":
         why = _bool_why(
             value,
-            "Генерация обложек включена — расход image-модели на шаге 4.",
-            "Обложки не генерируются — быстрее финализация и меньше расход API.",
+            "AI-обложки на шаге 4 включены (4 варианта; скачивание отдельно от текста).",
+            "AI-обложки выключены — готовые JPG в images/ или своя картинка на площадке.",
         )
     elif field == "log_enable_file":
         why = _bool_why(value, "Логи пишутся в файл с ротацией.", "Логи только в консоль процесса backend.")

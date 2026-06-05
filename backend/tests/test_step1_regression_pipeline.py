@@ -68,6 +68,8 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     service = DigestService(db)
     service.settings.enable_web_fetch = True
     service.settings.step1_max_cost_rub = 9999.0
+    service.settings.step1_soft_time_limit_sec = 30
+    service.settings.step1_hard_time_limit_sec = 60
     service.settings.auto_run_step3_after_order = False
 
     seed_rows = [{"original_number": i + 1, "title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
@@ -85,6 +87,11 @@ def _make_service(monkeypatch: pytest.MonkeyPatch) -> tuple[DigestService, Diges
     monkeypatch.setattr(service, "_collect_search_verified_candidates", lambda *args, **kwargs: ([], {}))
     # Реальный rebalance: лимит ≤2 на домен и квоты RU/press.
     monkeypatch.setattr(ds, "_expand_listing_url_candidates", _fake_expand_listing)
+    monkeypatch.setattr(
+        ds,
+        "digest_news_anchor_date",
+        lambda digest: digest.date if isinstance(digest.date, date) else digest.date,
+    )
     return service, digest
 
 
@@ -124,6 +131,72 @@ def test_step1_raises_402_when_proxyapi_budget_exceeded(monkeypatch: pytest.Monk
     assert ex.value.status_code == 402
     assert "402" in str(ex.value.detail)
     assert service.digest_proxyapi_budget_exceeded(digest.id)
+
+
+def test_step1_raises_402_when_proxyapi_zero_balance(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    monkeypatch.setattr(
+        service.cost_tracker,
+        "get_balance_snapshot",
+        lambda: SimpleNamespace(balance=0.0, budget_limit=500.0, budget_used=10.0),
+    )
+
+    with pytest.raises(HTTPException) as ex:
+        service.run_step_1(digest.id, [])
+
+    assert ex.value.status_code == 402
+    assert "нулевой баланс" in str(ex.value.detail).lower()
+    assert service.digest_proxyapi_budget_exceeded(digest.id)
+
+
+def test_manual_listing_url_is_not_accepted_as_verified_candidate(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    monkeypatch.setattr(
+        ds,
+        "_fetch_article_page_bundle",
+        lambda _url: {
+            "ok": True,
+            "final_url": "https://vc.ru/ai",
+            "display_url": "https://vc.ru/ai",
+            "headline": "AI",
+            "topic_corpus": "ai",
+            "is_listing_page": True,
+            "published_at": "2026-06-01T10:00:00+03:00",
+        },
+    )
+
+    rows = service._build_manual_candidates(digest, ["https://vc.ru/ai"], "2026-06-01T12:00:00+03:00", mandatory=True)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["page_verified"] is False
+    assert row["headline_editorial_ok"] is False
+    assert "REJECT_REASON:news_listing_page" in str(row.get("verification_comment") or "")
+
+
+def test_manual_ai_section_path_is_rejected_even_without_listing_flag(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    monkeypatch.setattr(
+        ds,
+        "_fetch_article_page_bundle",
+        lambda _url: {
+            "ok": True,
+            "final_url": "https://vc.ru/ai",
+            "display_url": "https://vc.ru/ai",
+            "headline": "AI - Сообщество на vc.ru",
+            "topic_corpus": "Лента сообщества",
+            "is_listing_page": False,
+            "published_at": "2026-06-01T10:00:00+03:00",
+        },
+    )
+
+    rows = service._build_manual_candidates(digest, ["https://vc.ru/ai"], "2026-06-01T12:00:00+03:00", mandatory=False)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["page_verified"] is False
+    assert row["headline_editorial_ok"] is False
+    assert "REJECT_REASON:news_listing_page" in str(row.get("verification_comment") or "")
 
 
 def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):
@@ -986,7 +1059,7 @@ def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.Monke
         item["verification_comment"] = ""
         item["title"] = f"ИИ: {item.get('title', 'Новость')}"
         item["source"] = "Example"
-        item["published_at"] = "2026-05-10T09:00:00+03:00"
+        item["published_at"] = "2026-05-14T09:00:00+03:00"
         item["category"] = "technology"
         item["description"] = "Описание"
         item["significance_score"] = 2
@@ -1029,6 +1102,18 @@ def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.Monke
     assert ex.value.status_code == 400
     assert "rebuild=true" in str(ex.value.detail)
 
+    fresh_rows = [
+        {"original_number": i + 1, "title": f"Fresh {i}", "url": f"https://fresh{i}.example.com/news/{i}"}
+        for i in range(10)
+    ]
+    monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: fresh_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: [dict(x) for x in research_rows])
+    monkeypatch.setattr(
+        service.workflow,
+        "run_candidates_score",
+        lambda verify_rows, now_msk, **kw: [dict(x) for x in verify_rows],
+    )
+
     rows = service.run_step_1(digest.id, [], rebuild=True)
     service.db.refresh(digest)
     assert digest.status == STATUS_STEP1
@@ -1036,10 +1121,56 @@ def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.Monke
     assert service.db.query(Analytics).filter(Analytics.digest_id == digest.id).count() == 0
     assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() >= 10
     assert len(rows) >= 10
+    old_urls = {f"https://source{i}.example.com/news/{i}" for i in range(10)}
+    assert not old_urls.intersection({r.url for r in rows})
 
 
-def test_step1_keeps_rebalanced_pool_below_ten_if_top5_is_possible(monkeypatch: pytest.MonkeyPatch):
-    """Если после квот осталось <10, но >=5 кандидатов, шаг 1 не должен падать."""
+def test_step1_full_rebuild_excludes_entire_previous_pool(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
+
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["is_aggregator"] = False
+        item["verification_comment"] = ""
+        item["title"] = f"ИИ: {item.get('title', 'Новость')}"
+        item["source"] = "Example"
+        item["published_at"] = "2026-05-14T12:00:00"
+        item["category"] = "technology"
+        item["description"] = "Описание"
+        item["significance_score"] = 2
+        item["novelty_score"] = 2
+        item["impact_score"] = 2
+        item["total_score"] = 6
+        item["reliability_status"] = "✅ подтверждено"
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+
+    first = service.run_step_1(digest.id, [])
+    assert len(first) == 10
+    old_urls = {c.url for c in first}
+
+    fresh_rows = [
+        {"original_number": i + 1, "title": f"Fresh {i}", "url": f"https://fresh{i}.example.com/news/{i}"}
+        for i in range(10)
+    ]
+    monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: fresh_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: [dict(x) for x in research_rows])
+    monkeypatch.setattr(
+        service.workflow,
+        "run_candidates_score",
+        lambda verify_rows, now_msk, **kw: [dict(x) for x in verify_rows],
+    )
+
+    rows = service.run_step_1(digest.id, [], rebuild=True)
+    assert not old_urls.intersection({r.url for r in rows})
+
+
+def test_step1_fails_if_rebalance_drops_pool_below_ten(monkeypatch: pytest.MonkeyPatch):
+    """Если после квот осталось <10 кандидатов, шаг 1 возвращает 502 и не сохраняет укороченный пул."""
     service, digest = _make_service(monkeypatch)
 
     score_rows: list[dict[str, str]] = []
@@ -1082,12 +1213,10 @@ def test_step1_keeps_rebalanced_pool_below_ten_if_top5_is_possible(monkeypatch: 
 
     monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
 
-    rows = service.run_step_1(digest.id, [])
-    service.db.refresh(digest)
-
-    assert digest.status == STATUS_STEP1
-    assert len(rows) == 6  # 3 источника * лимит 2 новости с источника
-    assert all(bool(r.page_verified) for r in rows)
+    with pytest.raises(HTTPException) as ex:
+        service.run_step_1(digest.id, [])
+    assert ex.value.status_code == 502
+    assert "в пул с квотами вошло только" in str(ex.value.detail)
 
 
 def test_step1_rebuild_from_analytics_ready(monkeypatch: pytest.MonkeyPatch):

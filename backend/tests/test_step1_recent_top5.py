@@ -21,7 +21,7 @@ def _make_db():
     return session_cls()
 
 
-def _add_digest_with_top5(db, day: date, url: str) -> Digest:
+def _add_digest_with_top5(db, day: date, url: str, *, finalized: bool = True) -> Digest:
     digest = Digest(
         date=day,
         status="selected",
@@ -30,6 +30,9 @@ def _add_digest_with_top5(db, day: date, url: str) -> Digest:
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
+    if finalized:
+        digest.proxyapi_finalized_at = datetime.utcnow()
+        digest.proxyapi_finalized_cost_rub = 1.0
     db.add(digest)
     db.commit()
     db.refresh(digest)
@@ -119,6 +122,25 @@ def test_query_recent_top5_includes_repeat_in_last_seven():
     fps = query_recent_top5_url_fingerprints(db, digest_id=current.id, digest_date=current.date)
     assert article_page_fingerprint(repeat_url) in fps
     assert RECENT_TOP5_LOOKBACK_DIGESTS == 7
+
+
+def test_query_recent_top5_ignores_non_finalized_previous():
+    db = _make_db()
+    repeat_url = "https://news.example.com/page/only-draft"
+    _add_digest_with_top5(db, date(2026, 5, 18), repeat_url, finalized=False)
+    current = Digest(
+        date=date(2026, 5, 20),
+        status="step_0",
+        current_step="step_0",
+        digest_type="serious",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(current)
+    db.commit()
+    db.refresh(current)
+    fps = query_recent_top5_url_fingerprints(db, digest_id=current.id, digest_date=current.date)
+    assert article_page_fingerprint(repeat_url) not in fps
 
 
 def test_different_url_same_story_allowed():

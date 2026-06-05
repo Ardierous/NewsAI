@@ -28,6 +28,10 @@ class Digest(Base):
     proxyapi_balance_after: Mapped[float | None] = mapped_column(Float, nullable=True)
     proxyapi_budget_used_before: Mapped[float | None] = mapped_column(Float, nullable=True)
     proxyapi_budget_used_after: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_release_open_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_release_open_budget_used: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_finalized_cost_rub: Mapped[float | None] = mapped_column(Float, nullable=True)
+    proxyapi_finalized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     candidates: Mapped[list["NewsCandidate"]] = relationship(
         "NewsCandidate", back_populates="digest", cascade="all, delete-orphan"

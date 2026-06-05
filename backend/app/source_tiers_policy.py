@@ -133,11 +133,19 @@ def is_russian_host(host: str, policy: SourceTiersPolicy | None = None) -> bool:
     return _host_contains_marker(h, p.russian_host_markers)
 
 
-def is_policy_tier_source(url: str, policy: SourceTiersPolicy | None = None) -> bool:
-    """URL с хоста tier-1…tier-4 из политики (не агрегатор и не tier-5)."""
+def tier2_search_host_markers(policy: SourceTiersPolicy | None = None) -> tuple[str, ...]:
+    """Tier-2 + aggregator_hosts: единая группа для site:-поиска на шаге 1."""
     p = policy or get_source_tiers_policy()
-    if is_tier5_forbidden_source(url, p) or is_aggregator_source(url, p) or is_blocked_search_host(url, p):
+    return tuple(dict.fromkeys((*p.tier2_hosts, *p.aggregator_hosts)))
+
+
+def is_policy_tier_source(url: str, policy: SourceTiersPolicy | None = None) -> bool:
+    """URL с хоста tier-1…tier-4 или агрегатора (Tier-2) из политики; не tier-5/blocked."""
+    p = policy or get_source_tiers_policy()
+    if is_tier5_forbidden_source(url, p) or is_blocked_search_host(url, p):
         return False
+    if is_aggregator_source(url, p):
+        return True
     host = _host_from_url(url)
     return (
         _host_contains_marker(host, p.tier1_hosts)
@@ -148,11 +156,11 @@ def is_policy_tier_source(url: str, policy: SourceTiersPolicy | None = None) -> 
 
 
 def policy_tier_host_groups(policy: SourceTiersPolicy | None = None) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Группы хостов по приоритету: tier-1 → tier-4."""
+    """Группы хостов по приоритету: tier-1 → tier-4 (агрегаторы в Tier-2)."""
     p = policy or get_source_tiers_policy()
     return (
         ("Tier-1", p.tier1_hosts),
-        ("Tier-2", p.tier2_hosts),
+        ("Tier-2", tier2_search_host_markers(p)),
         ("Tier-3", p.tier3_hosts),
         ("Tier-4", p.tier4_hosts),
     )
@@ -176,12 +184,12 @@ def classify_source_policy(
     host = _host_from_url(url)
     if is_tier5_forbidden_source(url, p):
         return "Tier-5", False, "❗ без подтверждения"
-    if is_aggregator_source(url, p):
-        return "Tier-5", True, "❗ без подтверждения"
     if _host_contains_marker(host, p.tier1_hosts):
         return "Tier-1", False, "✅ подтверждено"
     if _host_contains_marker(host, p.tier2_hosts):
         return "Tier-2", False, "✅ подтверждено"
+    if is_aggregator_source(url, p):
+        return "Tier-2", True, "⚠️ сомнительный"
     if _host_contains_marker(host, p.tier3_hosts):
         return "Tier-3", False, "✅ подтверждено"
     if _host_contains_marker(host, p.tier4_hosts):

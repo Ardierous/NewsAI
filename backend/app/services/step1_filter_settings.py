@@ -42,13 +42,13 @@ def _bootstrap_filter_config() -> dict[str, Any]:
     return {
         "version": 2,
         "serious": {
-            "min_discovered_pages": 20,
-            "min_collection_iterations": 5,
+            "min_discovered_pages": 10,
+            "min_collection_iterations": 3,
             "filters": shared_filters,
         },
         "curious": {
-            "min_discovered_pages": 15,
-            "min_collection_iterations": 6,
+            "min_discovered_pages": 10,
+            "min_collection_iterations": 4,
             "filters": curious_filters,
         },
     }
@@ -56,8 +56,8 @@ def _bootstrap_filter_config() -> dict[str, Any]:
 
 def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
     filters = list(raw.get("filters") or [])
-    min_pages = int(raw.get("min_discovered_pages") or 20)
-    min_iters = int(raw.get("min_collection_iterations") or 5)
+    min_pages = int(raw.get("min_discovered_pages") or 10)
+    min_iters = int(raw.get("min_collection_iterations") or 3)
     serious_filters = [f for f in filters if str(f.get("id")) not in _CURIOUS_ONLY_FILTER_IDS]
     curious_filters = list(filters)
     if not any(str(f.get("id")) == "off_topic_not_curious" for f in curious_filters):
@@ -72,7 +72,7 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
             "filters": serious_filters,
         },
         "curious": {
-            "min_discovered_pages": min(min_pages, 15),
+            "min_discovered_pages": max(10, min_pages),
             "min_collection_iterations": min_iters,
             "filters": curious_filters,
         },
@@ -112,12 +112,12 @@ def _normalize_section(payload: dict[str, Any] | list[Any] | None, *, digest_typ
         version = int(raw.get("version", 2) or 2)
 
     if min_pages_raw is None:
-        min_pages = 20 if digest_type == "serious" else 15
+        min_pages = 10
     else:
         try:
             min_pages = int(min_pages_raw)
         except (TypeError, ValueError):
-            min_pages = 20 if digest_type == "serious" else 15
+            min_pages = 10
     min_pages = max(_MIN_DISCOVERED_PAGES_LOWER, min(_MIN_DISCOVERED_PAGES_UPPER, min_pages))
 
     if min_iters_raw is None:

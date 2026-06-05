@@ -58,6 +58,14 @@ class Step0Request(BaseModel):
     )
 
 
+class FinalizeReleaseResponse(BaseModel):
+    digest_id: int
+    finalized: bool
+    already_finalized: bool = False
+    release_cost_rub: float
+    finalized_at: str | None = None
+
+
 class Step0Response(BaseModel):
     digest_id: int
     digest_type: str
@@ -77,9 +85,11 @@ class Step1RunRequest(BaseModel):
     rebuild: bool = False
     """При rebuild=true: id кандидатов из шага 2, которые оставить в пуле; остальные слоты добираются заново."""
     keep_candidate_ids: list[int] = Field(default_factory=list)
-    """Если задано — сохраняется в выпуск перед поиском (актуально при смене окна между пересборками)."""
-    news_window_days: int | None = Field(default=None, ge=1, le=90)
-    news_window_day_kind: Literal["calendar", "working"] | None = None
+    """Параметры окна из шага 0 UI — сохраняются в выпуск перед каждым запуском сбора."""
+    news_window_days: int = Field(default_factory=_step0_news_window_days_default, ge=1, le=90)
+    news_window_day_kind: Literal["calendar", "working"] = Field(
+        default_factory=_step0_news_window_day_kind_default
+    )
 
 
 class Step1FilterCatalogItem(BaseModel):
@@ -338,6 +348,7 @@ class DigestDetail(BaseModel):
     proxyapi_budget_exceeded: bool = False
     proxyapi_budget_message: str | None = None
     rejected_reasons_summary: dict[str, int] = Field(default_factory=dict)
+    step1_reject_audit: dict[str, Any] = Field(default_factory=dict)
     step1_collection_meta: dict[str, Any] = Field(default_factory=dict)
     selected: list[SelectedNewsOut]
     analytics: list[AnalyticsItemOut]
@@ -350,6 +361,10 @@ class DigestDetail(BaseModel):
     docx_path: str | None
     llm_costs: list[LlmCostRecordOut]
     total_cost_rub: float
+    """Накопительно по выпуску (ProxyAPI с якоря выпуска) или зафиксированная сумма."""
+    release_cost_rub: float = 0.0
+    release_cost_finalized: bool = False
+    release_cost_finalized_at: datetime | None = None
     """Сумма cost_rub по всем выпускам за календарный день (МСК) — учёт приложения."""
     tracked_spend_today_rub: float
     """Траты за день по балансу ProxyAPI (открытие суток → текущий баланс / budget.used)."""

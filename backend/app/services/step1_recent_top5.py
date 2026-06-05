@@ -35,7 +35,8 @@ def query_recent_top5_url_fingerprints(
     lookback: int = RECENT_TOP5_LOOKBACK_DIGESTS,
 ) -> set[str]:
     """
-    Отпечатки URL страниц из топ-5 предыдущих выпусков (до digest_date, не включая digest_id).
+    Отпечатки URL страниц из топ-5 предыдущих зафиксированных выпусков
+    (до digest_date, не включая digest_id; только после «Зафиксировать»).
     Другой URL (другой источник, обновление сюжета) — другой отпечаток, в пул можно.
     """
     if lookback < 1:
@@ -44,6 +45,7 @@ def query_recent_top5_url_fingerprints(
         db.query(Digest.id)
         .filter(Digest.id != digest_id)
         .filter(Digest.date < digest_date)
+        .filter(Digest.proxyapi_finalized_at.isnot(None))
         .order_by(Digest.date.desc())
         .limit(lookback)
         .all()

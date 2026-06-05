@@ -89,6 +89,18 @@ def ensure_digest_schema_migrations() -> None:
             if "proxyapi_budget_used_after" not in names:
                 conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_after REAL"))
                 conn.commit()
+            for col in (
+                "proxyapi_release_open_balance",
+                "proxyapi_release_open_budget_used",
+                "proxyapi_finalized_cost_rub",
+            ):
+                if col not in names:
+                    conn.execute(text(f"ALTER TABLE digests ADD COLUMN {col} REAL"))
+                    conn.commit()
+                    names.add(col)
+            if "proxyapi_finalized_at" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_finalized_at DATETIME"))
+                conn.commit()
             if "proxyapi_spend_days" not in {
                 r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
             }:
@@ -285,6 +297,19 @@ def ensure_digest_schema_migrations() -> None:
     if "proxyapi_budget_used_after" not in cols:
         with engine.begin() as conn:
             conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_budget_used_after DOUBLE PRECISION"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    for col in (
+        "proxyapi_release_open_balance",
+        "proxyapi_release_open_budget_used",
+        "proxyapi_finalized_cost_rub",
+    ):
+        if col not in cols:
+            with engine.begin() as conn:
+                conn.execute(text(f"ALTER TABLE digests ADD COLUMN {col} DOUBLE PRECISION"))
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "proxyapi_finalized_at" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_finalized_at TIMESTAMP"))
     if not insp.has_table("proxyapi_spend_days"):
         with engine.begin() as conn:
             conn.execute(

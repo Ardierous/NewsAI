@@ -88,10 +88,12 @@ def is_curious_blocked_host(url: str, policy: CuriousSourcePolicy | None = None)
 
 
 def is_curious_policy_source(url: str, policy: CuriousSourcePolicy | None = None) -> bool:
-    """URL с домена, разрешённого для курьёзного поиска."""
+    """URL с домена курьёзного списка или агрегатора Tier-2 (поиск, не blacklist)."""
     p = policy or get_curious_source_policy()
-    if is_curious_blocked_host(url, p) or is_curious_aggregator_source(url, p):
+    if is_curious_blocked_host(url, p):
         return False
+    if is_curious_aggregator_source(url, p):
+        return True
     host = _host_from_url(url)
     return _host_contains_marker(host, p.curious_ru_hosts) or _host_contains_marker(
         host, p.curious_foreign_hosts
@@ -115,6 +117,8 @@ def curious_host_search_groups(policy: CuriousSourcePolicy | None = None) -> tup
         groups.append(("Curious-RU-Tech", p.curious_ru_tech_hosts))
     if p.curious_foreign_hosts:
         groups.append(("Curious-Foreign", p.curious_foreign_hosts))
+    if p.aggregator_hosts:
+        groups.append(("Curious-Tier2-Aggregators", p.aggregator_hosts))
     return tuple(groups)
 
 
@@ -123,7 +127,7 @@ def classify_curious_source(url: str, policy: CuriousSourcePolicy | None = None)
     if is_curious_blocked_host(url, p):
         return "Tier-5", False, "❗ без подтверждения"
     if is_curious_aggregator_source(url, p):
-        return "Tier-5", True, "❗ без подтверждения"
+        return "Tier-2", True, "⚠️ сомнительный"
     if not is_curious_policy_source(url, p):
         return "Tier-5", False, "❗ без подтверждения"
     if is_curious_russian_host(url, p):

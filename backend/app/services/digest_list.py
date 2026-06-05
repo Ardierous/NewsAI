@@ -8,6 +8,11 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import Asset, Digest, LlmCostRecord, NewsCandidate, SelectedNews
+from app.services.cost_attribution import (
+    compute_digest_total_cost_rub,
+    digest_proxyapi_spent_rub,
+    digest_release_spent_rub,
+)
 from app.services.digest_status_labels import digest_status_label_ru
 
 _SUMMARY_MAX_LEN = 220
@@ -73,6 +78,37 @@ def build_digest_list_payload(db: Session, digests: list[Digest]) -> list[dict]:
             }
         )
 
+    # Без live-опроса баланса на каждый GET списка.
+    live_balance: float | None = None
+    live_budget_used: float | None = None
+
+    cost_by_digest_id: dict[int, float] = {}
+    prev_anchor_balance: float | None = None
+    for digest in sorted(digests, key=lambda item: item.id):
+        session_spent = digest_proxyapi_spent_rub(
+            digest,
+            live_balance=live_balance,
+            live_budget_used=live_budget_used,
+            prev_anchor_balance=prev_anchor_balance,
+        )
+        release_spent = digest_release_spent_rub(
+            digest,
+            live_balance=live_balance,
+            live_budget_used=live_budget_used,
+        )
+        cost_by_digest_id[digest.id] = compute_digest_total_cost_rub(
+            records_sum_rub=cost_by_id.get(digest.id, 0.0),
+            session_spent_rub=session_spent,
+            release_spent_rub=release_spent,
+            finalized_cost_rub=digest.proxyapi_finalized_cost_rub,
+        )
+        if digest.proxyapi_balance_after is not None:
+            prev_anchor_balance = float(digest.proxyapi_balance_after)
+        elif session_spent is not None and prev_anchor_balance is not None:
+            prev_anchor_balance = float(prev_anchor_balance) - float(session_spent)
+        elif digest.proxyapi_balance_session_start is not None and live_balance is not None:
+            prev_anchor_balance = float(live_balance)
+
     out: list[dict] = []
     for digest in digests:
         overall = overall_by_id.get(digest.id, "")
@@ -92,7 +128,7 @@ def build_digest_list_payload(db: Session, digests: list[Digest]) -> list[dict]:
                 "updated_at": digest.updated_at,
                 "summary_title": summary_title,
                 "top5": top5_by_id.get(digest.id, []),
-                "total_cost_rub": cost_by_id.get(digest.id, 0.0),
+                "total_cost_rub": cost_by_digest_id.get(digest.id, 0.0),
             }
         )
     return out

@@ -31,7 +31,14 @@ STEP1_FILTER_CATALOG: tuple[Step1FilterDef, ...] = (
         "Другой URL — другая публикация, даже если сюжет похож.",
         "pre_http",
     ),
-    Step1FilterDef("aggregator_source", "Агрегатор", "Отсекает агрегаторы и сборщики новостей вместо первоисточников.", "pre_http"),
+    Step1FilterDef(
+        "aggregator_source",
+        "Агрегатор (строгий)",
+        "Опционально отсекает URL с доменов aggregator_hosts. По умолчанию выключен: агрегаторы участвуют в Tier-2 поиске, "
+        "а ленты/поиск режутся фильтром «Лента/рубрика»; в пул — прямые статьи первоисточника.",
+        "pre_http",
+        default_enabled=False,
+    ),
     Step1FilterDef(
         "forbidden_media_source",
         "Запрещённый источник",

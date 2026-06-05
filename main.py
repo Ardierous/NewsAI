@@ -275,14 +275,21 @@ def _is_process_running(pid: int) -> bool:
         return False
     if os.name == "nt":
         try:
-            ctypes.windll.kernel32.SetLastError(0)
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetLastError(0)
             # На Windows os.kill(pid, 0) иногда падает с WinError 87/SystemError
             # для "битых" PID, поэтому проверяем через OpenProcess.
             PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+            STILL_ACTIVE = 259
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             if handle:
-                ctypes.windll.kernel32.CloseHandle(handle)
-                return True
+                exit_code = ctypes.c_ulong()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    alive = int(exit_code.value) == STILL_ACTIVE
+                else:
+                    alive = True
+                kernel32.CloseHandle(handle)
+                return alive
             # ERROR_ACCESS_DENIED (5): процесс существует, но нет прав.
             return ctypes.GetLastError() == 5
         except Exception:
@@ -326,7 +333,20 @@ def _acquire_single_instance_lock(backend_port: int, frontend_port: int, force: 
                 time.sleep(0.4)
                 killed = _kill_pid_force(existing_pid)
             if not killed:
-                if force:
+                ports_busy = _is_port_in_use("127.0.0.1", backend_port) or _is_port_in_use(
+                    "127.0.0.1", frontend_port
+                )
+                if not ports_busy:
+                    _print_yellow(
+                        f"PID {existing_pid} не завершился, но порты {backend_port}/{frontend_port} свободны — "
+                        f"удаляю устаревший {PID_FILE.name}."
+                    )
+                    try:
+                        PID_FILE.unlink()
+                    except OSError as exc:
+                        print(f"Не удалось удалить lock-файл: {exc}", file=sys.stderr)
+                        return False
+                elif force:
                     _print_yellow(
                         f"--force: не удалось завершить PID {existing_pid}; удаляю {PID_FILE.name} и продолжаю запуск. "
                         "Если порты 8000/3000 заняты старым процессом — остановите его вручную (Диспетчер задач или "

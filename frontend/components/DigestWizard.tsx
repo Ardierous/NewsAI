@@ -129,12 +129,17 @@ function formatStep1StopReason(reason: string | undefined): string {
   if (!r) return "—";
   const map: Record<string, string> = {
     target_reached: "цель набрана",
+    target_min_met: "минимум 10 набран, ранний стоп",
     soft_timeout_target_met: "soft-лимит, минимум набран",
+    soft_timeout_after_collect: "soft-лимит после батча",
+    hard_timeout_after_collect: "hard-лимит после батча",
     soft_timeout_final_attempt: "soft-лимит, финальная попытка",
     hard_timeout: "hard-лимит времени",
     budget_limit: "лимит бюджета",
     no_progress_target_met: "минимум набран, прогресс остановился",
     no_progress: "нет нового прогресса",
+    user_cancelled: "остановлено пользователем",
+    proxyapi_budget_exceeded: "исчерпан баланс ProxyAPI",
   };
   return map[r] || r;
 }
@@ -433,7 +438,7 @@ const REJECT_REASON_LABELS: Record<string, string> = {
   unknown_reject: "точная причина в данных не указана",
   duplicate_url_skip: "ссылка уже проверялась в этом запуске или исключена как дубликат",
   recent_top5_repeat:
-    "та же страница статьи уже была в топ-5 одного из 7 предыдущих выпусков (другой URL — можно)",
+    "та же страница статьи уже была в топ-5 одного из 7 предыдущих зафиксированных выпусков (другой URL — можно)",
   product_tool_page: "страница продукта/инструмента, а не новостная публикация",
   product_tool_promo: "промо инструмента или функции, а не новостное событие",
 };
@@ -573,7 +578,10 @@ export function DigestWizard({ digestId }: Props) {
   const pendingScrollToStep2Ref = useRef(false);
   const pendingPreselectKeptUrlsRef = useRef<string[]>([]);
   const lastSelectedUrlsRef = useRef<string[]>([]);
+  const newsWindowHydratedForRef = useRef<number | null>(null);
   const step3ModeRef = useRef<Step3ProgressMode>("analytics");
+  const step1AbortRef = useRef<AbortController | null>(null);
+  const [step1Stopping, setStep1Stopping] = useState(false);
   const [step1Elapsed, setStep1Elapsed] = useState(0);
   const [step3Elapsed, setStep3Elapsed] = useState(0);
   const [step4Elapsed, setStep4Elapsed] = useState(0);
@@ -707,14 +715,19 @@ export function DigestWizard({ digestId }: Props) {
   }, [digestId, loadDigest]);
 
   useEffect(() => {
+    newsWindowHydratedForRef.current = null;
+  }, [digestId]);
+
+  useEffect(() => {
     const d = digest?.digest;
-    if (!d) return;
+    if (!d || newsWindowHydratedForRef.current === digestId) return;
+    newsWindowHydratedForRef.current = digestId;
     if (d.news_window_days != null) setNewsWindowDays(Number(d.news_window_days) || 3);
     const kind = d.news_window_day_kind;
     if (kind === "working" || kind === "calendar") {
       setNewsWindowDayKind(kind);
     }
-  }, [digest?.digest?.news_window_days, digest?.digest?.news_window_day_kind, digest?.digest?.status]);
+  }, [digestId, digest?.digest]);
 
   useEffect(() => {
     const list = digest?.candidates as
@@ -803,9 +816,36 @@ export function DigestWizard({ digestId }: Props) {
   const canAnalytics = digestStatus === "selected" || digestStatus === "analytics_ready";
   const canStep4 = analyticsDone;
   const isFinal = digestStatus === "final_ready";
+  const releaseCostFinalized = Boolean(digest?.release_cost_finalized);
   const hasStep4Images = (digest?.image_variants?.length ?? 0) > 0;
   const hasStep4Outputs = (digest?.outputs?.length ?? 0) > 0;
   const showStep4Results = isFinal || hasStep4Images || hasStep4Outputs;
+
+  const handleFinalizeRelease = useCallback(async () => {
+    if (!isFinal || releaseCostFinalized) return;
+    const ok = window.confirm(
+      "Зафиксировать выпуск?\n\n" +
+        "Будет записана накопительная сумма ProxyAPI с начала работы над этим выпуском (шаг 0). " +
+        "После фиксации сумма «По выпуску» не изменится при дальнейших запросах к API.\n\n" +
+        "Топ-5 этого выпуска попадёт в список исключений для будущих сборов пула (фильтр «повтор из прошлых топ-5»).",
+    );
+    if (!ok) return;
+    setError("");
+    try {
+      setLoading(true);
+      setProgressLabel("Фиксация стоимости выпуска…");
+      const res = await api.finalizeRelease(digestId);
+      await loadDigest();
+      if (!res.already_finalized) {
+        setProgressLabel(`Зафиксировано: ${Number(res.release_cost_rub).toFixed(2)} ₽`);
+      }
+    } catch (e) {
+      setError((e as Error).message || "Не удалось зафиксировать выпуск.");
+    } finally {
+      setLoading(false);
+      setProgressLabel("");
+    }
+  }, [digestId, isFinal, loadDigest, releaseCostFinalized]);
 
   const selectedPlatformsList = useMemo(
     () => PLATFORM_ORDER.filter((p) => step4Platforms[p]),
@@ -852,6 +892,17 @@ export function DigestWizard({ digestId }: Props) {
     const total = entries.reduce((sum, [, count]) => sum + Number(count), 0);
     return { entries, total };
   }, [digest?.rejected_reasons_summary]);
+  const rejectAuditSamples = useMemo(() => {
+    const raw = digest?.step1_reject_audit;
+    const samplesByReason = raw && typeof raw === "object" ? (raw as any).samples_by_reason : null;
+    if (!samplesByReason || typeof samplesByReason !== "object") return [] as Array<{ code: string; sample: any }>;
+    return rejectReasonSummary.entries
+      .flatMap(([code]) => {
+        const samples = Array.isArray(samplesByReason[code]) ? samplesByReason[code] : [];
+        return samples.slice(0, 2).map((sample: any) => ({ code, sample }));
+      })
+      .slice(0, 4);
+  }, [digest?.step1_reject_audit, rejectReasonSummary.entries]);
   const step1AuditRows = useMemo(() => {
     const rows = [...(digest?.discovered_news || [])].sort((a: any, b: any) => {
       const ap = a.in_candidate_pool ? 0 : 1;
@@ -986,6 +1037,23 @@ export function DigestWizard({ digestId }: Props) {
         setSelected(res.selected_ids);
       }
     });
+  };
+
+  const confirmSelectedFive = async () => {
+    const validSelected = selected.filter((id) => {
+      const row = candidatesSorted.find((c: any) => c.id === id);
+      return Boolean(row) && candidateSelectableForStep2(row);
+    });
+    if (validSelected.length !== 5) {
+      setSelected(validSelected.slice(0, 5));
+      setError(
+        "Состав кандидатов обновился, и часть отмеченных новостей стала недоступна. Проверьте список и подтвердите 5 новостей снова.",
+      );
+      return;
+    }
+    await run("Шаг 2: сохранение выбранных пяти новостей…", () =>
+      api.selectNews(digestId, validSelected, false),
+    );
   };
 
   const updateDiscoveredDraft = useCallback((newsId: number, patch: Partial<DiscoveredDraft>) => {
@@ -1147,8 +1215,22 @@ export function DigestWizard({ digestId }: Props) {
       setLoading(false);
       setProgressLabel("");
       setRunningStepKey(null);
+      setStep1Stopping(false);
+      step1AbortRef.current = null;
     }
   };
+
+  const cancelStep1Collection = useCallback(async () => {
+    if (step1Stopping) return;
+    setStep1Stopping(true);
+    setError("");
+    try {
+      await api.step1Cancel(digestId);
+    } catch (e) {
+      setStep1Stopping(false);
+      setError((e as Error).message || "Не удалось отправить запрос на остановку.");
+    }
+  }, [digestId, step1Stopping]);
 
   const runStep1 = (rebuild: boolean) => {
     const keepIds = rebuild && selected.length > 0 ? [...selected] : [];
@@ -1188,11 +1270,14 @@ export function DigestWizard({ digestId }: Props) {
         pendingPreselectKeptUrlsRef.current = keptUrls;
         lastSelectedUrlsRef.current = keptUrls;
       }
+      const ac = new AbortController();
+      step1AbortRef.current = ac;
       await api.step1Run(digestId, manualUrlList, {
         rebuild,
         keep_candidate_ids: keepIds,
         news_window_days: newsWindowDays,
         news_window_day_kind: newsWindowDayKind,
+        signal: ac.signal,
       });
     });
   };
@@ -1307,8 +1392,16 @@ export function DigestWizard({ digestId }: Props) {
         collection_target_pages?: number;
         batch_size?: number;
         urls_raw_merged?: number;
+        urls_raw_unique?: number;
         urls_sent_to_http?: number;
         urls_prefilter_rejected?: number;
+        verified_total?: number;
+        conversion_e2e_pct?: number;
+        conversion_http_pct?: number;
+        conversion_prefilter_pct?: number;
+        conversion_e2e_baseline?: number | null;
+        estimated_raw_for_10?: number;
+        estimated_raw_for_10_run?: number;
       }
     | null;
 
@@ -1536,7 +1629,17 @@ export function DigestWizard({ digestId }: Props) {
         <div style={{ fontSize: "0.88rem", color: "#94a3b8", marginBottom: 8 }}>
           Текущий статус: <strong style={{ color: "#e2e8f0" }}>{digest?.digest?.status ?? "…"}</strong>
           {" · "}
-          По выпуску: {digest?.total_cost_rub != null ? `${Number(digest.total_cost_rub).toFixed(2)} ₽` : "—"}
+          По выпуску (накопительно):{" "}
+          {digest?.total_cost_rub != null ? (
+            <>
+              <strong style={{ color: releaseCostFinalized ? "#4ade80" : "#e2e8f0" }}>
+                {Number(digest.total_cost_rub).toFixed(2)} ₽
+              </strong>
+              {releaseCostFinalized ? " · зафиксировано" : " · до фиксации"}
+            </>
+          ) : (
+            "—"
+          )}
           {" · "}
           Сегодня ProxyAPI:{" "}
           {digest?.proxyapi_spent_today_rub != null
@@ -1551,10 +1654,10 @@ export function DigestWizard({ digestId }: Props) {
         </p>
         <WizardWhy summary="Что означают статус и суммы в рублях">
           <p>
-            <strong>Статус</strong> — этап конвейера на сервере. <strong>По выпуску</strong> — разница баланса ProxyAPI
-            с начала работы над выпуском до последнего шага (снимки до и после каждого запуска шагов 1–4).{" "}
-            <strong>Сегодня ProxyAPI</strong> — разница баланса с первого запуска backend за календарный день (МСК) до
-            текущего момента.
+            <strong>Статус</strong> — этап конвейера на сервере. <strong>По выпуску (накопительно)</strong> — все
+            списания ProxyAPI с момента шага 0 по этому выпуску до фиксации кнопкой внизу (включая шаг 1: веб-поиск,
+            Telegram). <strong>Сегодня ProxyAPI</strong> — все списания с этим ключом за календарный день (МСК), включая
+            другие инструменты с тем же ключом.
           </p>
         </WizardWhy>
         <WizardWhy summary="Панель, ссылка и кнопка «Создать на сегодня» — в чём разница">
@@ -1790,23 +1893,6 @@ export function DigestWizard({ digestId }: Props) {
             Календарные
           </label>
         </fieldset>
-        {!isDraft && digest?.digest?.status && digest.digest.status !== "step_0" ? (
-          <button
-            type="button"
-            disabled={loading}
-            style={{ alignSelf: "flex-start" }}
-            onClick={() =>
-              void run("Сохранение окна дат…", () =>
-                api.patchNewsWindow(digestId, {
-                  news_window_days: newsWindowDays,
-                  news_window_day_kind: newsWindowDayKind,
-                }),
-              )
-            }
-          >
-            Сохранить окно дат
-          </button>
-        ) : null}
         <WizardWhy summary="Зачем тип важен и как ведут себя кнопки">
           <p>
             От выбора зависят промпты к ИИ на шагах 1–4 — это не просто «стиль оформления». До первого сохранения ни одна
@@ -1820,8 +1906,8 @@ export function DigestWizard({ digestId }: Props) {
           <p>
             <strong>Окно новостей</strong> ограничивает шаг 1: в пул попадают только материалы с датой публикации не раньше N
             дней от даты выпуска (календарных или рабочих). Слишком старые URL отсекаются с причиной{" "}
-            <code>published_before_window</code>. Изменили число дней или тип дней — при следующем{" "}
-            <strong>запуске или пересборке шага 1</strong> окно подставится автоматически (сохраняется в выпуск перед поиском).
+            <code>published_before_window</code>. Отдельно сохранять окно не нужно: при каждом{" "}
+            <strong>запуске или пересборке шага 1</strong> сервер берёт текущие значения из полей шага 0.
           </p>
         </WizardWhy>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -1884,6 +1970,13 @@ export function DigestWizard({ digestId }: Props) {
       <div className="card" ref={step1CardRef}>
         <h3>Шаг 1 — кандидаты</h3>
         <StepProgressBar active={runningStepKey === "1"} />
+        <p className="wizard-hint-do" style={{ fontSize: "0.95rem", margin: "0 0 10px" }}>
+          Окно новостей (из шага 0):{" "}
+          <strong>
+            {newsWindowDays} {newsWindowDayKind === "working" ? "рабочих" : "календарных"}
+          </strong>{" "}
+          дн. — будет применено при запуске или пересборке сбора.
+        </p>
         <ul className="wizard-hint-do-list">
           <li>
             При необходимости вставьте важные URL в поле ниже (каждая строка — отдельная ссылка; такие материалы должны
@@ -1913,12 +2006,27 @@ export function DigestWizard({ digestId }: Props) {
           </p>
         ) : null}
         {step1CollectionInProgress ? (
-          <WizardStepStatus
-            headline="Идёт сбор кандидатов"
-            phase={step1PhaseText}
-            elapsedSec={step1Elapsed}
-            hint="Итеративный сбор обычно занимает 3–5 минут. Не закрывайте вкладку до завершения."
-          />
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+            <WizardStepStatus
+              headline="Идёт сбор кандидатов"
+              phase={step1PhaseText}
+              elapsedSec={step1Elapsed}
+              hint={
+                step1Stopping
+                  ? "Останавливаем после текущей проверки URL…"
+                  : "Итеративный сбор обычно занимает 3–5 минут. Можно остановить — сохранится частичный результат."
+              }
+            />
+            <button
+              type="button"
+              className="btn-rebuild"
+              disabled={step1Stopping}
+              title="Остановить поиск и проверку; уже найденные кандидаты сохранятся"
+              onClick={() => void cancelStep1Collection()}
+            >
+              {step1Stopping ? "Останавливаем…" : "Остановить сбор"}
+            </button>
+          </div>
         ) : null}
         {proxyapiBudgetText ? <ProxyapiBudgetAlert message={proxyapiBudgetText} compact /> : null}
         <textarea
@@ -1996,7 +2104,16 @@ export function DigestWizard({ digestId }: Props) {
             {" · "}
             остановка: <strong>{formatStep1StopReason(step1CollectionMeta.stop_reason)}</strong>
             {" · "}
+            в пуле: <strong>{Number(step1CollectionMeta.verified_total ?? 0)}</strong>
+            {" · "}
             время: <strong>{Math.max(0, Number(step1CollectionMeta.elapsed_sec ?? 0))} c</strong>
+            {digest?.release_cost_rub != null && Number(digest.release_cost_rub) > 0 ? (
+              <>
+                {" · "}
+                ProxyAPI (накопительно): <strong>{Number(digest.release_cost_rub).toFixed(2)} ₽</strong>
+                {releaseCostFinalized ? " · зафикс." : ""}
+              </>
+            ) : null}
             {" · "}
             батч: <strong>{Math.max(1, Number(step1CollectionMeta.batch_size ?? 20))}</strong>
             {" · "}
@@ -2014,9 +2131,60 @@ export function DigestWizard({ digestId }: Props) {
             {Number(step1CollectionMeta.urls_raw_merged ?? 0) > 0 ? (
               <>
                 {" "}
-                · воронка: сырые URL <strong>{Number(step1CollectionMeta.urls_raw_merged)}</strong>
+                · воронка: сырые URL{" "}
+                <strong>{Number(step1CollectionMeta.urls_raw_unique ?? step1CollectionMeta.urls_raw_merged)}</strong>
+                {Number(step1CollectionMeta.urls_raw_unique ?? 0) > 0 &&
+                Number(step1CollectionMeta.urls_raw_merged ?? 0) !==
+                  Number(step1CollectionMeta.urls_raw_unique ?? 0) ? (
+                  <> (батчей {Number(step1CollectionMeta.urls_raw_merged)})</>
+                ) : null}
                 {", "}на HTTP <strong>{Number(step1CollectionMeta.urls_sent_to_http ?? 0)}</strong>
                 {", "}отсев до HTTP <strong>{Number(step1CollectionMeta.urls_prefilter_rejected ?? 0)}</strong>
+                {step1CollectionMeta.conversion_e2e_pct != null ? (
+                  <>
+                    {" "}
+                    · конверсия в пул{" "}
+                    <strong>{Number(step1CollectionMeta.conversion_e2e_pct).toFixed(1)}%</strong>
+                    {step1CollectionMeta.conversion_http_pct != null ? (
+                      <> (HTTP→пул {Number(step1CollectionMeta.conversion_http_pct).toFixed(1)}%)</>
+                    ) : null}
+                  </>
+                ) : null}
+                {Number(step1CollectionMeta.estimated_raw_for_10 ?? 0) > 0 ? (
+                  <>
+                    {" "}
+                    · план raw для 10: <strong>{Number(step1CollectionMeta.estimated_raw_for_10)}</strong>
+                  </>
+                ) : null}
+              </>
+            ) : null}
+            {rejectReasonSummary.entries.length > 0 ? (
+              <>
+                {" · "}
+                топ отбраковки:{" "}
+                {rejectReasonSummary.entries.slice(0, 3).map(([code, count], idx) => (
+                  <span key={code}>
+                    {idx > 0 ? ", " : null}
+                    <strong>
+                      {REJECT_REASON_LABELS[code] ? REJECT_REASON_LABELS[code] : code} ({count})
+                    </strong>
+                  </span>
+                ))}
+              </>
+            ) : null}
+            {rejectAuditSamples.length > 0 ? (
+              <>
+                <br />
+                Примеры отсева:{" "}
+                {rejectAuditSamples.map(({ code, sample }, idx) => (
+                  <span key={`${code}-${idx}`}>
+                    {idx > 0 ? "; " : null}
+                    <strong>{REJECT_REASON_LABELS[code] ? REJECT_REASON_LABELS[code] : code}</strong>:{" "}
+                    {String(sample.host || "").trim() || hostFromUrl(String(sample.url || "")) || "без домена"}
+                    {sample.published_at ? ` · ${String(sample.published_at).slice(0, 10)}` : ""}
+                    {sample.title ? ` · ${truncateText(String(sample.title), 90)}` : ""}
+                  </span>
+                ))}
               </>
             ) : null}
           </p>
@@ -2511,10 +2679,21 @@ export function DigestWizard({ digestId }: Props) {
             </p>
           ) : null}
           {step1CollectionInProgress && candidatesSorted.length === 0 ? (
-            <p className="wizard-hint-do" style={{ fontSize: "0.95rem" }}>
-              Идёт сбор и проверка кандидатов (время не ограничено в браузере). Списки появятся здесь сразу после завершения — не уходите со
-              страницы, при необходимости прокрутите к этому блоку.
-            </p>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
+              <p className="wizard-hint-do" style={{ fontSize: "0.95rem", margin: 0 }}>
+                Идёт сбор и проверка кандидатов. Списки появятся здесь сразу после завершения — при необходимости прокрутите к
+                шагу 1 или остановите сбор.
+              </p>
+              <button
+                type="button"
+                className="btn-rebuild"
+                disabled={step1Stopping}
+                title="Остановить поиск и проверку; уже найденные кандидаты сохранятся"
+                onClick={() => void cancelStep1Collection()}
+              >
+                {step1Stopping ? "Останавливаем…" : "Остановить сбор"}
+              </button>
+            </div>
           ) : proxyapiBudgetText ? (
             <ProxyapiBudgetAlert message={proxyapiBudgetText} compact />
           ) : !canSelect && hasCandidatePool && !hasSelectableInPool ? (
@@ -2709,11 +2888,7 @@ export function DigestWizard({ digestId }: Props) {
               type="button"
               disabled={!canSelect || selected.length !== 5 || loading}
               title="Сохраняет именно те пять новостей, чьи чекбоксы отмечены"
-              onClick={() =>
-                run("Шаг 2: сохранение выбранных пяти новостей…", () =>
-                  api.selectNews(digestId, selected, false),
-                )
-              }
+              onClick={() => void confirmSelectedFive()}
             >
               Подтвердить 5 новостей
             </button>
@@ -2959,13 +3134,17 @@ export function DigestWizard({ digestId }: Props) {
         ) : (
           <>
             <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-              Сначала обложки (если включены на сервере), затем тексты площадок. Под каждым заголовком в постах — 2–4
-              простых предложения для читателей (до 450 символов, без учёта заголовка).
+              Сначала обложки (если включены на сервере), затем тексты площадок. Текст поста и обложка публикуются
+              отдельно: скопируйте текст кнопкой ниже, обложку — скачайте или возьмите JPG из папки{" "}
+              <code>images/</code> по типу выпуска. Под каждым заголовком — 2–4 простых предложения для читателей (до 450
+              символов, без учёта заголовка).
             </p>
             <WizardWhy summary="Зачем раздельные действия">
               <p>
                 Обложки и тексты — отдельные запросы к ИИ: можно перегенерировать картинки, не трогая посты, и наоборот.
-                Выбранная обложка попадает в .docx. Тексты площадок собираются из аналитики шага 3 через ReaderCopyAgent.
+                Выбранная AI-обложка попадает в .docx. Тексты для читателей — через ReaderCopyAgent; финальную вёрстку
+                (markdown Telegram, HTML MAX/Дzen, plain VK) собирает сервер в{" "}
+                <code>platform_assembly.py</code>.
               </p>
             </WizardWhy>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
@@ -2984,7 +3163,10 @@ export function DigestWizard({ digestId }: Props) {
               <div className="card" style={{ marginTop: 12, padding: 12, color: "#94a3b8" }}>
                 <h4>4.1 — Обложки</h4>
                 <p style={{ margin: 0, fontSize: "0.92rem" }}>
-                  Генерация обложек временно отключена на сервере. Шаг 4.2 (тексты площадок) доступен без обложки.
+                  Генерация обложек на сервере отключена. Тексты площадок (блок 4.2) доступны без AI-обложки. Для
+                  публикации используйте файлы <strong>Дайджест новостей Серьезный.jpg</strong> /{" "}
+                  <strong>Курьезный.jpg</strong> из папки <code>images/</code> проекта — загрузите их в редактор площадки
+                  вручную, отдельно от текста.
                 </p>
               </div>
             ) : (
@@ -3046,11 +3228,12 @@ export function DigestWizard({ digestId }: Props) {
                   </div>
                   {digest?.step4_selected_image_variant ? (
                     <p style={{ marginTop: 8, color: "#a78bfa", fontSize: "0.9rem" }}>
-                      Выбран вариант {digest.step4_selected_image_variant} — используется для экспорта и .docx.
+                      Выбран вариант {digest.step4_selected_image_variant} — скачайте ниже на шаге «результат» и
+                      загрузите в редактор площадки отдельно от текста.
                     </p>
                   ) : (
                     <p style={{ marginTop: 8, color: "#fbbf24", fontSize: "0.9rem" }}>
-                      Обложка ещё не выбрана — выберите вариант перед публикацией.
+                      Обложка ещё не выбрана — отметьте вариант или используйте JPG из <code>images/</code>.
                     </p>
                   )}
                 </div>
@@ -3060,6 +3243,10 @@ export function DigestWizard({ digestId }: Props) {
 
             <div className="card" style={{ marginTop: 12, padding: 12 }}>
               <h4>4.2 — Тексты площадок</h4>
+              <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
+                Сервер собирает финальный текст: Telegram (markdown), MAX и Дzen (HTML), ВК (plain text). Копирование —
+                на шаге «результат»; обложка не входит в буфер.
+              </p>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 10 }}>
                 {PLATFORM_ORDER.map((p) => (
                   <label key={p} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
@@ -3077,7 +3264,7 @@ export function DigestWizard({ digestId }: Props) {
               !digest?.step4_selected_image_variant &&
               hasStep4Images ? (
                 <p style={{ color: "#fbbf24", fontSize: "0.9rem", marginBottom: 8 }}>
-                  Рекомендуем выбрать обложку выше — в .docx попадёт выбранный вариант.
+                  Рекомендуем выбрать обложку выше — она попадёт в .docx; на площадку загружайте её отдельно от текста.
                 </p>
               ) : null}
               <button
@@ -3102,13 +3289,14 @@ export function DigestWizard({ digestId }: Props) {
         <div className="card">
           <h3>Шаг 4 — результат</h3>
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-            Скопируйте тексты кнопкой «Скопировать текст» и вставьте в редактор площадки (Ctrl+V). Описания под заголовками —
-            короткие, разговорные, без канцелярита. Скачайте .docx или обложку по ссылкам ниже.
+            Скопируйте текст кнопкой «Скопировать текст для …» и вставьте в редактор площадки (Ctrl+V). Обложку
+            загружайте отдельно — по ссылке ниже или из <code>images/</code>. Telegram — markdown; MAX и Дzen — HTML
+            (только через кнопку, не из поля); ВК — plain text. Скачайте .docx для архива.
           </p>
           <div style={{ marginBottom: 10 }}>
             {digest?.step4_selected_image_variant || digest?.image_path ? (
               <a href={assetUrl(digestId, "image")} target="_blank" rel="noopener noreferrer">
-                Скачать выбранную обложку
+                Скачать обложку (загрузить на площадку отдельно)
               </a>
             ) : null}
             {digest?.step4_selected_image_variant || digest?.image_path ? " | " : null}
@@ -3130,13 +3318,23 @@ export function DigestWizard({ digestId }: Props) {
                 {o.platform === "max" || o.platform === "dzen" ? (
                   <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
                     HTML для веб-редактора {label}: жирная шапка, кликабельные заголовки, отступы между абзацами.
-                    Нажмите «Скопировать» и вставьте в поле поста (Ctrl+V) — не копируйте вручную из поля, если нужны
-                    ссылки и жирный текст.
+                    Нажмите «Скопировать текст для {label}» и вставьте в поле поста (Ctrl+V) — не копируйте вручную из
+                    поля, иначе форматирование не сохранится.
                     {/\*\*|\\]\(/.test(String(o.content ?? "")) && !/<a\s+href=/i.test(String(o.content ?? "")) ? (
                       <span style={{ display: "block", color: "#fbbf24", marginTop: 6 }}>
-                        В поле ещё старый markdown — обновите страницу или перезапустите «Шаг 4 — тексты».
+                        В поле markdown вместо HTML — обновите страницу выпуска (сервер пересоберёт вёрстку) или
+                        перезапустите «Шаг 4 — тексты».
                       </span>
                     ) : null}
+                  </p>
+                ) : o.platform === "telegram" ? (
+                  <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
+                    Markdown: жирная шапка, ссылки в заголовках новостей. Копируйте кнопкой и вставляйте в Telegram
+                    (Ctrl+V).
+                  </p>
+                ) : o.platform === "vk" ? (
+                  <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
+                    Plain text: заголовки CAPS, после каждой новости строка «Подробности: URL». Без markdown.
                   </p>
                 ) : null}
                 <textarea
@@ -3202,7 +3400,8 @@ export function DigestWizard({ digestId }: Props) {
           <h3>Стоимость запросов</h3>
           <WizardWhy summary="Зачем эта таблица">
             <p>
-              Списание по шагам выпуска: разница баланса ProxyAPI до и после операции. Сверяйте с суммой «По выпуску» в шапке.
+              Списание по шагам (где записано): разница баланса ProxyAPI до и после операции. Полная сумма выпуска — в шапке
+              «По выпуску (накопительно)» и после кнопки «Зафиксировать».
             </p>
           </WizardWhy>
           <div style={{ overflowX: "auto" }}>
@@ -3235,6 +3434,44 @@ export function DigestWizard({ digestId }: Props) {
           </div>
         </div>
       )}
+
+      {isFinal ? (
+        <div
+          className="card"
+          style={{
+            marginTop: 16,
+            borderColor: releaseCostFinalized ? "#166534" : "#475569",
+            background: releaseCostFinalized ? "rgba(22, 101, 52, 0.12)" : undefined,
+          }}
+        >
+          <h3 style={{ marginTop: 0 }}>Фиксация выпуска</h3>
+          <p className="wizard-hint-do" style={{ marginBottom: 12 }}>
+            {releaseCostFinalized ? (
+              <>
+                Стоимость зафиксирована: <strong>{Number(digest?.total_cost_rub ?? 0).toFixed(2)} ₽</strong>
+                {digest?.release_cost_finalized_at
+                  ? ` (${formatRunWhen(digest.release_cost_finalized_at)})`
+                  : null}
+                . Сумма больше не меняется.
+              </>
+            ) : (
+              <>
+                Накопительно по ProxyAPI на этот выпуск сейчас:{" "}
+                <strong>{Number(digest?.release_cost_rub ?? digest?.total_cost_rub ?? 0).toFixed(2)} ₽</strong>. Нажмите
+                «Зафиксировать», когда результат на шаге 4 готов и правки закончены — в шапке останется итоговая сумма.
+              </>
+            )}
+          </p>
+          <button
+            type="button"
+            className="btn-primary"
+            disabled={releaseCostFinalized || loading}
+            onClick={() => void handleFinalizeRelease()}
+          >
+            {releaseCostFinalized ? "Выпуск зафиксирован" : "Зафиксировать"}
+          </button>
+        </div>
+      ) : null}
 
       {digest?.model_recommendations?.length > 0 && (
         <div className="card">

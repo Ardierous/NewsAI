@@ -133,8 +133,8 @@ def test_bundle_handles_http_error(monkeypatch):
 def test_source_policy_flags_aggregator():
     tier, is_aggregator, status = ds._classify_source_policy("https://news.google.com/articles/abc")
     assert is_aggregator is True
-    assert tier == "Tier-5"
-    assert status == "❗ без подтверждения"
+    assert tier == "Tier-2"
+    assert "сомнительный" in status or "подтверждено" in status
 
 
 def test_editorial_headline_rejects_numeric_ids():

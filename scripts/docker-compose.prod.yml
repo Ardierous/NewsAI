@@ -1,0 +1,28 @@
+services:
+  backend:
+    image: ${DOCKER_USERNAME:-avardous}/${DOCKER_BACKEND_REPO:-extellect-news-backend}:${DOCKER_TAG:-latest}
+    container_name: extellect-backend
+    env_file:
+      - ../backend/.env
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8000
+      FRONTEND_ORIGIN: http://localhost:3000
+      DATABASE_URL: sqlite:///./storage/digest.db
+    volumes:
+      - ../backend/storage:/app/storage
+      - ../backend/logs:/app/logs
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    image: ${DOCKER_USERNAME:-avardous}/${DOCKER_FRONTEND_REPO:-extellect-news-frontend}:${DOCKER_TAG:-latest}
+    container_name: extellect-frontend
+    depends_on:
+      - backend
+    environment:
+      NEXT_PUBLIC_API_BASE: http://localhost:8000
+    ports:
+      - "3000:3000"
+    restart: unless-stopped

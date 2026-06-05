@@ -8,8 +8,17 @@ export function isProxyapiBudgetError(text: string): boolean {
   return (
     t.includes("402") ||
     t.includes("budget exceeded") ||
+    t.includes("нулевой баланс") ||
     (t.includes("proxyapi") && (t.includes("бюджет") || t.includes("баланс")))
   );
+}
+
+export function proxyapiBudgetAlertTitle(message: string): string {
+  const t = message.toLowerCase();
+  if (t.includes("нулевой баланс")) {
+    return "Нулевой баланс ProxyAPI";
+  }
+  return "Исчерпан бюджет ключа ProxyAPI";
 }
 
 export function ProxyapiBudgetAlert({ message, compact }: Props) {
@@ -26,7 +35,7 @@ export function ProxyapiBudgetAlert({ message, compact }: Props) {
       }}
     >
       <h3 style={{ marginTop: 0, fontSize: compact ? "1rem" : "1.08rem", color: "#fca5a5" }}>
-        Исчерпан бюджет ключа ProxyAPI
+        {proxyapiBudgetAlertTitle(message)}
       </h3>
       <p style={{ margin: "0 0 12px", lineHeight: 1.55, fontSize: "0.96rem" }}>{message}</p>
       <p className="wizard-hint-do" style={{ margin: 0, color: "#fde68a", fontSize: "0.92rem" }}>

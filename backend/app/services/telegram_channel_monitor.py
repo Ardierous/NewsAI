@@ -7,7 +7,7 @@ import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import requests
@@ -46,12 +46,29 @@ _HREF_RE = re.compile(r"""href=["'](https?://[^"'#\s]+)""", re.IGNORECASE)
 _PREV_BEFORE_RE = re.compile(r"""href="/s/([^"?]+)\?before=(\d+)""")
 
 
+_DIGEST_TEXT_MARKER = "Дайджест"
+
+
 @dataclass(frozen=True)
 class TelegramPostLinks:
     channel: str
     post_id: int
     published_at: datetime
+    text_html: str
     urls: tuple[str, ...]
+
+
+def message_plain_text(text_html: str) -> str:
+    if not text_html:
+        return ""
+    return re.sub(r"<[^>]+>", "", html.unescape(text_html))
+
+
+def post_matches_text_filter(post: TelegramPostLinks, text_filter: str | None) -> bool:
+    needle = (text_filter or "").strip()
+    if not needle:
+        return True
+    return needle.casefold() in message_plain_text(post.text_html).casefold()
 
 
 def parse_monitor_channels(raw: str | None) -> tuple[str, ...]:
@@ -140,13 +157,12 @@ def parse_channel_posts_html(html_text: str, channel: str) -> list[TelegramPostL
             continue
         body = _extract_message_text_html(chunk)
         urls = extract_external_urls_from_message_html(body)
-        if not urls:
-            continue
         posts.append(
             TelegramPostLinks(
                 channel=channel_key,
                 post_id=int(post_id_s),
                 published_at=published,
+                text_html=body,
                 urls=tuple(urls),
             )
         )
@@ -164,7 +180,7 @@ def _prev_before_id(html_text: str, channel: str) -> int | None:
     return None
 
 
-def fetch_channel_html(channel: str, *, before: int | None = None, timeout: float = 20.0) -> str:
+def fetch_channel_html(channel: str, *, before: int | None = None, timeout: float = 10.0) -> str:
     ch = normalize_channel_username(channel)
     if not ch:
         raise ValueError(f"invalid channel: {channel!r}")
@@ -176,30 +192,170 @@ def fetch_channel_html(channel: str, *, before: int | None = None, timeout: floa
     return r.text
 
 
+def collect_urls_from_digest_posts(
+    posts: list[TelegramPostLinks],
+    *,
+    earliest_date: date | None = None,
+    max_digest_posts: int = 3,
+    post_text_filter: str | None = _DIGEST_TEXT_MARKER,
+    max_links: int = 30,
+) -> list[str]:
+    """Внешние URL из последних digest-постов (новые первыми)."""
+    max_digest_posts = max(1, min(max_digest_posts, 10))
+    max_links = max(1, min(max_links, 80))
+    ordered: list[str] = []
+    seen: set[str] = set()
+    digest_posts_used = 0
+    for post in posts:
+        if digest_posts_used >= max_digest_posts or len(ordered) >= max_links:
+            break
+        pub_day = post.published_at.date()
+        if earliest_date is not None and pub_day < earliest_date:
+            break
+        if not post_matches_text_filter(post, post_text_filter):
+            continue
+        digest_posts_used += 1
+        for url in post.urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            ordered.append(url)
+            if len(ordered) >= max_links:
+                return ordered
+    return ordered
+
+
+def filter_telegram_external_urls(urls: list[str], *, max_links: int = 30) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for url in urls:
+        u = (url or "").strip()
+        if not u.startswith("http") or is_telegram_internal_url(u):
+            continue
+        if u in seen:
+            continue
+        seen.add(u)
+        ordered.append(u)
+        if len(ordered) >= max(1, max_links):
+            break
+    return ordered
+
+
+def _collect_via_proxyapi(
+    settings: Settings,
+    channels: tuple[str, ...],
+    *,
+    earliest_date: date | None,
+    max_pages: int,
+    max_links: int,
+    max_digest_posts: int,
+    post_text_filter: str | None,
+    proxy: Any | None = None,
+) -> list[str]:
+    if not getattr(settings, "proxyapi_web_search_enabled", True):
+        logger.info("Telegram monitor (ProxyAPI): web_search отключён, пропуск")
+        return []
+    if not getattr(settings, "step1_telegram_via_proxyapi", True):
+        return []
+
+    from app.proxyapi_client import ProxyApiClient
+
+    client = proxy or ProxyApiClient()
+    ctx_size = str(
+        getattr(settings, "step1_telegram_proxyapi_context_size", None)
+        or getattr(settings, "proxyapi_web_search_context_size", "medium")
+        or "medium"
+    ).strip().lower()
+    if ctx_size not in ("low", "medium", "high"):
+        ctx_size = "high"
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for channel in channels:
+        if len(ordered) >= max_links:
+            break
+        try:
+            raw_urls, html_pages = client.fetch_telegram_digest_seed_urls(
+                channel,
+                earliest_date=earliest_date,
+                max_digest_posts=max_digest_posts,
+                post_text_filter=post_text_filter or _DIGEST_TEXT_MARKER,
+                max_links=max_links - len(ordered),
+                search_context_size=ctx_size,
+                max_pages=max_pages,
+            )
+        except Exception:
+            logger.exception("Telegram monitor (ProxyAPI): ошибка channel=%s", channel)
+            continue
+
+        channel_urls: list[str] = []
+        for html_text in html_pages:
+            if "tgme_widget_message" not in html_text:
+                continue
+            posts = parse_channel_posts_html(html_text, channel)
+            channel_urls.extend(
+                collect_urls_from_digest_posts(
+                    posts,
+                    earliest_date=earliest_date,
+                    max_digest_posts=max_digest_posts,
+                    post_text_filter=post_text_filter,
+                    max_links=max_links,
+                )
+            )
+        channel_urls = filter_telegram_external_urls(
+            [*channel_urls, *raw_urls],
+            max_links=max_links,
+        )
+        for url in channel_urls:
+            if url in seen:
+                continue
+            seen.add(url)
+            ordered.append(url)
+            if len(ordered) >= max_links:
+                break
+
+    logger.info(
+        "Telegram monitor (ProxyAPI): собрано внешних URL=%s channels=%s earliest=%s filter=%r max_digest_posts=%s",
+        len(ordered),
+        ",".join(channels),
+        earliest_date.isoformat() if earliest_date else "any",
+        post_text_filter or "",
+        max_digest_posts,
+    )
+    return ordered
+
+
 def collect_external_links_from_channels(
     channels: tuple[str, ...],
     *,
     earliest_date: date | None = None,
     max_pages: int = 2,
     max_links: int = 30,
-    timeout: float = 20.0,
+    max_digest_posts: int = 3,
+    post_text_filter: str | None = _DIGEST_TEXT_MARKER,
+    timeout: float = 10.0,
 ) -> list[str]:
     """
     Собрать уникальные внешние URL из последних постов каналов (новые посты первыми).
-    Посты старше earliest_date пропускаются; при необходимости подгружается предыдущая страница t.me/s/.
+    По умолчанию — только max_digest_posts последних постов с «Дайджест» в тексте.
+    Посты старше earliest_date не учитываются; при необходимости подгружается предыдущая страница t.me/s/.
     """
     if not channels:
         return []
     max_pages = max(1, min(max_pages, 5))
     max_links = max(1, min(max_links, 80))
+    max_digest_posts = max(1, min(max_digest_posts, 10))
     ordered: list[str] = []
     seen: set[str] = set()
 
     for channel in channels:
         before: int | None = None
         pages = 0
+        digest_posts_used = 0
         stop_channel = False
         while pages < max_pages and not stop_channel and len(ordered) < max_links:
+            if digest_posts_used >= max_digest_posts:
+                break
             pages += 1
             try:
                 html_page = fetch_channel_html(channel, before=before, timeout=timeout)
@@ -214,16 +370,34 @@ def collect_external_links_from_channels(
                 pub_day = post.published_at.date()
                 if oldest_on_page is None or pub_day < oldest_on_page:
                     oldest_on_page = pub_day
-                if earliest_date is not None and pub_day < earliest_date:
-                    stop_channel = True
+
+            page_urls = collect_urls_from_digest_posts(
+                posts,
+                earliest_date=earliest_date,
+                max_digest_posts=max_digest_posts - digest_posts_used,
+                post_text_filter=post_text_filter,
+                max_links=max_links - len(ordered),
+            )
+            for url in page_urls:
+                if url in seen:
                     continue
-                for url in post.urls:
-                    if url in seen:
-                        continue
-                    seen.add(url)
-                    ordered.append(url)
-                    if len(ordered) >= max_links:
-                        return ordered
+                seen.add(url)
+                ordered.append(url)
+                if len(ordered) >= max_links:
+                    return ordered
+
+            for post in posts:
+                if digest_posts_used >= max_digest_posts:
+                    break
+                if earliest_date is not None and post.published_at.date() < earliest_date:
+                    stop_channel = True
+                    break
+                if not post_matches_text_filter(post, post_text_filter):
+                    continue
+                digest_posts_used += 1
+
+            if digest_posts_used >= max_digest_posts:
+                break
             if earliest_date is not None and oldest_on_page is not None and oldest_on_page < earliest_date:
                 stop_channel = True
             if stop_channel:
@@ -234,10 +408,12 @@ def collect_external_links_from_channels(
             before = next_before
 
     logger.info(
-        "Telegram monitor: собрано внешних URL=%s channels=%s earliest=%s",
+        "Telegram monitor (direct): собрано внешних URL=%s channels=%s earliest=%s filter=%r max_digest_posts=%s",
         len(ordered),
         ",".join(channels),
         earliest_date.isoformat() if earliest_date else "any",
+        post_text_filter or "",
+        max_digest_posts,
     )
     return ordered
 
@@ -246,15 +422,33 @@ def collect_telegram_seed_urls_for_digest(
     settings: Settings,
     *,
     earliest_date: date | None,
+    proxy: Any | None = None,
 ) -> list[str]:
     if not getattr(settings, "step1_telegram_monitor_enabled", True):
         return []
     channels = parse_monitor_channels(getattr(settings, "step1_telegram_monitor_channels", "") or "")
     if not channels:
         return []
-    return collect_external_links_from_channels(
-        channels,
+    text_filter = getattr(settings, "step1_telegram_post_text_filter", _DIGEST_TEXT_MARKER) or ""
+    max_pages = int(getattr(settings, "step1_telegram_max_pages", 2) or 2)
+    max_links = int(getattr(settings, "step1_telegram_max_links", 30) or 30)
+    max_digest_posts = int(getattr(settings, "step1_telegram_max_digest_posts", 3) or 3)
+    post_text_filter = text_filter.strip() or None
+    timeout = float(getattr(settings, "step1_telegram_timeout_sec", 10.0) or 10.0)
+    kwargs = dict(
         earliest_date=earliest_date,
-        max_pages=int(getattr(settings, "step1_telegram_max_pages", 2) or 2),
-        max_links=int(getattr(settings, "step1_telegram_max_links", 30) or 30),
+        max_pages=max_pages,
+        max_links=max_links,
+        max_digest_posts=max_digest_posts,
+        post_text_filter=post_text_filter,
     )
+
+    if getattr(settings, "step1_telegram_via_proxyapi", True):
+        proxy_urls = _collect_via_proxyapi(settings, channels, proxy=proxy, **kwargs)
+        if proxy_urls:
+            return proxy_urls
+        if not getattr(settings, "step1_telegram_direct_fallback", True):
+            return []
+        logger.info("Telegram monitor: ProxyAPI не вернул URL, пробуем direct t.me")
+
+    return collect_external_links_from_channels(channels, timeout=timeout, **kwargs)

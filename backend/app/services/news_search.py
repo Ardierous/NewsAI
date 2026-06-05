@@ -44,6 +44,9 @@ _LISTING_PATH_EXACT = frozenset(
         "/news",
         "/articles",
         "/article",
+        "/ai",
+        "/artificial-intelligence",
+        "/artificial_intelligence",
         "/blog",
         "/posts",
         "/novosti",
@@ -268,25 +271,18 @@ def fetch_article_urls_raw_merged(
     search_context_size: str | None = None,
     include_domains: list[str] | None = None,
     allowed_hosts: list[str] | None = None,
+    force_proxyapi: bool = False,
+    proxy_fallback_on_empty: bool = False,
 ) -> list[str]:
     """
-    Сырые уникальные URL от всех доступных провайдеров (до _filter_search_urls).
-    ProxyAPI + SerpAPI + Tavily объединяются, а не «первый победил».
+    Сырые уникальные URL (до _filter_search_urls).
+    При web_search_prefer_alt_providers: SerpAPI/Tavily первыми, ProxyAPI — если мало URL или force_proxyapi.
     """
     fetch_cap = max(limit, 15)
+    prefer_alt = bool(getattr(settings, "step1_web_search_prefer_alt_providers", True))
+    min_before_proxy = max(0, int(getattr(settings, "step1_min_urls_before_proxyapi", 5) or 5))
     merged: list[str] = []
-    if settings.enable_web_fetch and settings.proxyapi_web_search_enabled and proxy is not None:
-        try:
-            merged.extend(
-                proxy.search_news_article_urls(
-                    query,
-                    limit=fetch_cap,
-                    search_context_size=search_context_size,
-                    allowed_hosts=allowed_hosts,
-                )
-            )
-        except Exception:
-            logger.warning("ProxyAPI web_search: ошибка запроса", exc_info=True)
+
     if settings.serpapi_api_key:
         merged.extend(_serpapi_google_news_urls(settings.serpapi_api_key, query, fetch_cap))
     if settings.tavily_api_key:
@@ -298,12 +294,36 @@ def fetch_article_urls_raw_merged(
                 include_domains=include_domains or allowed_hosts,
             )
         )
+    merged = _uniq_urls(merged)
+
+    need_proxy = force_proxyapi or not prefer_alt or len(merged) < min_before_proxy
+    if need_proxy and settings.enable_web_fetch and settings.proxyapi_web_search_enabled and proxy is not None:
+        try:
+            proxy_urls = proxy.search_news_article_urls(
+                query,
+                limit=fetch_cap,
+                search_context_size=search_context_size,
+                allowed_hosts=allowed_hosts,
+                fallback_on_empty=proxy_fallback_on_empty,
+            )
+            if proxy_urls:
+                merged = _uniq_urls([*merged, *proxy_urls])
+                logger.info(
+                    "Веб-поиск: ProxyAPI web_search | count=%s prefer_alt=%s force=%s",
+                    len(proxy_urls),
+                    prefer_alt,
+                    force_proxyapi,
+                )
+        except Exception:
+            logger.warning("ProxyAPI web_search: ошибка запроса", exc_info=True)
+
     out = _uniq_urls(merged)
     if out:
         logger.info(
-            "Веб-поиск: сырые URL (все провайдеры) | count=%s cap=%s",
+            "Веб-поиск: сырые URL | count=%s cap=%s proxyapi_used=%s",
             len(out),
             fetch_cap,
+            need_proxy and bool(proxy),
         )
     return out
 
@@ -319,6 +339,7 @@ def fetch_tier_prioritized_raw_urls(
     search_context_size: str | None = None,
     policy: Any | None = None,
     seed_urls: tuple[str, ...] | None = None,
+    current_verified: int = 0,
 ) -> list[str]:
     """
     Поиск строго по tier-1 → tier-4 из source_tiers.txt: батчи site: запросов по хостам политики.
@@ -326,9 +347,22 @@ def fetch_tier_prioritized_raw_urls(
     """
     p = policy or get_source_tiers_policy()
     seeds = tuple(seed_urls or p.search_seed_urls)
-    per_batch_limit = max(8, min(24, max(fetch_limit // 8, 10)))
+    per_batch_limit = max(6, min(12, max(fetch_limit // 6, 6)))
+    raw_target = max(14, min(fetch_limit, 22))
+    min_unique_hosts_target = max(6, min(10, max(fetch_limit // 2, 6)))
+    max_urls_per_host = max(2, min(4, max(fetch_limit // 12, 2)))
     merged: list[str] = []
     seen: set[str] = set()
+    host_counts: dict[str, int] = {}
+    max_batches = max(1, int(getattr(settings, "step1_tier_max_web_search_batches", 6) or 6))
+    batches_used = 0
+    medium_escalations_used = 0
+    preview_fallbacks_used = 0
+    max_medium_escalations = 3
+    max_preview_fallbacks = 1
+
+    def _enough_coverage() -> bool:
+        return len(merged) >= raw_target and len(host_counts) >= min_unique_hosts_target
 
     def _accept(urls: list[str]) -> None:
         for raw in urls:
@@ -338,25 +372,63 @@ def fetch_tier_prioritized_raw_urls(
             key = u.lower().rstrip("/")
             if key in seen:
                 continue
+            host = (urlparse(u).hostname or "").lower()
+            if host and host_counts.get(host, 0) >= max_urls_per_host:
+                continue
             seen.add(key)
             merged.append(u)
+            if host:
+                host_counts[host] = host_counts.get(host, 0) + 1
 
     for tier_label, hosts in policy_tier_host_groups(p):
         if not hosts:
             continue
-        if len(merged) >= fetch_limit:
+        if current_verified >= 8 and tier_label in ("Tier-3", "Tier-4"):
+            continue
+        if _enough_coverage():
             break
         for batch in batched_site_host_groups(hosts, batch_size=3):
+            if _enough_coverage() or batches_used >= max_batches:
+                break
             matching_seeds = [s for s in seeds if any(marker in s.lower() for marker in batch)]
             seed_hint = ""
             if matching_seeds:
                 seed_hint = " Рекомендуемые разделы: " + ", ".join(matching_seeds[:8]) + ". "
             site_part = " OR ".join(f"site:{h}" for h in batch)
-            query = (
-                f"{window_prefix}{seed_hint}{topic_terms} "
-                f"Искать ТОЛЬКО на доменах: {', '.join(batch)}. ({site_part}) "
-                f"{product_excludes}"
-            )
+            has_aggregator_hosts = any(m in p.aggregator_hosts for m in batch)
+            if has_aggregator_hosts:
+                # Для агрегаторных батчей нельзя одновременно требовать:
+                # 1) "только домены агрегаторов" и 2) "верни первоисточник не агрегатор".
+                # Иначе модель часто возвращает пустой список.
+                primary_scope_hosts = tuple(
+                    dict.fromkeys(
+                        (
+                            *p.tier1_hosts,
+                            *p.tier2_hosts,
+                            *p.tier3_hosts,
+                            *p.tier4_hosts,
+                            *batch,
+                        )
+                    )
+                )
+                query = (
+                    f"{window_prefix}{seed_hint}{topic_terms} "
+                    "Можно использовать агрегаторы для обнаружения сюжета, "
+                    "но в ответе верни прямые URL отдельных HTML-статей первоисточников "
+                    "(не ленты/поиск/теги агрегаторов). "
+                    f"Опорные домены для разведки: {', '.join(batch)}. "
+                    f"{product_excludes}"
+                )
+                include_domains = list(primary_scope_hosts)
+                allowed_hosts = list(primary_scope_hosts)
+            else:
+                query = (
+                    f"{window_prefix}{seed_hint}{topic_terms} "
+                    f"Искать ТОЛЬКО на доменах: {', '.join(batch)}. ({site_part}) "
+                    f"{product_excludes}"
+                )
+                include_domains = list(batch)
+                allowed_hosts = list(batch)
             logger.info(
                 "Tier-поиск: %s | hosts=%s limit=%s",
                 tier_label,
@@ -369,14 +441,46 @@ def fetch_tier_prioritized_raw_urls(
                 limit=per_batch_limit,
                 proxy=proxy,
                 search_context_size=search_context_size,
-                include_domains=list(batch),
-                allowed_hosts=list(batch),
+                include_domains=include_domains,
+                allowed_hosts=allowed_hosts,
             )
+            if (
+                not batch_urls
+                and search_context_size == "low"
+                and (tier_label in ("Tier-1", "Tier-2") or has_aggregator_hosts)
+                and medium_escalations_used < max_medium_escalations
+            ):
+                medium_escalations_used += 1
+                use_preview_fallback = has_aggregator_hosts and preview_fallbacks_used < max_preview_fallbacks
+                if use_preview_fallback:
+                    preview_fallbacks_used += 1
+                logger.info(
+                    "Tier-поиск: эскалация пустого батча low→medium | tier=%s hosts=%s preview_fallback=%s escalation=%s/%s",
+                    tier_label,
+                    ",".join(batch),
+                    use_preview_fallback,
+                    medium_escalations_used,
+                    max_medium_escalations,
+                )
+                batch_urls = fetch_article_urls_raw_merged(
+                    settings,
+                    query,
+                    limit=per_batch_limit,
+                    proxy=proxy,
+                    search_context_size="medium",
+                    include_domains=include_domains,
+                    allowed_hosts=allowed_hosts,
+                    proxy_fallback_on_empty=use_preview_fallback,
+                )
+            batches_used += 1
             _accept(batch_urls)
     if merged:
         logger.info(
-            "Tier-поиск: итого URL из политики tier-1…4 | count=%s cap=%s",
+            "Tier-поиск: итого URL из политики tier-1…4 | count=%s unique_hosts=%s batches=%s/%s cap=%s",
             len(merged),
+            len(host_counts),
+            batches_used,
+            max_batches,
             fetch_limit,
         )
     return merged[:fetch_limit]
@@ -426,10 +530,16 @@ def fetch_curious_prioritized_raw_urls(
             if matching_seeds:
                 seed_hint = " Рекомендуемые разделы: " + ", ".join(matching_seeds[:8]) + ". "
             site_part = " OR ".join(f"site:{h}" for h in batch)
+            agg_hint = ""
+            if tier_label == "Curious-Tier2-Aggregators":
+                agg_hint = (
+                    " Домены агрегаторов Tier-2: только прямые URL статей первоисточников, "
+                    "не ленты/поиск/теги. "
+                )
             query = (
                 f"{window_prefix}{seed_hint}{terms} "
                 f"Искать ТОЛЬКО на доменах: {', '.join(batch)}. ({site_part}) "
-                f"{product_excludes}"
+                f"{agg_hint}{product_excludes}"
             )
             logger.info(
                 "Курьёз-поиск: %s | hosts=%s limit=%s",
@@ -556,6 +666,9 @@ def _serpapi_google_news_urls(api_key: str, query: str, limit: int) -> list[str]
                 "q": query,
                 "api_key": api_key,
                 "hl": "ru",
+                # Серверная фильтрация по свежести: прошлая неделя. Перекрывает 3 рабочих дня окна + буфер,
+                # сильно снижает долю старых evergreen-статей из архивов tier-сайтов (habr, vc.ru и т.д.).
+                "tbs": "qdr:w",
             },
             timeout=25,
         )

@@ -44,7 +44,7 @@ cd frontend && npm run build
 curl http://127.0.0.1:8000/health
 ```
 
-**Browser E2E:** поднять `python main.py`, пройти мастер 0→4 на `/digests/{id}` (шаг 1 — долгий запрос без таймаута в браузере). Ориентиры UI: тексты кнопок на русском, заголовки «Шаг N — …», классы `news-candidate-*`, `btn-rebuild`. Шаг 2: сначала «Подтвердить 5» / «Оставь топ‑5», затем порядок («Применить порядок» / «Оптимально по мнению ИИ»); аналитика — после порядка.
+**Browser E2E:** поднять `python main.py`, пройти мастер 0→4 на `/digests/{id}` (шаг 1 — долгий запрос без таймаута в браузере). Ориентиры UI: тексты кнопок на русском, заголовки «Шаг N — …», классы `news-candidate-*`, `btn-rebuild`. Шаг 2: сначала «Подтвердить 5» / «Оставь топ‑5», затем порядок; «Оптимально по мнению ИИ» не запускает шаг 3 — только «Применить порядок». Шаг 4: MAX/Дzen — копирование HTML кнопкой, не из textarea; обложка — отдельно (скачать или `images/*.jpg`).
 
 ## Модели Cursor (IDE)
 
@@ -56,3 +56,4 @@ curl http://127.0.0.1:8000/health
 - Параметры пайплайна (таймауты, батчи, telegram): `backend/app/pipeline_settings.json`
 - Дорожка шага 1 (поиск, воронка, порог): [docs/STEP1_PIPELINE.md](docs/STEP1_PIPELINE.md)
 - Контракт дайджеста: `backend/app/prompts/digest_contract.txt`
+- Вёрстка финальных текстов: `backend/app/services/platform_assembly.py` (HTML MAX/Дzen, markdown Telegram, plain VK)

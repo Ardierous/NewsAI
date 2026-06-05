@@ -59,13 +59,15 @@ def test_url_path_compact_ria_date_in_window():
     d = _digest("2026-05-19", days=3, kind="calendar")
     url = "https://ria.ru/20260519/ii-2093333250.html"
     assert ds._url_path_publication_day(url) == date(2026, 5, 19)
-    assert ds._url_path_date_before_digest_window(d, url) is False
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 5, 19)):
+        assert ds._url_path_date_before_digest_window(d, url) is False
 
 
 def test_url_in_window_overrides_stale_meta():
     d = _digest("2026-05-19", days=3, kind="calendar")
     url = "https://ria.ru/20260519/ii-2093333250.html"
-    assert ds._published_at_before_digest_window(d, "2023-01-01T12:00:00+03:00", url) is False
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 5, 19)):
+        assert ds._published_at_before_digest_window(d, "2023-01-01T12:00:00+03:00", url) is False
 
 
 def test_undefined_date_reject_code():
@@ -107,3 +109,33 @@ def test_verify_rejects_vedomosti_2023_in_default_window(monkeypatch):
     ds.DigestService._verify_llm_candidate_dict(svc, _digest(), item)
     assert "published_before_window" in str(item.get("verification_comment") or "")
     assert item.get("headline_editorial_ok") is not True
+
+
+def test_filter_verified_pool_removes_outside_window():
+    d = _digest("2026-05-19", days=3, kind="calendar")
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 5, 19)):
+        pool = [
+            {
+                "url": "https://ria.ru/20260519/ii-1.html",
+                "published_at": "2026-05-19T10:00:00+03:00",
+            },
+            {
+                "url": "https://ria.ru/20260510/ii-2.html",
+                "published_at": "2026-05-10T10:00:00+03:00",
+            },
+        ]
+        kept, removed = ds._filter_verified_pool_by_date_window(d, pool)
+    assert removed == 1
+    assert len(kept) == 1
+    assert "20260519" in kept[0]["url"]
+
+
+def test_reject_code_after_anchor_window():
+    d = _digest("2026-05-19", days=3, kind="calendar")
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 5, 19)):
+        code = ds._published_at_window_reject_code(
+            d,
+            "2026-05-25T10:00:00+03:00",
+            "https://example.com/news/article",
+        )
+    assert code == "published_before_window"

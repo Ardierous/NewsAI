@@ -1,9 +1,11 @@
 from pathlib import Path
 
 from app.curious_source_policy import (
+    classify_curious_source,
     get_curious_source_policy,
     is_curious_policy_source,
     is_curious_russian_host,
+    curious_host_search_groups,
 )
 from app.services.news_search import search_url_prefilter_reason
 
@@ -12,6 +14,15 @@ def test_curious_policy_accepts_ru_and_foreign_hosts() -> None:
     assert is_curious_policy_source("https://vc.ru/ai/123-test")
     assert is_curious_policy_source("https://www.maximonline.ru/tech/ai-fail")
     assert is_curious_policy_source("https://www.reddit.com/r/MachineLearning/comments/abc/")
+
+
+def test_curious_aggregator_allowed_as_tier2_search() -> None:
+    assert is_curious_policy_source("https://news.google.com/articles/abc")
+    tier, is_agg, _ = classify_curious_source("https://news.google.com/articles/abc")
+    assert tier == "Tier-2"
+    assert is_agg is True
+    groups = curious_host_search_groups()
+    assert any(label == "Curious-Tier2-Aggregators" for label, _ in groups)
 
 
 def test_curious_policy_rejects_tier_only_corporate_without_listing() -> None:

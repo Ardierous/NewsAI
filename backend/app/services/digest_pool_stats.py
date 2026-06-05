@@ -6,6 +6,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.models import LlmCostRecord, NewsCandidate, Step1DiscoveryRun
+from app.services.cost_attribution import step1_run_cost_rub
 from app.services.cost_labels import enrich_llm_cost_row
 from app.services.digest_service import (
     _host_from_url,
@@ -100,14 +101,7 @@ def _discovery_run_history(db: Session, digest_id: int, limit: int = 10) -> list
             duration_sec = max(0, int((end - started).total_seconds()))
         cost_rub = run.cost_rub
         if cost_rub is None and started:
-            q = db.query(func.coalesce(func.sum(LlmCostRecord.cost_rub), 0.0)).filter(
-                LlmCostRecord.digest_id == digest_id,
-                LlmCostRecord.step == "step_1",
-                LlmCostRecord.created_at >= started,
-            )
-            if ended is not None:
-                q = q.filter(LlmCostRecord.created_at <= ended)
-            cost_rub = float(q.scalar() or 0.0)
+            cost_rub = step1_run_cost_rub(db, digest_id, run)
         out.append(
             {
                 "run_number": run.run_number,

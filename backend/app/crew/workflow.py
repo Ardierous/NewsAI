@@ -313,7 +313,8 @@ class CrewWorkflow:
                 "если материал не про ИИ — удали объект из массива или пометь link_status=false. "
                 "если url ведёт на другую статью, ленту или 404 — не подменяй ссылку на новую, только пометь link_status=false. "
                 "Пересчитай tier строго по разделу «Система приоритетов источников»: Tier-1/Tier-2 только для ресурсов из файла; "
-                "для URL агрегаторов, лент и поисковых страниц выставь Tier-5, is_aggregator=true и link_status=false. "
+                "домены из aggregator_hosts — Tier-2 и is_aggregator=true только для прямой статьи; "
+                "ленты, поиск, теги и главные агрегаторов — Tier-5, is_aggregator=true, link_status=false. "
                 "Ответ — только один JSON-массив из 10 объектов, без текста до/после JSON. "
                 f"Входные кандидаты: {json.dumps(research_rows, ensure_ascii=False)}"
             ),
@@ -455,12 +456,13 @@ class CrewWorkflow:
         target = list(platforms) if platforms else ["telegram", "max", "vk", "dzen"]
         keys_str = ",".join(target)
         extra_rules = (
-            "Дополнительно к контракту: итоговую вёрстку собирает сервер — верни JSON с полями "
+            "Дополнительно к контракту: итоговую вёрстку собирает сервер (platform_assembly) — верни JSON только с полями "
             "telegram_lead, max_lead, dzen_intro (короткие вводные 1–2 предложения для TG/MAX/Дзен). "
+            "Не возвращай готовые тексты платформ: сервер сам соберёт markdown (Telegram), HTML (MAX, Дzen) и plain text (VK). "
             f"Подпись в финале будет в одну строку, пример: {subscription_md_inline()!r}. "
             "Хэштеги: в telegram и max — 4–6; в vk и dzen — 3–5. "
-            "MAX: между новостями разделитель «...» на отдельной строке. "
-            "Верни только JSON с ключами платформ и полями telegram_lead, max_lead, dzen_intro."
+            "MAX: между новостями разделитель «...» с отступами (<br><br> в HTML). "
+            "Верни только JSON с полями telegram_lead, max_lead, dzen_intro."
         )
         task = Task(
             description=self._with_contract(
@@ -492,8 +494,8 @@ class CrewWorkflow:
             description=self._with_contract(
                 "Сформируй JSON массив проверок по критериям: "
                 "сноски,cite,инсайт,ссылки в Telegram/MAX только в заголовках новостей,хэштеги (telegram/max 4–6, vk/dzen 3–5),"
-                "подпись ExTellect в каждом блоке,MAX!=Telegram,MAX между новостями ... с пустыми строками,"
-                "Дзен длина и абзацы,финал после Ок."
+                "подпись ExTellect в каждом блоке,MAX!=Telegram,MAX HTML с <a href> и разделителем ...,"
+                "Дзен HTML и длина ≤4096,финал после Ок."
                 f"Вход:{outputs}, has_ok={has_ok}"
             ),
             expected_output="JSON массив check_name,status,comment",

@@ -1,5 +1,6 @@
 import json
 import logging
+from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 import html
@@ -22,6 +23,7 @@ from app.config import get_settings
 from app.source_tiers_policy import (
     classify_source_policy as _classify_source_policy,
     get_source_tiers_policy,
+    is_aggregator_source as _is_aggregator_source,
     is_blocked_search_host,
     is_foreign_agent_source as _is_foreign_agent_source,
     is_russian_host as _is_russian_host,
@@ -52,6 +54,11 @@ from app.models import (
 )
 from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 from app.proxyapi_client import ProxyApiClient
+from app.services.cost_attribution import (
+    compute_digest_total_cost_rub,
+    digest_release_spent_rub,
+    step1_run_cost_rub,
+)
 from app.services.cost_tracker import ProxyApiCostTracker, record_today_balance, proxyapi_spent_today_rub
 from app.services.export_service import build_docx
 from app.services.news_search import (
@@ -80,6 +87,18 @@ from app.services.step1_filter_settings import (
     load_step1_filter_settings,
     normalize_step1_filter_states,
     save_step1_filter_settings,
+)
+from app.services.step1_conversion_stats import (
+    apply_funnel_conversions_to_meta,
+    estimate_raw_urls_for_target,
+    median_e2e_for_digest_type,
+    record_e2e_sample,
+)
+from app.services.step1_cancellation import (
+    begin_run as step1_begin_run,
+    end_run as step1_end_run,
+    is_cancelled as step1_is_cancelled,
+    request_cancel as step1_request_cancel,
 )
 from app.services.candidate_origin import apply_resolved_origin
 from app.services.telegram_channel_monitor import collect_telegram_seed_urls_for_digest
@@ -138,6 +157,10 @@ from app.services.digest_type_policy import (
 )
 
 ASSET_PROXYAPI_BUDGET_ALERT = "step1_proxyapi_budget_exceeded"
+PROXYAPI_ZERO_BALANCE_USER_MESSAGE = (
+    "Нулевой баланс аккаунта ProxyAPI. "
+    "Пополните счёт в личном кабинете proxyapi.ru — без этого веб-поиск и LLM недоступны."
+)
 PROXYAPI_BUDGET_USER_MESSAGE = (
     "Исчерпан бюджет API-ключа ProxyAPI (ошибка 402). "
     "Пополните счёт в личном кабинете proxyapi.ru "
@@ -153,6 +176,7 @@ STEP1_DISCOVERED_REASON_CODES = {
 
 REJECT_REASON_PREFIX = "REJECT_REASON:"
 STEP1_MAX_PER_SOURCE = 2
+STEP1_MIN_AUTO_DISCOVERED = 5
 STEP1_RU_SHARE_MIN = 0.30
 STEP1_RU_SHARE_MAX = 0.50
 STEP1_PRESS_SHARE_MIN = 0.20
@@ -271,6 +295,62 @@ def _clean_headline_text(raw: str) -> str:
     s = html.unescape(re.sub(r"\s+", " ", raw)).strip()
     s = re.sub(r"\s+", " ", s)
     return s
+
+
+def _headline_topic_tokens(title: str) -> set[str]:
+    """Нормализованные токены заголовка для near-duplicate контроля."""
+    cleaned = _strip_site_branding(_clean_headline_text(title)).lower()
+    tokens = re.findall(r"[a-zа-яё0-9]{4,}", cleaned, flags=re.IGNORECASE)
+    if not tokens:
+        return set()
+    stop = {
+        "news",
+        "today",
+        "latest",
+        "update",
+        "after",
+        "about",
+        "with",
+        "что",
+        "этот",
+        "этого",
+        "после",
+        "новости",
+        "новость",
+        "обзор",
+        "рынок",
+        "рынка",
+    }
+    normalized: set[str] = set()
+    for token in tokens:
+        if token in stop:
+            continue
+        # Грубая стемминг-нормализация: для русского/английского заголовка
+        # достаточно первых символов, чтобы "предложил/предложит" считались одним сюжетом.
+        normalized.add(token[:6] if len(token) > 6 else token)
+    return normalized
+
+
+def _titles_are_near_duplicates(left: str, right: str) -> bool:
+    """Почти одинаковые заголовки одной темы (Jaccard по токенам)."""
+    a = _headline_topic_tokens(left)
+    b = _headline_topic_tokens(right)
+    if not a or not b:
+        return False
+    common = len(a & b)
+    base = max(len(a | b), 1)
+    jaccard = common / base
+    if common >= 2 and jaccard >= 0.45:
+        return True
+    if common >= 1:
+        seq = SequenceMatcher(
+            None,
+            _strip_site_branding(_clean_headline_text(left)).lower(),
+            _strip_site_branding(_clean_headline_text(right)).lower(),
+        ).ratio()
+        if seq >= 0.60:
+            return True
+    return False
 
 
 def _strip_site_branding(title: str) -> str:
@@ -392,7 +472,12 @@ def _is_bot_challenge_html(chunk: str) -> bool:
 
 def _reader_fallback_allowed(url: str) -> bool:
     host = _host_from_url(url).lower()
-    return any(marker in host for marker in READER_FALLBACK_HOST_MARKERS)
+    if not host or host in {"manual", "unknown", "localhost"}:
+        return False
+    # Ранее fallback был только для нескольких доменов, из-за чего большинство
+    # 403/5xx/таймаутов превращались в http_unreachable и сжимали пул до ручных URL.
+    # Разрешаем reader-fallback для всех внешних хостов.
+    return True
 
 
 def _reader_extract_headline(markdown_text: str) -> str | None:
@@ -441,7 +526,7 @@ def _fetch_article_bundle_via_reader_proxy(initial_url: str) -> dict[str, Any] |
         reader_url = f"https://r.jina.ai/http://{normalized}"
         r = requests.get(
             reader_url,
-            timeout=(8, 20),
+            timeout=(4, 8),
             headers={"Accept": "text/plain", "User-Agent": "Mozilla/5.0"},
             allow_redirects=True,
         )
@@ -499,6 +584,10 @@ def _redirect_should_reject(original_url: str, stored_url: str, bundle: dict[str
         o_host = (urlparse(original_url).hostname or "").lower().removeprefix("www.")
         s_host = (urlparse(stored_url).hostname or "").lower().removeprefix("www.")
         if o_host and s_host and o_host != s_host:
+            # Cross-host redirect is suspicious only if the final page has no recognizable article content.
+            # Many sites legitimately redirect (tracking, regional, CDN). If we have a headline, trust it.
+            if len(headline) >= 8 or bool(bundle.get("article_markers")) or bool(bundle.get("soft_article_signals")):
+                return False
             return True
     except Exception:
         pass
@@ -651,6 +740,22 @@ def _expand_listing_url_candidates(initial_url: str, max_children: int = 10) -> 
     """
     if is_search_noise_url(initial_url):
         return []
+
+    def _prioritize_children(children: list[str]) -> list[str]:
+        today = datetime.now(MSK_TZ).date()
+
+        def _rank(pair: tuple[int, str]) -> tuple[int, int, int]:
+            idx, url = pair
+            pub_day = _url_path_publication_day(url)
+            if pub_day is None:
+                return (1, 0, idx)
+            age = (today - pub_day).days
+            freshness_bucket = 0 if age <= 21 else 1 if age <= 120 else 2
+            return (freshness_bucket, -pub_day.toordinal(), idx)
+
+        enumerated = list(enumerate(children))
+        enumerated.sort(key=_rank)
+        return [u for _, u in enumerated]
     if is_listing_page_url(initial_url):
         bundle = _fetch_article_page_bundle(initial_url)
         if not bundle.get("ok"):
@@ -660,8 +765,9 @@ def _expand_listing_url_candidates(initial_url: str, max_children: int = 10) -> 
             chunk_resp = _http_get_html_for_article(initial_url)
             if chunk_resp and chunk_resp.text:
                 children = _extract_listing_article_urls(chunk_resp.text[:400_000], initial_url, limit=max_children + 4)
+        ranked_children = _prioritize_children(children)
         out: list[tuple[str, dict[str, Any]]] = []
-        for child in children[:max_children]:
+        for child in ranked_children[:max_children]:
             child_bundle = _fetch_article_page_bundle(child)
             if not child_bundle.get("ok") or child_bundle.get("is_listing_page"):
                 continue
@@ -670,10 +776,18 @@ def _expand_listing_url_candidates(initial_url: str, max_children: int = 10) -> 
             stored = str(child_bundle.get("final_url") or child_bundle.get("display_url") or child).strip()
             out.append((stored, child_bundle))
         if out:
+            dated_recent = sum(
+                1
+                for u in ranked_children[:max_children]
+                if (_url_path_publication_day(u) is not None)
+                and ((datetime.now(MSK_TZ).date() - _url_path_publication_day(u)).days <= 21)
+            )
             logger.info(
-                "Шаг 1: разбор ленты | listing=%s extracted=%s",
+                "Шаг 1: разбор ленты | listing=%s extracted=%s ranked=%s recent_url_dates=%s",
                 initial_url[:100],
                 len(out),
+                min(len(ranked_children), max_children),
+                dated_recent,
             )
         else:
             logger.warning(
@@ -686,18 +800,27 @@ def _expand_listing_url_candidates(initial_url: str, max_children: int = 10) -> 
     if not bundle.get("ok"):
         return []
     if bundle.get("is_listing_page"):
+        ranked_children = _prioritize_children(list(bundle.get("listing_article_urls") or []))
         out: list[tuple[str, dict[str, Any]]] = []
-        for child in (bundle.get("listing_article_urls") or [])[:max_children]:
+        for child in ranked_children[:max_children]:
             child_bundle = _fetch_article_page_bundle(child)
             if not child_bundle.get("ok") or child_bundle.get("is_listing_page"):
                 continue
             stored = str(child_bundle.get("final_url") or child_bundle.get("display_url") or child).strip()
             out.append((stored, child_bundle))
         if out:
+            dated_recent = sum(
+                1
+                for u in ranked_children[:max_children]
+                if (_url_path_publication_day(u) is not None)
+                and ((datetime.now(MSK_TZ).date() - _url_path_publication_day(u)).days <= 21)
+            )
             logger.info(
-                "Шаг 1: разбор ленты | listing=%s extracted=%s",
+                "Шаг 1: разбор ленты | listing=%s extracted=%s ranked=%s recent_url_dates=%s",
                 initial_url[:100],
                 len(out),
+                min(len(ranked_children), max_children),
+                dated_recent,
             )
             return out
         if is_topic_pool_page_url(initial_url) or is_listing_page_url(initial_url):
@@ -1230,24 +1353,29 @@ def _published_at_window_reject_code(
     published_date_undefined — дату из URL/meta извлечь не удалось.
     """
     earliest = digest_earliest_news_date(digest)
+    anchor = digest_news_anchor_date(digest)
     pub = (published_at or "").strip()
     url_dt = _published_at_from_url_path(page_url)
     meta_dt = _parse_published_at_storage_value(published_at)
     has_url = url_dt is not None and _published_at_plausible(url_dt)
     has_meta = meta_dt is not None and _published_at_plausible(meta_dt)
 
+    def _day_outside_window(day: date) -> bool:
+        return day < earliest or day > anchor
+
     if has_url:
         url_day = url_dt.astimezone(MSK_TZ).date()
-        if url_day >= earliest:
+        if not _day_outside_window(url_day):
             return None
         if not has_meta or meta_dt.astimezone(MSK_TZ).date() <= url_day:
             return "published_before_window"
-        if meta_dt.astimezone(MSK_TZ).date() < earliest:
+        meta_day = meta_dt.astimezone(MSK_TZ).date()
+        if _day_outside_window(meta_day):
             return "published_before_window"
         return None
 
     if has_meta:
-        if meta_dt.astimezone(MSK_TZ).date() < earliest:
+        if _day_outside_window(meta_dt.astimezone(MSK_TZ).date()):
             return "published_before_window"
         return None
 
@@ -1258,6 +1386,37 @@ def _published_at_window_reject_code(
 
 def _published_at_before_digest_window(digest: Digest, published_at: str | None, page_url: str) -> bool:
     return _published_at_window_reject_code(digest, published_at, page_url) == "published_before_window"
+
+
+def _candidate_date_window_reject_code(digest: Digest, item: dict[str, Any]) -> str | None:
+    return _published_at_window_reject_code(
+        digest,
+        str(item.get("published_at") or ""),
+        str(item.get("url") or ""),
+    )
+
+
+def _filter_verified_pool_by_date_window(
+    digest: Digest,
+    pool: list[dict[str, Any]],
+    *,
+    is_filter_enabled: Any | None = None,
+    keep_manual: bool = True,
+) -> tuple[list[dict[str, Any]], int]:
+    """Убирает из пула материалы вне окна шага 0 (после rescue/fallback date-фильтры могли ослабиться)."""
+    is_enabled = is_filter_enabled or _catalog_step1_filter_enabled
+    kept: list[dict[str, Any]] = []
+    removed = 0
+    for item in pool:
+        if keep_manual and _manual_required_dict(item):
+            kept.append(item)
+            continue
+        code = _candidate_date_window_reject_code(digest, item)
+        if code and is_enabled(code):
+            removed += 1
+            continue
+        kept.append(item)
+    return kept, removed
 
 
 def digest_news_window_hint_ru(digest: Digest) -> str:
@@ -1459,7 +1618,7 @@ def _http_get_html_for_article(url: str) -> requests.Response | None:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:124.0) Gecko/20100101 Firefox/124.0",
     )
     last_exc: BaseException | None = None
-    for attempt in range(3):
+    for attempt in range(2):
         if attempt:
             time.sleep(0.45 * attempt)
         last_server_err: requests.Response | None = None
@@ -1467,7 +1626,7 @@ def _http_get_html_for_article(url: str) -> requests.Response | None:
             try:
                 r = requests.get(
                     url,
-                    timeout=(8, 18),
+                    timeout=(4, 8),
                     headers={**headers_base, "User-Agent": agent},
                     allow_redirects=True,
                 )
@@ -1512,10 +1671,9 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
             return empty
         empty["status_code"] = r.status_code
         if r.status_code >= 400 or not r.text:
-            if r.status_code in (401, 403, 429):
-                reader_bundle = _fetch_article_bundle_via_reader_proxy(initial_url)
-                if reader_bundle is not None:
-                    return reader_bundle
+            reader_bundle = _fetch_article_bundle_via_reader_proxy(initial_url)
+            if reader_bundle is not None:
+                return reader_bundle
             return empty
         r.encoding = r.apparent_encoding or getattr(r, "encoding", None) or "utf-8"
         final_url = str(r.url).split("#")[0]
@@ -1864,6 +2022,21 @@ class DigestService:
         self._active_step1_filter_order: dict[str, int] = {}
         self._active_step1_digest_type: str = "serious"
         self._active_recent_top5_fps: set[str] = set()
+        self._active_unreachable_hosts: set[str] = set()
+        self._active_unreachable_host_failures: dict[str, int] = {}
+
+    def _step1_mark_host_unreachable(self, url: str) -> None:
+        host = _host_from_url(url).lower()
+        if not host or host in {"manual", "unknown"}:
+            return
+        failures = self._active_unreachable_host_failures.get(host, 0) + 1
+        self._active_unreachable_host_failures[host] = failures
+        if failures >= 2:
+            self._active_unreachable_hosts.add(host)
+
+    def _step1_host_is_temporarily_unreachable(self, url: str) -> bool:
+        host = _host_from_url(url).lower()
+        return bool(host and host in self._active_unreachable_hosts)
 
     def _read_step1_filter_config(self, digest_type: str | None = None) -> dict[str, Any]:
         return load_step1_filter_settings(digest_type)
@@ -2056,6 +2229,14 @@ class DigestService:
             **self._step1_filters_payload_extras(digest_id),
         }
 
+    def _digest_llm_cost_sum(self, digest_id: int) -> float:
+        total = (
+            self.db.query(func.coalesce(func.sum(LlmCostRecord.cost_rub), 0.0))
+            .filter(LlmCostRecord.digest_id == digest_id)
+            .scalar()
+        )
+        return float(total or 0.0)
+
     def _digest_step_llm_cost_sum(self, digest_id: int, step: str) -> float:
         total = (
             self.db.query(func.coalesce(func.sum(LlmCostRecord.cost_rub), 0.0))
@@ -2064,7 +2245,18 @@ class DigestService:
         )
         return float(total or 0.0)
 
+    def _ensure_release_cost_opening(self, digest: Digest) -> None:
+        """Один раз на выпуск: якорь баланса для накопительного учёта до кнопки «Зафиксировать»."""
+        if digest.proxyapi_release_open_balance is not None or digest.proxyapi_release_open_budget_used is not None:
+            return
+        snap = self.cost_tracker.get_balance_snapshot()
+        record_today_balance(self.db, snap)
+        digest.proxyapi_release_open_balance = snap.balance
+        digest.proxyapi_release_open_budget_used = snap.budget_used
+        self.db.commit()
+
     def _snapshot_proxyapi_before(self, digest: Digest, *, reset: bool = False) -> None:
+        self._ensure_release_cost_opening(digest)
         snap = self.cost_tracker.get_balance_snapshot()
         record_today_balance(self.db, snap)
         if reset or digest.proxyapi_balance_session_start is None:
@@ -2139,36 +2331,132 @@ class DigestService:
             )
 
     def _digest_proxyapi_spent_rub(self, digest: Digest) -> float:
-        snap = self.cost_tracker.get_balance_snapshot()
-        if digest.proxyapi_budget_used_before is not None and snap.budget_used is not None:
-            return max(0.0, float(snap.budget_used) - float(digest.proxyapi_budget_used_before))
-        if digest.proxyapi_balance_before is not None and snap.balance is not None:
-            return max(0.0, float(digest.proxyapi_balance_before) - float(snap.balance))
+        # Без live-опроса баланса: используем только снимки before/after шага.
+        if digest.proxyapi_budget_used_before is not None and digest.proxyapi_budget_used_after is not None:
+            return max(0.0, float(digest.proxyapi_budget_used_after) - float(digest.proxyapi_budget_used_before))
+        if digest.proxyapi_balance_before is not None and digest.proxyapi_balance_after is not None:
+            return max(0.0, float(digest.proxyapi_balance_before) - float(digest.proxyapi_balance_after))
         return 0.0
 
     def digest_proxyapi_cost_rub(self, digest: Digest) -> float | None:
-        if (
-            digest.proxyapi_budget_used_session_start is not None
-            and digest.proxyapi_budget_used_after is not None
-        ):
-            spent = float(digest.proxyapi_budget_used_after) - float(digest.proxyapi_budget_used_session_start)
-            return round(max(0.0, spent), 4)
-        if digest.proxyapi_balance_session_start is not None and digest.proxyapi_balance_after is not None:
-            spent = float(digest.proxyapi_balance_session_start) - float(digest.proxyapi_balance_after)
-            return round(max(0.0, spent), 4)
-        live = self._digest_proxyapi_spent_rub(digest)
-        return round(live, 4) if live > 0 else None
+        from app.services.cost_attribution import digest_proxyapi_spent_rub
+
+        return digest_proxyapi_spent_rub(
+            digest,
+            live_balance=None,
+            live_budget_used=None,
+        )
+
+    def digest_release_cost_rub(self, digest: Digest) -> float | None:
+        return digest_release_spent_rub(
+            digest,
+            live_balance=None,
+            live_budget_used=None,
+        )
+
+    def compute_digest_total_cost_rub(self, digest: Digest) -> float:
+        release_spent = digest_release_spent_rub(
+            digest,
+            live_balance=None,
+            live_budget_used=None,
+        )
+        return compute_digest_total_cost_rub(
+            records_sum_rub=self._digest_llm_cost_sum(digest.id),
+            session_spent_rub=self.digest_proxyapi_cost_rub(digest),
+            release_spent_rub=release_spent,
+            finalized_cost_rub=digest.proxyapi_finalized_cost_rub,
+        )
+
+    def finalize_digest_release(self, digest_id: int) -> dict[str, Any]:
+        """Зафиксировать выпуск: стоимость ProxyAPI и топ-5 для фильтра recent_top5_repeat."""
+        digest = self.get_digest(digest_id)
+        if digest.status != STATUS_FINAL:
+            raise HTTPException(
+                status_code=400,
+                detail="Зафиксировать выпуск можно после шага 4, когда статус «Готов к публикации».",
+            )
+        outputs = self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).count()
+        if outputs < 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Сначала сгенерируйте тексты на шаге 4, затем нажмите «Зафиксировать».",
+            )
+        if digest.proxyapi_finalized_cost_rub is not None:
+            return {
+                "digest_id": digest.id,
+                "finalized": True,
+                "already_finalized": True,
+                "release_cost_rub": round(float(digest.proxyapi_finalized_cost_rub), 4),
+                "finalized_at": digest.proxyapi_finalized_at.isoformat() if digest.proxyapi_finalized_at else None,
+            }
+        self._ensure_release_cost_opening(digest)
+        if digest.proxyapi_release_open_balance is None and digest.proxyapi_balance_session_start is not None:
+            digest.proxyapi_release_open_balance = digest.proxyapi_balance_session_start
+        snap = self.cost_tracker.get_balance_snapshot()
+        record_today_balance(self.db, snap)
+        cost = digest_release_spent_rub(
+            digest,
+            live_balance=snap.balance,
+            live_budget_used=snap.budget_used,
+        )
+        cost_rub = round(float(cost or 0.0), 4)
+        digest.proxyapi_finalized_cost_rub = cost_rub
+        digest.proxyapi_finalized_at = datetime.utcnow()
+        digest.proxyapi_balance_after = snap.balance
+        digest.proxyapi_budget_used_after = snap.budget_used
+        self.db.commit()
+        self.db.refresh(digest)
+        logger.info(
+            "Выпуск зафиксирован: стоимость ProxyAPI | digest_id=%s cost_rub=%s",
+            digest.id,
+            cost_rub,
+        )
+        return {
+            "digest_id": digest.id,
+            "finalized": True,
+            "already_finalized": False,
+            "release_cost_rub": cost_rub,
+            "finalized_at": digest.proxyapi_finalized_at.isoformat() if digest.proxyapi_finalized_at else None,
+        }
 
     def _proxyapi_budget_exceeded(self) -> bool:
         return getattr(self.proxy, "last_error_kind", None) == "budget_exceeded"
 
-    def _proxyapi_budget_depleted_from_api(self) -> bool:
-        snap = self.cost_tracker.get_balance_snapshot()
-        if snap.budget_limit is None or snap.budget_used is None:
-            return False
-        return float(snap.budget_used) >= float(snap.budget_limit) - 1e-6
+    @staticmethod
+    def _snapshot_proxyapi_funds_message(digest: Digest) -> str | None:
+        """Статус средств по уже снятым before-снимкам (без live-опроса)."""
+        if digest.proxyapi_balance_before is not None and float(digest.proxyapi_balance_before) <= 0.0:
+            return PROXYAPI_ZERO_BALANCE_USER_MESSAGE
+        return None
 
-    def _persist_proxyapi_budget_alert(self, digest_id: int) -> None:
+    def _proxyapi_funds_status(self) -> tuple[bool, str | None]:
+        """True, если аккаунт/ключ ProxyAPI не может оплачивать запросы."""
+        if self._proxyapi_budget_exceeded():
+            return True, PROXYAPI_BUDGET_USER_MESSAGE
+        # Live-опрос баланса отключён: статус определяем по API-ошибкам/алертам шага.
+        return False, None
+
+    def _proxyapi_funds_depleted(self, *, check_balance: bool = True) -> bool:
+        if self._proxyapi_budget_exceeded():
+            return True
+        if not check_balance:
+            return False
+        depleted, _ = self._proxyapi_funds_status()
+        return depleted
+
+    def _proxyapi_funds_block_message(self) -> str:
+        depleted, message = self._proxyapi_funds_status()
+        if depleted and message:
+            return message
+        if self._proxyapi_budget_exceeded():
+            return PROXYAPI_BUDGET_USER_MESSAGE
+        return PROXYAPI_BUDGET_USER_MESSAGE
+
+    def _proxyapi_budget_depleted_from_api(self) -> bool:
+        return self._proxyapi_funds_depleted(check_balance=False)
+
+    def _persist_proxyapi_budget_alert(self, digest_id: int, message: str | None = None) -> None:
+        alert_text = (message or self._proxyapi_funds_block_message()).strip()
         self.db.query(Asset).filter(
             Asset.digest_id == digest_id,
             Asset.type == ASSET_PROXYAPI_BUDGET_ALERT,
@@ -2178,7 +2466,7 @@ class DigestService:
                 digest_id=digest_id,
                 type=ASSET_PROXYAPI_BUDGET_ALERT,
                 path="",
-                prompt=PROXYAPI_BUDGET_USER_MESSAGE,
+                prompt=alert_text,
             )
         )
         self.db.commit()
@@ -2189,10 +2477,11 @@ class DigestService:
             Asset.type == ASSET_PROXYAPI_BUDGET_ALERT,
         ).delete()
 
-    def _raise_proxyapi_budget_exceeded(self, digest_id: int) -> None:
-        logger.warning("Шаг 1: исчерпан бюджет ключа ProxyAPI | digest_id=%s", digest_id)
-        self._persist_proxyapi_budget_alert(digest_id)
-        raise HTTPException(status_code=402, detail=PROXYAPI_BUDGET_USER_MESSAGE)
+    def _raise_proxyapi_budget_exceeded(self, digest_id: int, message: str | None = None) -> None:
+        detail = (message or self._proxyapi_funds_block_message()).strip()
+        logger.warning("Шаг 1: ProxyAPI недоступен (баланс/бюджет) | digest_id=%s", digest_id)
+        self._persist_proxyapi_budget_alert(digest_id, detail)
+        raise HTTPException(status_code=402, detail=detail)
 
     def digest_proxyapi_budget_exceeded(self, digest_id: int) -> bool:
         row = (
@@ -2217,7 +2506,7 @@ class DigestService:
         if saved:
             return saved
         if self._proxyapi_budget_depleted_from_api():
-            return PROXYAPI_BUDGET_USER_MESSAGE
+            return self._proxyapi_funds_block_message()
         return None
 
     def build_budget_notices(self, digest: Digest) -> list[str]:
@@ -2227,7 +2516,7 @@ class DigestService:
         if budget_msg:
             notices.insert(0, budget_msg)
         elif self._proxyapi_budget_depleted_from_api():
-            notices.insert(0, PROXYAPI_BUDGET_USER_MESSAGE)
+            notices.insert(0, self._proxyapi_funds_block_message())
         if digest.step1_budget_capped:
             spent = self.digest_proxyapi_cost_rub(digest) or self._digest_proxyapi_spent_rub(digest)
             lim = self.settings.step1_max_cost_rub
@@ -2393,6 +2682,7 @@ class DigestService:
         digest.news_window_day_kind = _normalize_news_window_day_kind(news_window_day_kind)
         digest.status = STATUS_STEP0
         digest.current_step = STATUS_STEP0
+        self._ensure_release_cost_opening(digest)
         self.db.commit()
         self.db.refresh(digest)
         logger.info(
@@ -2689,17 +2979,13 @@ class DigestService:
         ended = run.pool_formed_at or datetime.utcnow()
         if run.duration_sec is None and run.started_at:
             run.duration_sec = max(0, int((ended - run.started_at).total_seconds()))
-        cost = float(
-            self.db.query(func.coalesce(func.sum(LlmCostRecord.cost_rub), 0.0))
-            .filter(
-                LlmCostRecord.digest_id == digest.id,
-                LlmCostRecord.step == "step_1",
-                LlmCostRecord.created_at >= run.started_at,
-            )
-            .scalar()
-            or 0.0
+        step_delta = self._last_step_balance_delta_rub(digest)
+        run.cost_rub = step1_run_cost_rub(
+            self.db,
+            digest.id,
+            run,
+            step_delta_rub=step_delta,
         )
-        run.cost_rub = round(cost, 4)
         self.db.commit()
 
     def _start_step1_discovery_run(self, digest: Digest) -> Step1DiscoveryRun:
@@ -2886,6 +3172,15 @@ class DigestService:
             logger.exception("Не удалось обновить файл ручных оценок шага 1")
         return row
 
+    def cancel_step1_run(self, digest_id: int) -> dict[str, str]:
+        self.get_digest(digest_id)
+        if not step1_request_cancel(digest_id):
+            raise HTTPException(status_code=409, detail="Сбор кандидатов сейчас не выполняется.")
+        return {
+            "ok": True,
+            "detail": "Запрос на остановку принят. Текущая проверка завершится, затем сохранится частичный результат.",
+        }
+
     def run_step_1(
         self,
         digest_id: int,
@@ -2896,15 +3191,14 @@ class DigestService:
         news_window_days: int | None = None,
         news_window_day_kind: str | None = None,
     ) -> list[NewsCandidate]:
-        if news_window_days is not None or news_window_day_kind is not None:
-            cur = self.get_digest(digest_id)
-            self.update_news_window(
-                digest_id,
-                news_window_days=int(news_window_days if news_window_days is not None else cur.news_window_days),
-                news_window_day_kind=str(
-                    news_window_day_kind if news_window_day_kind is not None else cur.news_window_day_kind
-                ),
-            )
+        cur = self.get_digest(digest_id)
+        self.update_news_window(
+            digest_id,
+            news_window_days=int(news_window_days if news_window_days is not None else cur.news_window_days),
+            news_window_day_kind=_normalize_news_window_day_kind(
+                news_window_day_kind if news_window_day_kind is not None else cur.news_window_day_kind
+            ),
+        )
         digest = self.get_digest(digest_id)
         if digest.status == STATUS_DRAFT:
             raise HTTPException(status_code=400, detail="Step 1 requires step_0 (choose digest type first).")
@@ -2929,26 +3223,16 @@ class DigestService:
             kept_rows, keep_ids_ordered = self._load_keep_candidates_for_rebuild(digest.id, keep_candidate_ids)
         partial_rebuild = rebuild and bool(kept_rows)
         dropped_pool_urls: list[str] = []
-        if partial_rebuild:
-            dropped_pool_urls = self._load_dropped_pool_urls_for_partial_rebuild(digest.id, keep_ids_ordered)
+        if rebuild:
+            dropped_pool_urls = self._load_dropped_pool_urls_for_partial_rebuild(
+                digest.id, keep_ids_ordered
+            )
 
-        telegram_seed_urls: list[str] = []
-        if self.settings.step1_telegram_monitor_enabled:
-            try:
-                telegram_seed_urls = collect_telegram_seed_urls_for_digest(
-                    self.settings,
-                    earliest_date=digest_earliest_news_date(digest),
-                )
-            except Exception:
-                logger.exception(
-                    "Telegram monitor: ошибка сбора ссылок | digest_id=%s",
-                    digest_id,
-                )
-        merged_seed_urls = self._merge_step1_seed_urls(manual_urls, telegram_seed_urls)
-        normalized_manual_urls = self._normalize_seed_urls(merged_seed_urls)
         user_manual_urls = self._normalize_seed_urls(manual_urls)
-        telegram_only_urls = [u for u in self._normalize_seed_urls(telegram_seed_urls) if u not in set(user_manual_urls)]
-        if not self.settings.enable_web_fetch and not normalized_manual_urls:
+        telegram_seed_urls: list[str] = []
+        normalized_manual_urls: list[str] = list(user_manual_urls)
+        telegram_only_urls: list[str] = []
+        if not self.settings.enable_web_fetch and not user_manual_urls:
             raise HTTPException(
                 status_code=400,
                 detail="Нет веб-доступа (web.enable_fetch=false в pipeline_settings.json). Вставьте вручную 5-10 ссылок в поле manual_urls.",
@@ -2987,10 +3271,11 @@ class DigestService:
             )
         elif rebuild or past_step1:
             logger.info(
-                "Шаг 1: полная пересборка пула | digest_id=%s prev_status=%s manual_urls=%s",
+                "Шаг 1: полная пересборка пула | digest_id=%s prev_status=%s manual_urls=%s excluded_from_prev_pool=%s",
                 digest.id,
                 digest.status,
                 len(normalized_manual_urls),
+                len(dropped_pool_urls),
             )
         else:
             logger.info(
@@ -3002,6 +3287,9 @@ class DigestService:
             )
         discovered_by_fp: dict[str, dict[str, Any]] = {}
         discovery_run = self._start_step1_discovery_run(digest)
+        step1_begin_run(digest.id)
+        step1_user_cancelled = False
+        step1_proxyapi_depleted = False
         try:
             self._activate_step1_filter_states(step1_filter_states, digest_type=digest.digest_type)
             self._active_recent_top5_fps = (
@@ -3009,6 +3297,8 @@ class DigestService:
                 if self._is_step1_filter_enabled("recent_top5_repeat")
                 else set()
             )
+            self._active_unreachable_hosts = set()
+            self._active_unreachable_host_failures = {}
             self._step1_curious_mode = is_curious_digest(digest.digest_type)
             if self._step1_curious_mode:
                 logger.info(
@@ -3031,12 +3321,32 @@ class DigestService:
                 len(self._active_recent_top5_fps),
             )
             self._snapshot_proxyapi_before(digest, reset=(rebuild or past_step1))
-            if (
-                self.settings.enable_web_fetch
-                and not normalized_manual_urls
-                and self.digest_proxyapi_budget_exceeded(digest.id)
-            ):
-                self._raise_proxyapi_budget_exceeded(digest.id)
+            if self.settings.step1_telegram_monitor_enabled:
+                try:
+                    telegram_seed_urls = collect_telegram_seed_urls_for_digest(
+                        self.settings,
+                        earliest_date=digest_earliest_news_date(digest),
+                        proxy=self.proxy,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Telegram monitor: ошибка сбора ссылок | digest_id=%s",
+                        digest_id,
+                    )
+            merged_seed_urls = self._merge_step1_seed_urls(manual_urls, telegram_seed_urls)
+            normalized_manual_urls = self._normalize_seed_urls(merged_seed_urls)
+            telegram_only_urls = [
+                u for u in self._normalize_seed_urls(telegram_seed_urls) if u not in set(user_manual_urls)
+            ]
+            if not normalized_manual_urls:
+                depleted_msg = self._snapshot_proxyapi_funds_message(digest)
+                if depleted_msg:
+                    self._raise_proxyapi_budget_exceeded(digest.id, depleted_msg)
+            if not self.settings.enable_web_fetch and not normalized_manual_urls:
+                if self.digest_proxyapi_budget_exceeded(digest.id):
+                    self._raise_proxyapi_budget_exceeded(digest.id)
+                if self._proxyapi_funds_depleted(check_balance=False):
+                    self._raise_proxyapi_budget_exceeded(digest.id)
             now_msk = current_msk_iso()
             candidates: list[dict[str, Any]] = []
             verify_candidates: list[dict[str, Any]] = []
@@ -3087,12 +3397,24 @@ class DigestService:
             seen_fp: set[str] = {_url_fingerprint(u) for u in dropped_pool_urls if _url_fingerprint(u)}
             excluded_urls: list[str] = list(dropped_pool_urls)
             reject_stats: dict[str, int] = {}
+            reject_samples_by_reason: dict[str, list[dict[str, Any]]] = {}
             target_verified_pages = STEP1_MIN_VERIFIED
             target_pool_pages = max(
                 target_verified_pages,
                 min(int(getattr(self.settings, "step1_max_candidates_for_ui", 15) or 15), 30),
             )
-            collection_target_pages = max(target_pool_pages, min_discovered_pages)
+            min_auto_discovered = min(
+                STEP1_MIN_AUTO_DISCOVERED,
+                max(0, 30 - len(valid_manual_candidates)),
+            )
+            collection_target_pages = min(
+                30,
+                max(
+                    target_pool_pages,
+                    min_discovered_pages,
+                    len(valid_manual_candidates) + min_auto_discovered,
+                ),
+            )
             step1_batch_size = max(1, int(getattr(self.settings, "step1_batch_size", 20) or 20))
             soft_time_limit_sec = max(30, int(getattr(self.settings, "step1_soft_time_limit_sec", 180) or 180))
             hard_time_limit_sec = max(soft_time_limit_sec, int(getattr(self.settings, "step1_hard_time_limit_sec", 300) or 300))
@@ -3105,6 +3427,7 @@ class DigestService:
                 "target_min_verified": target_verified_pages,
                 "target_max_candidates": collection_target_pages,
                 "target_pool_pages": target_pool_pages,
+                "target_min_auto_discovered": min_auto_discovered,
                 "min_discovered_pages": min_discovered_pages,
                 "min_collection_iterations": min_collection_iterations,
                 "collection_target_pages": collection_target_pages,
@@ -3118,6 +3441,37 @@ class DigestService:
                 ],
                 "tier_strict_search": bool(getattr(self.settings, "step1_tier_strict_search", True)),
             }
+            baseline_e2e = median_e2e_for_digest_type(digest.digest_type or "serious")
+            estimated_raw_for_10 = estimate_raw_urls_for_target(baseline_e2e)
+            step1_collection_meta["conversion_e2e_baseline"] = (
+                round(baseline_e2e, 4) if baseline_e2e is not None else None
+            )
+            step1_collection_meta["estimated_raw_for_10"] = estimated_raw_for_10
+            self._step1_raw_urls_registry: set[str] = set()
+            self._step1_min_fetch_limit: int | None = (
+                estimated_raw_for_10 if self.settings.enable_web_fetch else None
+            )
+
+            def register_reject(item: dict[str, Any]) -> None:
+                codes = _reject_reason_codes(str(item.get("verification_comment") or ""))
+                if not codes:
+                    codes = ["unknown_reject"]
+                for code in codes:
+                    reject_stats[code] = reject_stats.get(code, 0) + 1
+                    bucket = reject_samples_by_reason.setdefault(code, [])
+                    if len(bucket) >= 8:
+                        continue
+                    url = str(item.get("url") or "").strip()
+                    bucket.append(
+                        {
+                            "url": url[:500],
+                            "host": (urlparse(url).hostname or "").lower()[:120] if url else "",
+                            "title": str(item.get("title") or "").strip()[:220],
+                            "source": str(item.get("source") or "").strip()[:120],
+                            "published_at": str(item.get("published_at") or "").strip()[:80],
+                            "comment": str(item.get("verification_comment") or "").strip()[:500],
+                        }
+                    )
 
             for kept in kept_rows:
                 kept_item = self._news_candidate_to_pool_dict(kept)
@@ -3129,10 +3483,28 @@ class DigestService:
                 if raw_u.startswith("http"):
                     excluded_urls.append(raw_u[:800])
                 if kept_item.get("headline_editorial_ok") and kept_item.get("link_status"):
-                    verified_pool.append(kept_item)
+                    date_reject = _candidate_date_window_reject_code(digest, kept_item)
+                    if date_reject and self._is_step1_filter_enabled(date_reject) and not _manual_required_dict(kept_item):
+                        _append_reject_reason(kept_item, date_reject)
+                        kept_item["headline_editorial_ok"] = False
+                        kept_item["link_status"] = False
+                        kept_item["page_verified"] = False
+                        snapshot_preview_row(kept_item)
+                        register_reject(kept_item)
+                    else:
+                        verified_pool.append(kept_item)
     
             def append_verified(item: dict[str, Any]) -> None:
                 if not item.get("headline_editorial_ok") or not item.get("link_status"):
+                    return
+                date_reject = _candidate_date_window_reject_code(digest, item)
+                if date_reject and self._is_step1_filter_enabled(date_reject) and not _manual_required_dict(item):
+                    _append_reject_reason(item, date_reject)
+                    item["headline_editorial_ok"] = False
+                    item["link_status"] = False
+                    item["page_verified"] = False
+                    snapshot_preview_row(item)
+                    register_reject(item)
                     return
                 if self._is_step1_filter_enabled("off_topic_not_curious"):
                     excerpt = str(item.get("article_excerpt") or item.get("description") or "")
@@ -3165,15 +3537,24 @@ class DigestService:
                 fp = _url_fingerprint(str(item.get("url", "")))
                 if not fp or fp in seen_fp:
                     return
+                manual_required = _manual_required_dict(item)
+                if not manual_required:
+                    candidate_title = str(item.get("title") or "")
+                    for existing in verified_pool:
+                        if _manual_required_dict(existing):
+                            continue
+                        if _titles_are_near_duplicates(candidate_title, str(existing.get("title") or "")):
+                            _append_reject_reason(item, "duplicate_story_title")
+                            item["headline_editorial_ok"] = False
+                            item["link_status"] = False
+                            item["page_verified"] = False
+                            snapshot_preview_row(item)
+                            register_reject(item)
+                            return
                 seen_fp.add(fp)
                 verified_pool.append(item)
-    
-            def register_reject(item: dict[str, Any]) -> None:
-                codes = _reject_reason_codes(str(item.get("verification_comment") or ""))
-                if not codes:
-                    codes = ["unknown_reject"]
-                for code in codes:
-                    reject_stats[code] = reject_stats.get(code, 0) + 1
+                if len(verified_pool) >= STEP1_MIN_VERIFIED:
+                    self._step1_min_fetch_limit = None
     
             def persist_reject_stats() -> None:
                 self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "step1_rejected_reasons").delete()
@@ -3183,6 +3564,21 @@ class DigestService:
                         type="step1_rejected_reasons",
                         path="",
                         prompt=json.dumps(reject_stats, ensure_ascii=False),
+                    )
+                )
+                self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "step1_reject_audit").delete()
+                self.db.add(
+                    Asset(
+                        digest_id=digest.id,
+                        type="step1_reject_audit",
+                        path="",
+                        prompt=json.dumps(
+                            {
+                                "counts": reject_stats,
+                                "samples_by_reason": reject_samples_by_reason,
+                            },
+                            ensure_ascii=False,
+                        ),
                     )
                 )
                 self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "step1_filter_counters").delete()
@@ -3198,6 +3594,21 @@ class DigestService:
                     )
                 )
                 self.db.commit()
+                if reject_samples_by_reason:
+                    top_codes = sorted(reject_stats.items(), key=lambda x: (-x[1], x[0]))[:5]
+                    for code, count in top_codes:
+                        samples = reject_samples_by_reason.get(code) or []
+                        preview = "; ".join(
+                            f"{x.get('host') or '-'} | {x.get('published_at') or '-'} | {x.get('title') or x.get('url')}"
+                            for x in samples[:3]
+                        )
+                        logger.info(
+                            "Шаг 1: аудит отсева | digest_id=%s reason=%s count=%s samples=%s",
+                            digest.id,
+                            code,
+                            count,
+                            preview or "-",
+                        )
 
             def merge_collection_meta(meta: dict[str, Any] | None) -> None:
                 if not meta:
@@ -3215,6 +3626,10 @@ class DigestService:
                 step1_collection_meta["iterations"] = iteration_no
                 step1_collection_meta["elapsed_sec"] = int(time.monotonic() - started_monotonic)
                 step1_collection_meta["verified_total"] = len(verified_pool)
+                step1_collection_meta["urls_raw_unique"] = len(
+                    getattr(self, "_step1_raw_urls_registry", set()) or set()
+                )
+                apply_funnel_conversions_to_meta(step1_collection_meta, digest_type=digest.digest_type or "serious")
                 self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "step1_collection_meta").delete()
                 self.db.add(
                     Asset(
@@ -3231,6 +3646,9 @@ class DigestService:
                 items = sorted(reject_stats.items(), key=lambda x: (-x[1], x[0]))[:limit]
                 details = ", ".join(f"{code}={count}" for code, count in items)
                 return f" Основные причины отбраковки: {details}."
+
+            def request_elapsed_tail() -> str:
+                return f" Время выполнения запроса: {int(time.monotonic() - started_monotonic)} сек."
     
             for m in failed_manual_candidates:
                 snapshot_preview_row(m)
@@ -3282,11 +3700,17 @@ class DigestService:
                         )
                     merge_collection_meta(pre_meta)
                     iteration_no += int(pre_meta.get("iterations", 0) or 0)
+                    if str(pre_meta.get("stop_reason") or "") == "user_cancelled":
+                        step1_user_cancelled = True
+                    if str(pre_meta.get("stop_reason") or "") == "proxyapi_budget_exceeded":
+                        step1_proxyapi_depleted = True
                 except Exception:
                     web_flow_available = False
                     logger.exception("Шаг 1: итеративный сбор URL через веб-поиск не выполнен")
             if (
-                self._proxyapi_budget_exceeded()
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self._proxyapi_budget_exceeded()
                 and len(verified_pool) < STEP1_MIN_VERIFIED
                 and not normalized_manual_urls
             ):
@@ -3295,6 +3719,10 @@ class DigestService:
             # CrewAI: при обычном сборе не тратим 10–20 мин, если веб уже дал 1–9 статей (есть журнал отбраковки).
             # При пересборке/частичной пересборке CrewAI по-прежнему может добрать пул.
             crew_only_if_empty = bool(getattr(self.settings, "step1_crew_fallback_only_if_empty", True))
+            partial_rebuild_has_manual_kept = partial_rebuild and any(
+                "MANUAL_REQUIRED:" in str(getattr(r, "verification_comment", "") or "")
+                for r in kept_rows
+            )
             skip_crew_partial_web = (
                 crew_only_if_empty
                 and not rebuild
@@ -3302,10 +3730,13 @@ class DigestService:
                 and 0 < len(verified_pool) < STEP1_MIN_VERIFIED
             )
             run_crew_fallback = (
-                self.settings.enable_web_fetch
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self.settings.enable_web_fetch
                 and len(verified_pool) < STEP1_MIN_VERIFIED
                 and (time.monotonic() - started_monotonic) < hard_time_limit_sec
                 and not skip_crew_partial_web
+                and not partial_rebuild_has_manual_kept
             )
             if run_crew_fallback:
                 try:
@@ -3414,10 +3845,27 @@ class DigestService:
                         excluded_urls.append(resolved_url[:800])
                         register_reject(work)
     
+            need_more_for_minimum = len(verified_pool) < STEP1_MIN_VERIFIED
             if (
-                self.settings.enable_web_fetch
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self.settings.enable_web_fetch
+                and len(verified_pool) < STEP1_MIN_VERIFIED
                 and len(verified_pool) < collection_target_pages
                 and (time.monotonic() - started_monotonic) < hard_time_limit_sec
+                and (
+                    need_more_for_minimum
+                    or int(step1_collection_meta.get("elapsed_sec", 0) or 0) < soft_time_limit_sec
+                )
+                and (
+                    need_more_for_minimum
+                    or str(step1_collection_meta.get("stop_reason") or "") not in {
+                        "soft_timeout_after_collect",
+                        "hard_timeout_after_collect",
+                        "soft_timeout_final_attempt",
+                        "hard_timeout",
+                    }
+                )
             ):
                 try:
                     try:
@@ -3461,9 +3909,57 @@ class DigestService:
                         )
                     merge_collection_meta(post_meta)
                     iteration_no += int(post_meta.get("iterations", 0) or 0)
+                    if str(post_meta.get("stop_reason") or "") == "user_cancelled":
+                        step1_user_cancelled = True
+                    if str(post_meta.get("stop_reason") or "") == "proxyapi_budget_exceeded":
+                        step1_proxyapi_depleted = True
                 except Exception:
                     web_flow_available = False
                     logger.exception("Шаг 1: повторный итеративный добор web-поиском не выполнен")
+
+            manual_verified_count = sum(1 for x in verified_pool if _manual_required_dict(x))
+            auto_verified_count = max(0, len(verified_pool) - manual_verified_count)
+            if (
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self.settings.enable_web_fetch
+                and manual_verified_count > 0
+                and auto_verified_count == 0
+            ):
+                # Режим "только ручные" на пересборке воспринимается как регресс:
+                # делаем отдельный rescue-проход автопоиска, чтобы попытаться добрать
+                # хотя бы несколько авто-материалов независимо от текущего timeout-стопа.
+                rescue_need = max(3, min_auto_discovered)
+                logger.warning(
+                    "Шаг 1: rescue-добор автоновостей (manual_only) | digest_id=%s keep_manual=%s need=%s",
+                    digest.id,
+                    manual_verified_count,
+                    rescue_need,
+                )
+                try:
+                    rescue_items, rescue_funnel = self._collect_search_verified_candidates(
+                        digest.id,
+                        digest,
+                        now_msk,
+                        seen_fp,
+                        limit=rescue_need,
+                        on_row=snapshot_preview_row,
+                        register_reject=register_reject,
+                        query_override=self._step1_fresh_tier1_query(digest),
+                        skip_urls=excluded_urls,
+                        filter_enabled=self._is_step1_filter_enabled,
+                    )
+                    for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
+                        step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
+                            rescue_funnel.get(key, 0) or 0
+                        )
+                    step1_collection_meta["iterations"] = int(step1_collection_meta.get("iterations", 0) or 0) + 1
+                    for item in rescue_items:
+                        append_verified(item)
+                except Exception:
+                    logger.exception("Шаг 1: rescue-добор автоновостей не выполнен")
+                manual_verified_count = sum(1 for x in verified_pool if _manual_required_dict(x))
+                auto_verified_count = max(0, len(verified_pool) - manual_verified_count)
     
             if verified_pool and all(_is_placeholder_candidate_dict(x) for x in verified_pool):
                 persist_collection_meta()
@@ -3487,10 +3983,24 @@ class DigestService:
                     detail="Не удалось собрать кандидатов автоматически. Вставьте вручную не менее 10 прямых ссылок на статьи.",
                 )
 
+            if self.settings.enable_web_fetch and manual_verified_count > 0 and auto_verified_count == 0:
+                persist_collection_meta()
+                persist_reject_stats()
+                self._persist_step1_preview_candidates(digest.id, preview_by_fp)
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "Пересборка сохранила только ручные новости и не добавила ни одной автоновости. "
+                        "Проверьте окно дат шага 0 (лучше 5-7 календарных дней), затем повторите пересборку."
+                        + top_reject_reasons()
+                    ),
+                )
+
             if (
                 self.settings.enable_web_fetch
                 and not normalized_manual_urls
                 and len(verified_pool) < min_discovered_pages
+                and len(verified_pool) >= STEP1_MIN_VERIFIED
             ):
                 persist_collection_meta()
                 persist_reject_stats()
@@ -3504,10 +4014,211 @@ class DigestService:
                         + top_reject_reasons()
                     ),
                 )
+
+            if (
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self.settings.enable_web_fetch
+                and len(verified_pool) < 5
+                and reject_stats.get("published_before_window", 0) >= 3
+            ):
+                logger.warning(
+                    "Шаг 1: fallback-добор из seed-лент source_tiers | digest_id=%s verified=%s",
+                    digest.id,
+                    len(verified_pool),
+                )
+                try:
+                    policy = get_source_tiers_policy(self.settings.source_tiers_path)
+                    seed_candidates = [u for u in policy.search_seed_urls if str(u).startswith(("http://", "https://"))]
+                    seed_scan_limit = min(len(seed_candidates), 24)
+                    for seed_url in seed_candidates[:seed_scan_limit]:
+                        if len(verified_pool) >= STEP1_MIN_VERIFIED:
+                            break
+                        for resolved_url, bundle in _expand_listing_url_candidates(str(seed_url), max_children=3):
+                            if len(verified_pool) >= STEP1_MIN_VERIFIED:
+                                break
+                            fp = _url_fingerprint(resolved_url)
+                            if fp and fp in seen_fp:
+                                continue
+                            work = self._skeleton_dict_from_search_url(
+                                resolved_url,
+                                now_msk,
+                                max(1, len(verified_pool) + 1),
+                            )
+                            work["source_stage"] = "seed_listing"
+                            work["title"] = ""
+                            work["headline_editorial_ok"] = False
+                            work["link_status"] = False
+                            try:
+                                self._verify_llm_candidate_dict(
+                                    digest,
+                                    work,
+                                    prefetched_bundle=bundle,
+                                    filter_enabled=self._is_step1_filter_enabled,
+                                )
+                            except TypeError:
+                                self._verify_llm_candidate_dict(digest, work, prefetched_bundle=bundle)
+                            snapshot_preview_row(work)
+                            if work.get("headline_editorial_ok") and work.get("link_status"):
+                                append_verified(work)
+                            else:
+                                if fp:
+                                    seen_fp.add(fp)
+                                excluded_urls.append(str(resolved_url)[:800])
+                                register_reject(work)
+                    step1_collection_meta["seed_listing_fallback_scanned"] = seed_scan_limit
+                except Exception:
+                    logger.exception("Шаг 1: fallback-добор из seed-лент не выполнен")
+
+            if (
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self.settings.enable_web_fetch
+                and is_curious_digest(digest.digest_type)
+                and len(verified_pool) < STEP1_MIN_VERIFIED
+                and reject_stats.get("off_topic_not_curious", 0) >= max(15, len(verified_pool) * 3)
+            ):
+                logger.warning(
+                    "Шаг 1: аварийный tone-relaxed добор для курьёзного выпуска | digest_id=%s verified=%s off_topic_not_curious=%s",
+                    digest.id,
+                    len(verified_pool),
+                    reject_stats.get("off_topic_not_curious", 0),
+                )
+
+                def _curious_tone_relaxed_filter_enabled(filter_id: str) -> bool:
+                    if filter_id == "off_topic_not_curious":
+                        return False
+                    return self._is_step1_filter_enabled(filter_id)
+
+                no_progress_rounds = 0
+                for query in (self._step1_curious_angles_query(digest), self._step1_curious_viral_query(digest)):
+                    if len(verified_pool) >= STEP1_MIN_VERIFIED:
+                        break
+                    need = max(1, STEP1_MIN_VERIFIED - len(verified_pool) + 2)
+                    need = min(max(6, int(getattr(self.settings, "step1_batch_size", 10) or 10)), need)
+                    rescue_items, rescue_funnel = self._collect_search_verified_candidates(
+                        digest.id,
+                        digest,
+                        now_msk,
+                        seen_fp,
+                        limit=need,
+                        on_row=snapshot_preview_row,
+                        register_reject=register_reject,
+                        query_override=query,
+                        skip_urls=excluded_urls,
+                        filter_enabled=_curious_tone_relaxed_filter_enabled,
+                    )
+                    for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
+                        step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
+                            rescue_funnel.get(key, 0) or 0
+                        )
+                    step1_collection_meta["iterations"] = int(step1_collection_meta.get("iterations", 0) or 0) + 1
+                    step1_collection_meta["curious_tone_relaxed_fallback_applied"] = True
+                    before_cnt = len(verified_pool)
+                    for item in rescue_items:
+                        append_verified(item)
+                    added = len(verified_pool) - before_cnt
+                    if added <= 0:
+                        no_progress_rounds += 1
+                    else:
+                        no_progress_rounds = 0
+                    if no_progress_rounds >= 2:
+                        break
     
-            if len(verified_pool) < STEP1_MIN_VERIFIED:
+            verified_pool, removed_outside_window = _filter_verified_pool_by_date_window(
+                digest,
+                verified_pool,
+                is_filter_enabled=self._is_step1_filter_enabled,
+            )
+            if removed_outside_window:
+                logger.warning(
+                    "Шаг 1: из пула убраны материалы вне окна дат | digest_id=%s removed=%s window=%s",
+                    digest.id,
+                    removed_outside_window,
+                    digest_news_window_hint_ru(digest),
+                )
+                step1_collection_meta["pool_outside_window_removed"] = removed_outside_window
+                reject_stats["published_before_window"] = reject_stats.get("published_before_window", 0) + removed_outside_window
+
+            if (
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self.settings.enable_web_fetch
+                and len(verified_pool) < 8
+                and (time.monotonic() - started_monotonic) < hard_time_limit_sec
+            ):
+                try:
+                    topup_meta = self._step1_topup_search_until_minimum(
+                        digest,
+                        verified_pool=verified_pool,
+                        seen_fp=seen_fp,
+                        excluded_urls=excluded_urls,
+                        now_msk=now_msk,
+                        snapshot_preview_row=snapshot_preview_row,
+                        append_verified=append_verified,
+                        register_reject=register_reject,
+                        started_monotonic=started_monotonic,
+                        hard_limit_sec=hard_time_limit_sec,
+                        batch_size=step1_batch_size,
+                        max_rounds=3,
+                        filter_enabled=self._is_step1_filter_enabled,
+                        phase_label="pre_min_check",
+                    )
+                    step1_collection_meta["topup_pre_min_rounds"] = int(topup_meta.get("rounds", 0) or 0)
+                    step1_collection_meta["topup_pre_min_added"] = int(topup_meta.get("added", 0) or 0)
+                    for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
+                        step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
+                            topup_meta.get(key, 0) or 0
+                        )
+                    iteration_no += int(topup_meta.get("rounds", 0) or 0)
+                    if str(topup_meta.get("stop_reason") or "") == "user_cancelled":
+                        step1_user_cancelled = True
+                    if str(topup_meta.get("stop_reason") or "") == "proxyapi_budget_exceeded":
+                        step1_proxyapi_depleted = True
+                except Exception:
+                    logger.exception("Шаг 1: top-up итерации до минимума не выполнены")
+
+            if step1_proxyapi_depleted:
+                step1_collection_meta["stop_reason"] = "proxyapi_budget_exceeded"
+                step1_collection_meta["elapsed_sec"] = int(time.monotonic() - started_monotonic)
+                logger.warning(
+                    "Шаг 1: сбор остановлен — нулевой баланс или исчерпан бюджет ProxyAPI | digest_id=%s verified=%s",
+                    digest.id,
+                    len(verified_pool),
+                )
                 persist_collection_meta()
                 persist_reject_stats()
+                if not verified_pool:
+                    self._persist_step1_preview_candidates(digest.id, preview_by_fp)
+                    self._raise_proxyapi_budget_exceeded(digest.id)
+            elif step1_user_cancelled:
+                step1_collection_meta["stop_reason"] = "user_cancelled"
+                step1_collection_meta["elapsed_sec"] = int(time.monotonic() - started_monotonic)
+                logger.info(
+                    "Шаг 1: сбор остановлен пользователем | digest_id=%s verified=%s",
+                    digest.id,
+                    len(verified_pool),
+                )
+                persist_collection_meta()
+                persist_reject_stats()
+                if not verified_pool:
+                    self._persist_step1_preview_candidates(digest.id, preview_by_fp)
+                    raise HTTPException(
+                        status_code=499,
+                        detail=(
+                            "Сбор остановлен. Подтверждённых кандидатов нет — сохранён журнал найденных и отбракованных материалов."
+                            + request_elapsed_tail()
+                        ),
+                    )
+            elif len(verified_pool) < STEP1_MIN_VERIFIED:
+                persist_collection_meta()
+                persist_reject_stats()
+                rebuild_excluded_note = ""
+                if rebuild and dropped_pool_urls:
+                    rebuild_excluded_note = (
+                        f" Из прошлого пула исключено {len(dropped_pool_urls)} URL без галочки — "
+                        "автопоиск не нашёл достаточно других подтверждённых статей."
+                    )
                 if partial_rebuild and len(kept_rows) >= STEP1_MIN_VERIFIED:
                     self._restore_step1_verified_candidates(digest.id, prev_verified_backup)
                     raise HTTPException(
@@ -3515,17 +4226,26 @@ class DigestService:
                         detail=(
                             f"Не удалось добрать пул до {STEP1_MIN_VERIFIED} новостей (сохранено {len(verified_pool)} "
                             f"из {len(kept_rows)} отмеченных). Восстановлен прежний пул."
+                            + rebuild_excluded_note
                             + top_reject_reasons()
+                            + request_elapsed_tail()
                         ),
                     )
-                if rebuild and len(prev_verified_backup) >= STEP1_MIN_VERIFIED:
+                if rebuild and len(prev_verified_backup) > len(verified_pool):
                     self._restore_step1_verified_candidates(digest.id, prev_verified_backup)
+                    kept_note = (
+                        f" Отмечено для сохранения: {len(kept_rows)}."
+                        if partial_rebuild and kept_rows
+                        else ""
+                    )
                     raise HTTPException(
                         status_code=502,
                         detail=(
-                            f"Пересборка не дала {STEP1_MIN_VERIFIED} подтверждённых материалов (получено {len(verified_pool)}). "
-                            f"Восстановлен прежний пул из {len(prev_verified_backup)} проверенных новостей."
+                            f"Пересборка не добавила новых подтверждённых материалов (получено {len(verified_pool)}, "
+                            f"в прежнем пуле было {len(prev_verified_backup)}).{kept_note}{rebuild_excluded_note} "
+                            f"Восстановлен прежний пул."
                             + top_reject_reasons()
+                            + request_elapsed_tail()
                         ),
                     )
                 self._persist_step1_preview_candidates(digest.id, preview_by_fp)
@@ -3561,10 +4281,12 @@ class DigestService:
                         + date_tail
                         + search_hint
                         + tail
+                        + request_elapsed_tail()
                     ),
                 )
 
-            self._clear_proxyapi_budget_alert(digest.id)
+            if not step1_proxyapi_depleted:
+                self._clear_proxyapi_budget_alert(digest.id)
 
             verified_pool_before_rebalance = list(verified_pool)
             logger.info(
@@ -3610,26 +4332,42 @@ class DigestService:
                         "Перезапустите сбор или добавьте ручные URL с других сайтов."
                     ),
                 )
-            if len(verified_pool) < STEP1_MIN_VERIFIED:
-                min_selectable_pool = 5
-                if (
-                    len(verified_pool_before_rebalance) >= STEP1_MIN_VERIFIED
-                    and len(verified_pool) >= min_selectable_pool
-                ):
-                    logger.warning(
-                        "Шаг 1: после квот и лимита источников пул стал меньше минимума, но пригоден для выбора топ-5 | "
-                        "digest_id=%s before_rebalance=%s after_rebalance=%s required=%s",
-                        digest.id,
-                        len(verified_pool_before_rebalance),
-                        len(verified_pool),
-                        STEP1_MIN_VERIFIED,
-                    )
-                    for item in verified_pool_before_rebalance:
-                        fp = _url_fingerprint(str(item.get("url") or ""))
-                        if fp:
-                            preview_by_fp[fp] = dict(item)
-                    self._persist_step1_preview_candidates(digest.id, preview_by_fp)
-                else:
+            if (
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and len(verified_pool) < STEP1_MIN_VERIFIED
+                and len(verified_pool_before_rebalance) >= STEP1_MIN_VERIFIED
+            ):
+                if self.settings.enable_web_fetch:
+                    try:
+                        topup_meta = self._step1_topup_search_until_minimum(
+                            digest,
+                            verified_pool=verified_pool,
+                            seen_fp=seen_fp,
+                            excluded_urls=excluded_urls,
+                            now_msk=now_msk,
+                            snapshot_preview_row=snapshot_preview_row,
+                            append_verified=append_verified,
+                            register_reject=register_reject,
+                            started_monotonic=started_monotonic,
+                            hard_limit_sec=hard_time_limit_sec,
+                            batch_size=step1_batch_size,
+                            max_rounds=3,
+                            filter_enabled=self._is_step1_filter_enabled,
+                            respect_host_cap=True,
+                            phase_label="post_rebalance",
+                        )
+                        step1_collection_meta["topup_post_rebalance_rounds"] = int(topup_meta.get("rounds", 0) or 0)
+                        step1_collection_meta["topup_post_rebalance_added"] = int(topup_meta.get("added", 0) or 0)
+                        for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
+                            step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
+                                topup_meta.get(key, 0) or 0
+                            )
+                        iteration_no += int(topup_meta.get("rounds", 0) or 0)
+                    except Exception:
+                        logger.exception("Шаг 1: финальный top-up после rebalance не выполнен")
+
+                if not step1_user_cancelled and not step1_proxyapi_depleted:
                     for item in verified_pool_before_rebalance:
                         fp = _url_fingerprint(str(item.get("url") or ""))
                         if fp:
@@ -3644,6 +4382,19 @@ class DigestService:
                             "или пересоберите пул."
                         ),
                     )
+
+            verified_pool, removed_after_topup = _filter_verified_pool_by_date_window(
+                digest,
+                verified_pool,
+                is_filter_enabled=self._is_step1_filter_enabled,
+            )
+            if removed_after_topup:
+                logger.warning(
+                    "Шаг 1: после rebalance/top-up убраны материалы вне окна | digest_id=%s removed=%s",
+                    digest.id,
+                    removed_after_topup,
+                )
+                step1_collection_meta["pool_outside_window_removed_after_rebalance"] = removed_after_topup
 
             # Кандидатов удаляем только после успешного rebalance.
             self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
@@ -3686,6 +4437,11 @@ class DigestService:
             digest.step1_budget_capped = spent_step1_final >= self.settings.step1_max_cost_rub - 1e-9
             persist_collection_meta()
             persist_reject_stats()
+            if int(step1_collection_meta.get("verified_total", 0) or 0) >= 5:
+                record_e2e_sample(
+                    digest.digest_type or "serious",
+                    step1_collection_meta.get("conversion_e2e"),
+                )
             digest.status = STATUS_STEP1
             digest.current_step = STATUS_STEP1
             self.db.commit()
@@ -3695,10 +4451,17 @@ class DigestService:
                 len(entities),
                 reject_stats,
             )
+            if step1_proxyapi_depleted:
+                self._raise_proxyapi_budget_exceeded(digest.id)
             return entities
 
         finally:
+            step1_end_run(digest.id)
             self._deactivate_step1_filter_states()
+            self._step1_raw_urls_registry = set()
+            self._step1_min_fetch_limit = None
+            self._active_unreachable_hosts = set()
+            self._active_unreachable_host_failures = {}
             if discovered_by_fp:
                 final_urls = [
                     str(u)
@@ -3715,13 +4478,17 @@ class DigestService:
                 self._persist_step1_preview_candidates(digest.id, discovered_by_fp)
             self.db.refresh(digest)
             self._snapshot_proxyapi_after(digest)
-            self._record_proxyapi_step_cost(
-                digest,
-                step="step_1",
-                agent_name="NewsResearchAgent",
-                request_label="step_1_collect_pool",
-                model=AGENT_MODEL_RECOMMENDATIONS["NewsResearchAgent"],
-            )
+            self.db.refresh(digest)
+            step1_cost = self._last_step_balance_delta_rub(digest)
+            if step1_cost is not None and step1_cost > 0:
+                self._save_cost(
+                    digest_id=digest.id,
+                    step="step_1",
+                    agent_name="NewsResearchAgent",
+                    model=AGENT_MODEL_RECOMMENDATIONS["NewsResearchAgent"],
+                    request_label="step_1_collect_pool",
+                    cost_rub=step1_cost,
+                )
             self._finalize_step1_discovery_run_metrics(discovery_run, digest)
 
     def _clear_downstream_for_reselect(self, digest: Digest) -> None:
@@ -4632,6 +5399,27 @@ class DigestService:
             raw_headline = bundle.get("headline") if bundle.get("ok") else None
             host = _host_from_url(stored)
             manual_reject: str | None = None
+            pre_reason = search_url_prefilter_reason(
+                stored,
+                is_enabled=self._is_step1_filter_enabled,
+                tier_strict=bool(getattr(self.settings, "step1_tier_strict_search", True)),
+                curious_strict=is_curious_digest(digest.digest_type),
+            )
+            if pre_reason == "news_listing_page":
+                manual_reject = "news_listing_page"
+            if (
+                bundle.get("ok")
+                and self._is_step1_filter_enabled("news_listing_page")
+                and (bool(bundle.get("is_listing_page")) or is_topic_pool_page_url(stored) or is_listing_page_url(stored))
+            ):
+                manual_reject = "news_listing_page"
+                raw_headline = None
+                title = f"Статья по ссылке ({host})"
+                desc = (
+                    "Указана страница ленты/рубрики, а не отдельная новость. "
+                    "Подставьте прямую ссылку на статью или оставьте поле пустым — "
+                    "шаг 1 попробует извлечь новости из лент автоматически."
+                )
             if raw_headline:
                 title = self._ensure_russian_candidate_title(digest.id, stored, raw_headline)
                 if (
@@ -4818,9 +5606,9 @@ class DigestService:
         days = int(digest.news_window_days or 3)
         kind = _normalize_news_window_day_kind(digest.news_window_day_kind)
         kind_ru = "рабочих" if kind == "working" else "календарных"
-        anchor = digest.date if isinstance(digest.date, date) else digest.date
+        anchor = digest_news_anchor_date(digest)
         window_hint = (
-            f"after:{earliest.isoformat()} "
+            f"after:{earliest.isoformat()} before:{anchor.isoformat()} "
             f"Только материалы с датой публикации не ранее {earliest.isoformat()} "
             f"и не позже {anchor.isoformat()} "
             f"(окно: {days} {kind_ru} дней от даты выпуска {anchor}). "
@@ -4842,18 +5630,20 @@ class DigestService:
             return ""
         primary = seeds[:max_urls]
         return (
-            "Сначала ищи в проверенных AI-разделах из tier-файла: "
+            "Сначала ищи в проверенных AI-разделах и агрегаторах (Tier-2) из tier-файла: "
             + ", ".join(primary)
-            + ". Если стартовая ссылка является агрегатором или дайджестом, используй её только для разведки "
-            "и возвращай прямой URL статьи первоисточника. "
+            + ". Агрегаторы (Google News, Reddit, Yandex News и т.п.) — для разведки сюжета; "
+            "в ответе только прямые URL статей первоисточника, не ленты и не поисковые страницы агрегаторов. "
         )
 
     def _step1_prioritize_search_urls(self, urls: list[str], digest: Digest | None = None) -> list[str]:
         """Сортирует URL: сначала дата в окне, затем tier-хоста."""
+        from app.source_tiers_policy import tier2_search_host_markers
+
         policy = get_source_tiers_policy(self.settings.source_tiers_path)
         tier_groups = (
             (0, policy.tier1_hosts),
-            (1, policy.tier2_hosts),
+            (1, tier2_search_host_markers(policy)),
             (2, policy.tier3_hosts),
             (3, policy.tier4_hosts),
         )
@@ -4903,6 +5693,18 @@ class DigestService:
             "site:ria.ru OR site:interfax.ru OR site:vedomosti.ru OR site:habr.com OR site:vc.ru"
         )
 
+    def _step1_fresh_breaking_query(self, digest: Digest) -> str:
+        """Усиленный запрос на свежие публикации внутри окна (без ослабления дат-фильтра)."""
+        earliest = digest_earliest_news_date(digest)
+        anchor = digest_news_anchor_date(digest)
+        return (
+            f"after:{earliest.isoformat()} before:{anchor.isoformat()} "
+            "\"искусственный интеллект\" OR \"генеративный ИИ\" OR \"нейросеть\" OR LLM "
+            "новость OR сегодня OR вчера OR \"последние сутки\" OR \"breaking\" "
+            "site:ria.ru OR site:interfax.ru OR site:vedomosti.ru OR site:habr.com OR site:vc.ru "
+            "-archive -tag -tags -opinion -column -vacancy -jobs -events -digest"
+        )
+
     def _step1_curious_angles_query(self, digest: Digest) -> str:
         """Доп. запрос для курьёзного выпуска: забавные/неожиданные углы (не пресс-релизы)."""
         earliest = digest_earliest_news_date(digest)
@@ -4945,6 +5747,157 @@ class DigestService:
             "-launches -introduces "
             "-blog -opinion -vacancy -careers -webinar -podcast"
         )
+
+    def _step1_topup_search_until_minimum(
+        self,
+        digest: Digest,
+        *,
+        verified_pool: list[dict[str, Any]],
+        seen_fp: set[str],
+        excluded_urls: list[str],
+        now_msk: str,
+        snapshot_preview_row: Any,
+        append_verified: Any,
+        register_reject: Any,
+        started_monotonic: float,
+        hard_limit_sec: int,
+        batch_size: int,
+        target: int = STEP1_MIN_VERIFIED,
+        max_rounds: int = 4,
+        filter_enabled: Any | None = None,
+        respect_host_cap: bool = False,
+        phase_label: str = "topup",
+    ) -> dict[str, Any]:
+        """Добор пула дополнительными итерациями web-поиска без ослабления окна дат."""
+        is_enabled = filter_enabled or self._is_step1_filter_enabled
+        added_total = 0
+        rounds_done = 0
+        no_progress_rounds = 0
+        funnel_acc: dict[str, int] = {
+            "urls_raw_merged": 0,
+            "urls_prefilter_rejected": 0,
+            "urls_sent_to_http": 0,
+        }
+
+        def _query_for_round(round_idx: int) -> str:
+            saturated_hosts = {
+                host for host, count in _pool_host_counts(verified_pool).items() if count >= STEP1_MAX_PER_SOURCE
+            }
+            if is_curious_digest(digest.digest_type):
+                if round_idx % 4 == 1:
+                    return self._step1_curious_angles_query(digest)
+                if round_idx % 4 == 2:
+                    return self._step1_curious_viral_query(digest)
+            elif round_idx % 4 == 1:
+                return self._step1_fresh_breaking_query(digest)
+            elif round_idx % 4 == 2:
+                return self._step1_press_release_query(digest)
+            base = self._step1_fresh_tier1_query(digest)
+            if round_idx % 2 == 0 and saturated_hosts:
+                return _step1_search_query_exclude_saturated_hosts(base, saturated_hosts)
+            return base
+
+        for round_idx in range(max(1, int(max_rounds or 1))):
+            if step1_is_cancelled(digest.id):
+                return {
+                    "rounds": rounds_done,
+                    "added": added_total,
+                    "stop_reason": "user_cancelled",
+                    **funnel_acc,
+                }
+            if self._proxyapi_funds_depleted(check_balance=False):
+                return {
+                    "rounds": rounds_done,
+                    "added": added_total,
+                    "stop_reason": "proxyapi_budget_exceeded",
+                    **funnel_acc,
+                }
+            if len(verified_pool) >= target:
+                break
+            if int(time.monotonic() - started_monotonic) >= int(hard_limit_sec):
+                break
+            if self._digest_proxyapi_spent_rub(digest) >= self.settings.step1_max_cost_rub:
+                break
+
+            shortfall = max(1, target - len(verified_pool))
+            need = min(max(6, int(batch_size or 10)), shortfall + 4)
+            query = _query_for_round(round_idx)
+            logger.warning(
+                "Шаг 1: top-up итерация web-поиска | digest_id=%s phase=%s round=%s need=%s verified=%s",
+                digest.id,
+                phase_label,
+                round_idx + 1,
+                need,
+                len(verified_pool),
+            )
+            before_count = len(verified_pool)
+            items, funnel = self._collect_search_verified_candidates(
+                digest.id,
+                digest,
+                now_msk,
+                seen_fp,
+                limit=need,
+                on_row=snapshot_preview_row,
+                register_reject=register_reject,
+                query_override=query,
+                skip_urls=excluded_urls,
+                filter_enabled=filter_enabled,
+            )
+            for key in funnel_acc:
+                funnel_acc[key] += int(funnel.get(key, 0) or 0)
+
+            if respect_host_cap:
+                host_counts = _pool_host_counts(verified_pool)
+                existing_fps = {_url_fingerprint(str(x.get("url") or "")) for x in verified_pool}
+                for item in items:
+                    if len(verified_pool) >= target:
+                        break
+                    fp = _url_fingerprint(str(item.get("url") or ""))
+                    if not fp or fp in existing_fps:
+                        continue
+                    host = _publisher_host_key(item)
+                    if host_counts.get(host, 0) >= STEP1_MAX_PER_SOURCE:
+                        continue
+                    pool_before = len(verified_pool)
+                    append_verified(item)
+                    if len(verified_pool) > pool_before:
+                        existing_fps.add(fp)
+                        host_counts[host] = host_counts.get(host, 0) + 1
+            else:
+                for item in items:
+                    append_verified(item)
+
+            filtered, removed = _filter_verified_pool_by_date_window(
+                digest,
+                verified_pool,
+                is_filter_enabled=is_enabled,
+            )
+            if removed:
+                verified_pool[:] = filtered
+            added = len(verified_pool) - before_count
+            added_total += max(0, added)
+            rounds_done += 1
+            if self._proxyapi_funds_depleted(check_balance=False):
+                return {
+                    "rounds": rounds_done,
+                    "added": added_total,
+                    "stop_reason": "proxyapi_budget_exceeded",
+                    **funnel_acc,
+                }
+            if added <= 0:
+                no_progress_rounds += 1
+                no_progress_limit = 2 if len(verified_pool) >= target else 6
+                if no_progress_rounds >= no_progress_limit:
+                    break
+            else:
+                no_progress_rounds = 0
+
+        return {
+            "rounds": rounds_done,
+            "added": added_total,
+            "verified_total": len(verified_pool),
+            **funnel_acc,
+        }
 
     def _step1_collect_iterative_batches(
         self,
@@ -4992,6 +5945,7 @@ class DigestService:
                 query_override=query_override,
                 skip_urls=excluded_urls,
                 filter_enabled=filter_enabled,
+                verified_pool_size=len(verified_pool),
             )
             for key in funnel_acc:
                 funnel_acc[key] += int(funnel.get(key, 0) or 0)
@@ -4999,6 +5953,24 @@ class DigestService:
                 append_verified(item)
 
         while len(verified_pool) < target_max_candidates:
+            if step1_is_cancelled(digest.id):
+                stop_reason = "user_cancelled"
+                logger.info(
+                    "Шаг 1: отмена в итерации web-поиска | digest_id=%s verified=%s iter=%s",
+                    digest.id,
+                    len(verified_pool),
+                    iteration_no,
+                )
+                break
+            if self._proxyapi_funds_depleted(check_balance=False):
+                stop_reason = "proxyapi_budget_exceeded"
+                logger.warning(
+                    "Шаг 1: остановка web-поиска — ProxyAPI без средств | digest_id=%s verified=%s iter=%s",
+                    digest.id,
+                    len(verified_pool),
+                    iteration_no,
+                )
+                break
             elapsed_sec = int(time.monotonic() - started_monotonic)
             if elapsed_sec >= hard_limit_sec:
                 stop_reason = "hard_timeout"
@@ -5020,28 +5992,41 @@ class DigestService:
                 elapsed_sec,
             )
             _run_collect(need)
+            if self._proxyapi_funds_depleted(check_balance=False):
+                stop_reason = "proxyapi_budget_exceeded"
+                break
+            elapsed_after_collect = int(time.monotonic() - started_monotonic)
+            if elapsed_after_collect >= hard_limit_sec:
+                stop_reason = "hard_timeout_after_collect"
+                break
+            if elapsed_after_collect >= soft_limit_sec and len(verified_pool) >= target_min_verified:
+                stop_reason = "soft_timeout_after_collect"
+                break
             substantive_press = sum(1 for x in verified_pool if _is_substantive_press_for_pool(x))
-            if (
-                not is_curious_digest(digest.digest_type)
-                and not tier_strict
-                and len(verified_pool) < target_max_candidates
-                and substantive_press < press_min_target
-            ):
-                press_need = min(max(press_min_target - substantive_press, 2), target_max_candidates - len(verified_pool))
-                _run_collect(max(press_need, 4), query_override=press_query)
-            elif (
-                is_curious_digest(digest.digest_type)
-                and len(verified_pool) < target_max_candidates
-            ):
-                curious_need = min(batch_size, target_max_candidates - len(verified_pool))
-                _run_collect(max(curious_need, 6), query_override=self._step1_curious_angles_query(digest))
-                if len(verified_pool) < target_max_candidates:
-                    _run_collect(
-                        max(curious_need, 6),
-                        query_override=self._step1_curious_viral_query(digest),
-                    )
-            if len(verified_pool) < target_max_candidates:
-                # Один supplement-раунд на итерацию, чтобы не уходить в длинные циклы.
+            if len(verified_pool) < STEP1_MIN_VERIFIED:
+                if (
+                    not is_curious_digest(digest.digest_type)
+                    and not tier_strict
+                    and len(verified_pool) < target_max_candidates
+                    and substantive_press < press_min_target
+                ):
+                    press_need = min(max(press_min_target - substantive_press, 2), target_max_candidates - len(verified_pool))
+                    _run_collect(max(press_need, 4), query_override=press_query)
+                elif (
+                    is_curious_digest(digest.digest_type)
+                    and len(verified_pool) < target_max_candidates
+                ):
+                    curious_need = min(batch_size, target_max_candidates - len(verified_pool))
+                    _run_collect(max(curious_need, 6), query_override=self._step1_curious_angles_query(digest))
+                    if len(verified_pool) < target_max_candidates:
+                        _run_collect(
+                            max(curious_need, 6),
+                            query_override=self._step1_curious_viral_query(digest),
+                        )
+            if len(verified_pool) < STEP1_MIN_VERIFIED and len(verified_pool) < target_max_candidates:
+                supplement_stop = target_min_verified
+                supplement_rounds = 2
+                # Один–два supplement-раунда на итерацию, пока не набран минимум.
                 self._step1_run_web_supplement_rounds(
                     digest,
                     verified_pool=verified_pool,
@@ -5051,8 +6036,8 @@ class DigestService:
                     snapshot_preview_row=snapshot_preview_row,
                     append_verified=append_verified,
                     register_reject=register_reject,
-                    stop_at=min(target_max_candidates, before_count + need),
-                    max_rounds=1,
+                    stop_at=supplement_stop,
+                    max_rounds=supplement_rounds,
                     filter_enabled=filter_enabled,
                 )
 
@@ -5075,8 +6060,11 @@ class DigestService:
                 stop_reason = "target_reached"
                 break
             iterations_done = max(0, iteration_no - start_iteration)
+            if len(verified_pool) >= STEP1_MIN_VERIFIED and iterations_done >= 2:
+                stop_reason = "target_min_met"
+                break
             may_stop_early = iterations_done >= min_iterations
-            if elapsed_sec >= soft_limit_sec and may_stop_early:
+            if elapsed_sec >= soft_limit_sec and may_stop_early and len(verified_pool) >= target_min_verified:
                 if len(verified_pool) >= target_max_candidates:
                     stop_reason = "soft_timeout_target_met"
                     break
@@ -5111,7 +6099,8 @@ class DigestService:
                     else "soft_timeout_final_attempt"
                 )
                 break
-            if no_progress_rounds >= 2 and may_stop_early:
+            no_progress_limit = 4 if len(verified_pool) < target_min_verified else 2
+            if no_progress_rounds >= no_progress_limit and may_stop_early:
                 stop_reason = (
                     "no_progress_target_met"
                     if len(verified_pool) >= target_max_candidates
@@ -5146,6 +6135,10 @@ class DigestService:
         """Добор через ProxyAPI/SerpAPI/Tavily (без CrewAI), пока не набран stop_at подтверждённых."""
         sup_round = 0
         while len(verified_pool) < stop_at and sup_round < max_rounds:
+            if step1_is_cancelled(digest.id):
+                break
+            if self._proxyapi_funds_depleted(check_balance=False):
+                break
             sup_round += 1
             need = stop_at - len(verified_pool)
             if need <= 0:
@@ -5226,6 +6219,7 @@ class DigestService:
         query_override: str | None = None,
         skip_urls: list[str] | None = None,
         filter_enabled: Any | None = None,
+        verified_pool_size: int = 0,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Реальные URL из ProxyAPI + SerpAPI + Tavily — до LLM-цепочки."""
         search_route = resolve_step1_search_routing(
@@ -5236,19 +6230,27 @@ class DigestService:
         tier_strict = search_route.tier_strict
         curious_strict = search_route.curious_strict
         window_hint, topic_terms, product_excludes = self._step1_search_query_parts(digest)
-        fetch_limit = max(
-            int(getattr(self.settings, "step1_search_fetch_limit", 100) or 100),
-            limit * 8,
-            60,
-        )
-        check_limit = max(
-            int(getattr(self.settings, "step1_urls_checked_per_collect", 80) or 80),
-            limit * 6,
-            40,
-        )
+        configured_fetch_limit = max(10, int(getattr(self.settings, "step1_search_fetch_limit", 36) or 36))
+        configured_check_limit = max(5, int(getattr(self.settings, "step1_urls_checked_per_collect", 24) or 24))
+        fetch_limit = min(configured_fetch_limit, max(limit * 3, 12))
+        check_limit = min(configured_check_limit, max(limit * 2, 8))
+        min_fetch = getattr(self, "_step1_min_fetch_limit", None)
+        if min_fetch:
+            fetch_limit = min(max(fetch_limit, int(min_fetch)), configured_fetch_limit + 10)
+        else:
+            fetch_limit = min(fetch_limit, configured_fetch_limit + 5)
+        check_limit = min(check_limit, configured_check_limit)
+        if min_fetch and fetch_limit >= int(min_fetch):
+            logger.info(
+                "Шаг 1: fetch по estimated_raw_for_10 | digest_id=%s fetch=%s http=%s plan_raw=%s",
+                digest_id,
+                fetch_limit,
+                check_limit,
+                min_fetch,
+            )
         if curious_strict:
-            fetch_limit = max(fetch_limit, 130, limit * 12)
-            check_limit = max(check_limit, 110, limit * 10)
+            fetch_limit = min(fetch_limit, configured_fetch_limit)
+            check_limit = min(check_limit, configured_check_limit)
         supplement_ctx = str(
             getattr(self.settings, "proxyapi_web_search_context_size_supplement", "low") or "low"
         ).lower()
@@ -5292,23 +6294,64 @@ class DigestService:
                 proxy=self.proxy,
                 search_context_size=supplement_ctx,
                 policy=policy,
+                current_verified=max(0, int(verified_pool_size or 0)),
             ):
                 key = str(u or "").strip().lower().rstrip("/")
                 if not key or key in seen_raw:
                     continue
                 seen_raw.add(key)
                 raw_unique.append(str(u).strip())
+            if query_override is None and raw_unique:
+                stale_urls = [u for u in raw_unique if _url_path_date_before_digest_window(digest, u)]
+                stale_ratio = (len(stale_urls) / max(1, len(raw_unique))) if raw_unique else 0.0
+                stale_threshold = max(2, min(10, len(raw_unique) // 4))
+                if len(stale_urls) >= stale_threshold and stale_ratio >= 0.25:
+                    tier1_query = self._step1_fresh_tier1_query(digest)
+                    logger.info(
+                        "Шаг 1: свежий rescue-добор tier-1 из-за старой выдачи | digest_id=%s stale=%s raw=%s ratio=%.2f",
+                        digest.id,
+                        len(stale_urls),
+                        len(raw_unique),
+                        stale_ratio,
+                    )
+                    for u in fetch_article_urls_raw_merged(
+                        self.settings,
+                        tier1_query,
+                        limit=fetch_limit,
+                        proxy=self.proxy,
+                        search_context_size=supplement_ctx,
+                        force_proxyapi=True,
+                    ):
+                        key = str(u or "").strip().lower().rstrip("/")
+                        if not key or key in seen_raw:
+                            continue
+                        seen_raw.add(key)
+                        raw_unique.append(str(u).strip())
         else:
             query = query_override or self._step1_search_query(digest)
             raw_merged: list[str] = []
-            raw_merged.extend(
-                fetch_article_urls_raw_merged(
-                    self.settings,
-                    query,
-                    limit=fetch_limit,
-                    proxy=self.proxy,
+            if query_override is not None and is_curious_digest(digest.digest_type):
+                curious_policy = get_curious_source_policy()
+                allowed = list(curious_policy.all_search_hosts())
+                raw_merged.extend(
+                    fetch_article_urls_raw_merged(
+                        self.settings,
+                        query,
+                        limit=fetch_limit,
+                        proxy=self.proxy,
+                        include_domains=allowed,
+                        allowed_hosts=allowed,
+                    )
                 )
-            )
+            else:
+                raw_merged.extend(
+                    fetch_article_urls_raw_merged(
+                        self.settings,
+                        query,
+                        limit=fetch_limit,
+                        proxy=self.proxy,
+                    )
+                )
             for u in raw_merged:
                 key = str(u or "").strip().lower().rstrip("/")
                 if not key or key in seen_raw:
@@ -5341,7 +6384,17 @@ class DigestService:
             "urls_prefilter_rejected": 0,
             "urls_sent_to_http": 0,
         }
+        registry = getattr(self, "_step1_raw_urls_registry", None)
+        if registry is not None:
+            for raw_u in raw_unique:
+                key = str(raw_u or "").strip().lower().rstrip("/")
+                if key:
+                    registry.add(key)
+            funnel["urls_raw_unique"] = len(registry)
         urls_to_check: list[str] = []
+        agg_prefilter_reasons: dict[str, int] = {}
+        agg_raw_total = sum(1 for u in raw_unique if _is_aggregator_source(u, policy))
+        agg_prefilter_rejected = 0
         seq_pf = 1
         prefilter_order = self._step1_stage_filter_order(
             "pre_http",
@@ -5359,6 +6412,25 @@ class DigestService:
             ],
         )
         for raw in raw_unique:
+            if step1_is_cancelled(digest_id):
+                break
+            is_agg_raw = _is_aggregator_source(raw, policy)
+            if self._step1_host_is_temporarily_unreachable(raw):
+                funnel["urls_prefilter_rejected"] += 1
+                if is_agg_raw:
+                    agg_prefilter_rejected += 1
+                    agg_prefilter_reasons["http_unreachable"] = agg_prefilter_reasons.get("http_unreachable", 0) + 1
+                self._record_prefilter_reject(
+                    digest,
+                    raw,
+                    now_msk,
+                    "http_unreachable",
+                    on_row=on_row,
+                    register_reject=register_reject,
+                    seq=seq_pf,
+                )
+                seq_pf += 1
+                continue
             pre_reason = search_url_prefilter_reason(
                 raw,
                 is_enabled=filter_enabled,
@@ -5368,8 +6440,18 @@ class DigestService:
             )
             if not pre_reason:
                 pre_reason = self._recent_top5_repeat_reason(raw)
+            # Страницы-ленты не отбрасываем сразу: пробуем развернуть в отдельные статьи
+            # в _ingest_step1_urls_with_listing_expansion().
+            if pre_reason == "news_listing_page" and (
+                is_topic_pool_page_url(raw) or is_listing_page_url(raw)
+            ):
+                urls_to_check.append(raw)
+                continue
             if pre_reason:
                 funnel["urls_prefilter_rejected"] += 1
+                if is_agg_raw:
+                    agg_prefilter_rejected += 1
+                    agg_prefilter_reasons[pre_reason] = agg_prefilter_reasons.get(pre_reason, 0) + 1
                 self._record_prefilter_reject(
                     digest,
                     raw,
@@ -5385,6 +6467,9 @@ class DigestService:
                 digest, raw
             ):
                 funnel["urls_prefilter_rejected"] += 1
+                if is_agg_raw:
+                    agg_prefilter_rejected += 1
+                    agg_prefilter_reasons["published_before_window"] = agg_prefilter_reasons.get("published_before_window", 0) + 1
                 self._record_prefilter_reject(
                     digest,
                     raw,
@@ -5399,6 +6484,7 @@ class DigestService:
             urls_to_check.append(raw)
         urls = self._step1_prioritize_search_urls(urls_to_check, digest)
         funnel["urls_sent_to_http"] = min(len(urls), check_limit)
+        agg_sent_to_http = sum(1 for u in urls[:check_limit] if _is_aggregator_source(u, policy))
         logger.info(
             "Шаг 1: воронка поиска | digest_id=%s raw=%s prefilter=%s http=%s need_verified=%s",
             digest_id,
@@ -5407,6 +6493,26 @@ class DigestService:
             funnel["urls_sent_to_http"],
             limit,
         )
+        if search_route.uses_source_tiers or agg_raw_total > 0:
+            agg_hosts = sorted(
+                {
+                    (urlparse(u).hostname or "").lower()
+                    for u in raw_unique
+                    if _is_aggregator_source(u, policy)
+                }
+            )
+            top_reasons = ", ".join(
+                f"{k}={v}" for k, v in sorted(agg_prefilter_reasons.items(), key=lambda x: (-x[1], x[0]))[:4]
+            )
+            logger.info(
+                "Шаг 1: агрегаторная диагностика | digest_id=%s raw=%s prefilter_rejected=%s sent_to_http=%s hosts=%s reasons=%s",
+                digest_id,
+                agg_raw_total,
+                agg_prefilter_rejected,
+                agg_sent_to_http,
+                len(agg_hosts),
+                top_reasons or "-",
+            )
         verified = self._ingest_step1_urls_with_listing_expansion(
             digest,
             urls,
@@ -5467,10 +6573,24 @@ class DigestService:
         skip_norm = {s.strip().lower() for s in (skip_urls or set()) if s}
         workers = max(1, min(12, int(getattr(self.settings, "step1_verify_workers", 6) or 6)))
         pending: list[tuple[str, dict[str, Any] | None, int]] = []
+        pending_host_counts: dict[str, int] = {}
         visited: set[str] = set()
+        listing_child_total = 0
+        listing_child_skipped_excluded = 0
+        listing_child_rejected_by_url_date = 0
         process_cap = max_urls_to_process if max_urls_to_process is not None else max(limit * 10, 80)
         pending_cap = max_pending_checks if max_pending_checks is not None else max(limit * 12, 96)
+        max_pending_per_host = max(1, int(getattr(self.settings, "step1_max_pending_per_host", 4) or 4))
         processed = 0
+
+        logger.info(
+            "Шаг 1: HTTP-проверка URL | digest_id=%s urls=%s limit=%s workers=%s",
+            digest.id,
+            min(len(urls), process_cap),
+            limit,
+            workers,
+        )
+        started_check = time.monotonic()
 
         for u in urls:
             if processed >= process_cap and len(verified) >= limit:
@@ -5486,15 +6606,63 @@ class DigestService:
                 )
                 seq += 1
                 continue
-            for resolved_url, bundle in _expand_listing_url_candidates(raw, max_children=max_children_per_listing):
+            if is_listing_page_url(raw) or is_topic_pool_page_url(raw):
+                pairs = _expand_listing_url_candidates(raw, max_children=max_children_per_listing)
+            else:
+                # Обычные URL не скачиваем здесь последовательно: отправляем сразу
+                # в ThreadPoolExecutor, иначе 60-80 ссылок превращаются в длинный
+                # синхронный pre-verify.
+                pairs = [(raw, None)]
+            for resolved_url, bundle in pairs:
+                if resolved_url != raw:
+                    listing_child_total += 1
+                resolved_norm = str(resolved_url or "").strip().lower()
+                if resolved_norm in skip_norm:
+                    listing_child_skipped_excluded += 1
+                    self._record_prefilter_reject(
+                        digest,
+                        resolved_url,
+                        now_msk,
+                        "duplicate_url_skip",
+                        on_row=on_row,
+                        register_reject=register_reject,
+                        seq=seq,
+                    )
+                    seq += 1
+                    continue
+                if (
+                    (filter_enabled is None or bool(filter_enabled("published_before_window")))
+                    and _url_path_date_before_digest_window(digest, resolved_url)
+                ):
+                    listing_child_rejected_by_url_date += 1
+                    self._record_prefilter_reject(
+                        digest,
+                        resolved_url,
+                        now_msk,
+                        "published_before_window",
+                        on_row=on_row,
+                        register_reject=register_reject,
+                        seq=seq,
+                    )
+                    seq += 1
+                    continue
                 fp = _url_fingerprint(resolved_url)
                 if not fp or fp in seen_fp or fp in visited:
                     continue
+                if self._step1_host_is_temporarily_unreachable(resolved_url):
+                    continue
+                host = _host_from_url(resolved_url).lower()
+                if host and pending_host_counts.get(host, 0) >= max_pending_per_host:
+                    continue
                 visited.add(fp)
                 pending.append((resolved_url, bundle, seq))
+                if host:
+                    pending_host_counts[host] = pending_host_counts.get(host, 0) + 1
                 seq += 1
                 if len(pending) >= pending_cap:
                     break
+            if len(pending) >= pending_cap:
+                break
 
         def _verify_one(work: tuple[str, dict[str, Any] | None, int]) -> dict[str, Any]:
             resolved_url, bundle, work_seq = work
@@ -5513,6 +6681,12 @@ class DigestService:
             return item
 
         if pending:
+            logger.info(
+                "Шаг 1: HTTP-проверка URL старт | digest_id=%s pending=%s workers=%s",
+                digest.id,
+                len(pending),
+                min(workers, len(pending)),
+            )
             if workers <= 1 or len(pending) == 1:
                 verified_items = [_verify_one(w) for w in pending]
             else:
@@ -5538,6 +6712,21 @@ class DigestService:
                         register_reject(item)
                 if len(verified) >= limit:
                     break
+        logger.info(
+            "Шаг 1: HTTP-проверка URL завершена | digest_id=%s pending=%s verified=%s elapsed_sec=%s",
+            digest.id,
+            len(pending),
+            len(verified),
+            int(time.monotonic() - started_check),
+        )
+        if listing_child_total:
+            logger.info(
+                "Шаг 1: дети листингов до HTTP | digest_id=%s total=%s skipped_excluded=%s rejected_by_url_date=%s",
+                digest.id,
+                listing_child_total,
+                listing_child_skipped_excluded,
+                listing_child_rejected_by_url_date,
+            )
         return verified
 
     def _verify_llm_candidate_dict(
@@ -5585,7 +6774,7 @@ class DigestService:
             item["link_status"] = False
             _append_reject_reason(item, "non_article_page")
             return
-        curious_mode = bool(getattr(self, "_step1_curious_mode", False))
+        curious_mode = getattr(self, "_step1_curious_mode", False) is True
         if curious_mode:
             tier, is_aggregator, reliability_status = classify_curious_source(u)
             if is_curious_blocked_host(u) and is_enabled("forbidden_media_source"):
@@ -5620,6 +6809,7 @@ class DigestService:
         if not bundle.get("ok"):
             item["link_status"] = False
             _append_reject_reason(item, "http_unreachable")
+            self._step1_mark_host_unreachable(u)
             return
         stored = str(bundle.get("final_url") or bundle.get("display_url") or u).strip()
         _append_url_audit(item, "http_verify", original_url, stored)
@@ -5905,24 +7095,10 @@ class DigestService:
             seq += 1
             if len(out) >= 24:
                 break
-        if out:
-            return out
-        if not self.settings.enable_web_fetch:
-            return []
-        spent = self._digest_proxyapi_spent_rub(digest)
-        if spent >= self.settings.step1_max_cost_rub:
-            logger.warning(
-                "Шаг 1: LLM-refill пропущен — достигнут STEP1_MAX_COST_RUB | digest_id=%s spent=%.4f",
-                digest.id,
-                spent,
-            )
-            return []
-        refill_raw = self.workflow.run_candidates_refill(
-            digest.digest_type or "serious",
-            now_msk,
-            excluded_urls[-55:],
-        )
-        return [x for x in refill_raw if isinstance(x, dict)]
+        # Возвращаем только URL, пришедшие из web-search провайдеров.
+        # LLM-refill здесь создавал синтетические/неоткрываемые ссылки
+        # и ломал partial rebuild при наличии ручных новостей.
+        return out
 
     def _merge_candidates(
         self, manual_candidates: list[dict[str, Any]], generated_candidates: list[dict[str, Any]], limit: int

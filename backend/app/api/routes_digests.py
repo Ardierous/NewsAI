@@ -38,6 +38,7 @@ from app.schemas import (
     Step4GenerateTextsRequest,
     Step4SelectImageRequest,
     ImageVariantOut,
+    FinalizeReleaseResponse,
 )
 from app.services.digest_service import DigestService
 
@@ -123,6 +124,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
     docx_path = None
     image_variants: list[ImageVariantOut] = []
     rejected_reasons_summary: dict[str, int] = {}
+    step1_reject_audit: dict[str, object] = {}
     step1_collection_meta: dict[str, object] = {}
     step2_order_rationale = ""
     for a in assets:
@@ -147,6 +149,13 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
                     rejected_reasons_summary = {str(k): int(v) for k, v in raw.items()}
             except Exception:
                 pass
+        if a.type == "step1_reject_audit":
+            try:
+                raw = json.loads(a.prompt or "{}")
+                if isinstance(raw, dict):
+                    step1_reject_audit = raw
+            except Exception:
+                pass
         if a.type == "step1_collection_meta":
             try:
                 raw = json.loads(a.prompt or "{}")
@@ -157,11 +166,10 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         if a.type == "step2_order_rationale":
             step2_order_rationale = str(a.prompt or "").strip()
     image_variants.sort(key=lambda x: x.variant)
-    digest_cost = service.digest_proxyapi_cost_rub(digest)
-    total_cost_rub = round(
-        digest_cost if digest_cost is not None else sum(x.cost_rub or 0.0 for x in llm_costs),
-        4,
-    )
+    release_cost = service.digest_release_cost_rub(digest)
+    digest_cost = service.compute_digest_total_cost_rub(digest)
+    total_cost_rub = digest_cost
+    release_finalized = digest.proxyapi_finalized_cost_rub is not None
     try:
         from zoneinfo import ZoneInfo
 
@@ -229,6 +237,7 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         proxyapi_budget_exceeded=proxyapi_budget_message is not None,
         proxyapi_budget_message=proxyapi_budget_message,
         rejected_reasons_summary=rejected_reasons_summary,
+        step1_reject_audit=step1_reject_audit,
         step1_collection_meta=step1_collection_meta,
         selected=selected,
         analytics=[
@@ -273,6 +282,9 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
             for r in llm_costs
         ],
         total_cost_rub=total_cost_rub,
+        release_cost_rub=round(float(release_cost or total_cost_rub or 0.0), 4),
+        release_cost_finalized=release_finalized,
+        release_cost_finalized_at=digest.proxyapi_finalized_at,
         tracked_spend_today_rub=tracked_spend_today_rub,
         proxyapi_spent_today_rub=spent_today_proxy,
         enable_step4_image_generation=get_settings().enable_step4_image_generation,
@@ -329,6 +341,12 @@ def run_step1(digest_id: int, payload: Step1RunRequest, db: Session = Depends(ge
         news_window_day_kind=payload.news_window_day_kind,
     )
     return [CandidateOut.model_validate(r) for r in rows]
+
+
+@router.post("/{digest_id}/step1/cancel")
+def cancel_step1(digest_id: int, db: Session = Depends(get_db)) -> dict[str, object]:
+    service = DigestService(db)
+    return service.cancel_step1_run(digest_id)
 
 
 @router.get("/{digest_id}/step1/filters", response_model=Step1FiltersResponse)
@@ -459,6 +477,14 @@ def confirm_final(digest_id: int, payload: CommandRequest, db: Session = Depends
     """Устаревший монолитный шаг 4: 4 обложки, выбор v1, все площадки."""
     service = DigestService(db)
     return service.run_step_4_final(digest_id, payload.hook_variant)
+
+
+@router.post("/{digest_id}/finalize", response_model=FinalizeReleaseResponse)
+def finalize_digest_release(digest_id: int, db: Session = Depends(get_db)) -> FinalizeReleaseResponse:
+    """Зафиксировать накопительную стоимость выпуска (ProxyAPI) после готовности результата."""
+    service = DigestService(db)
+    data = service.finalize_digest_release(digest_id)
+    return FinalizeReleaseResponse.model_validate(data)
 
 
 @router.get("/{digest_id}/final")

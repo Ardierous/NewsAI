@@ -11,6 +11,7 @@ from app.source_tiers_policy import (
     is_tier5_forbidden_source,
     load_source_tiers,
     policy_tier_host_groups,
+    tier2_search_host_markers,
 )
 
 
@@ -28,10 +29,11 @@ def test_load_source_tiers_splits_prompt_and_host_rules():
     assert "https://ria.ru/product_iskusstvennyy-intellekt/" in policy.search_seed_urls
 
 
-def test_classify_source_policy_tier5_aggregator():
-    tier, is_agg, _ = classify_source_policy("https://news.google.com/articles/abc")
-    assert tier == "Tier-5"
+def test_classify_source_policy_aggregator_as_tier2():
+    tier, is_agg, status = classify_source_policy("https://news.google.com/articles/abc")
+    assert tier == "Tier-2"
     assert is_agg is True
+    assert "сомнительный" in status or "подтверждено" in status
 
 
 def test_classify_source_policy_forbidden_media():
@@ -63,10 +65,16 @@ def test_blocked_and_aggregator_helpers():
 def test_is_policy_tier_source_and_host_groups():
     assert is_policy_tier_source("https://ria.ru/20260519/ai.html")
     assert not is_policy_tier_source("https://meduza.io/feature/ai")
-    assert not is_policy_tier_source("https://news.google.com/articles/x")
+    assert is_policy_tier_source("https://news.google.com/articles/x")
+    assert is_policy_tier_source("https://yandex.ru/news/story/1")
     groups = policy_tier_host_groups()
     assert groups[0][0] == "Tier-1"
     assert "ria.ru" in groups[0][1]
+    t2 = tier2_search_host_markers()
+    assert "techcrunch.com" in t2
+    assert "news.google." in t2
+    assert groups[1][0] == "Tier-2"
+    assert "news.google." in groups[1][1]
     batches = batched_site_host_groups(("a.ru", "b.ru", "c.ru", "d.ru"), batch_size=3)
     assert batches == [("a.ru", "b.ru", "c.ru"), ("d.ru",)]
 

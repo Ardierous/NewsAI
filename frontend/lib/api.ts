@@ -125,6 +125,7 @@ export const api = {
       keep_candidate_ids?: number[];
       news_window_days?: number;
       news_window_day_kind?: "calendar" | "working";
+      signal?: AbortSignal;
     },
   ) =>
     request<any[]>(`/digests/${id}/step1/run`, {
@@ -133,10 +134,16 @@ export const api = {
         manual_urls,
         rebuild: opts?.rebuild ?? false,
         keep_candidate_ids: opts?.keep_candidate_ids ?? [],
-        news_window_days: opts?.news_window_days ?? null,
-        news_window_day_kind: opts?.news_window_day_kind ?? null,
+        news_window_days: opts?.news_window_days ?? 3,
+        news_window_day_kind: opts?.news_window_day_kind ?? "working",
       }),
+      signal: opts?.signal,
       // Без timeoutMs: шаг 1 верифицирует десятки URL — обрыв на 15 мин давал ложный сбой при живом backend.
+    }),
+  step1Cancel: (id: number) =>
+    request<{ ok: boolean; detail: string }>(`/digests/${id}/step1/cancel`, {
+      method: "POST",
+      body: JSON.stringify({}),
     }),
   getStep1Filters: (id: number) =>
     request<any>(`/digests/${id}/step1/filters`),
@@ -231,6 +238,14 @@ export const api = {
       body: JSON.stringify({ hook_variant }),
       timeoutMs: LONG_POST_MS,
     }),
+  finalizeRelease: (id: number) =>
+    request<{
+      digest_id: number;
+      finalized: boolean;
+      already_finalized: boolean;
+      release_cost_rub: number;
+      finalized_at: string | null;
+    }>(`/digests/${id}/finalize`, { method: "POST", body: "{}" }),
 };
 
 export const assetUrl = (id: number, type: "docx" | "image", variant?: number) => {
