@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -33,6 +34,93 @@ def test_hallucinated_urls_rejected():
     assert not news_search.url_suspected_hallucinated(
         "https://tass.ru/ekonomika/15543211/rosatom-zapuskaet-proekt-po-sozdaniyu-ii-dlya-upravleniya-energosistemami"
     )
+    assert news_search.url_suspected_hallucinated(
+        "https://www.technologyreview.com/2026/06/05/1051212/"
+        "ai-generated-artwork-raises-questions-about-authorship-and-copyright-law/"
+    )
+    assert news_search.url_suspected_hallucinated(
+        "https://www.technologyreview.com/2026/06/05/ai-in-healthcare-2026/"
+    )
+    assert news_search.url_suspected_hallucinated(
+        "https://www.technologyreview.com/2026/06/07/1234567890/ai-breakthroughs-2026/"
+    )
+
+
+def test_parse_search_window_dates():
+    earliest, anchor = news_search.parse_search_window_dates(
+        "after:2026-06-01 before:2026-06-08 нейросети "
+    )
+    assert earliest == date(2026, 6, 1)
+    assert anchor == date(2026, 6, 8)
+
+
+def test_search_url_path_date_outside_window():
+    earliest = date(2026, 6, 1)
+    anchor = date(2026, 6, 8)
+    stale_ria = "https://ria.ru/20250621/meditsina-2024549851.html"
+    fresh_ria = "https://ria.ru/20260602/meditsina-2096118654.html"
+    future = "https://techcrunch.com/2026/06/15/ai-roundup/"
+    assert news_search.search_url_path_date_outside_window(
+        stale_ria, earliest=earliest, anchor=anchor
+    )
+    assert not news_search.search_url_path_date_outside_window(
+        fresh_ria, earliest=earliest, anchor=anchor
+    )
+    assert news_search.search_url_path_date_outside_window(
+        future, earliest=earliest, anchor=anchor
+    )
+    assert (
+        news_search.search_url_raw_reject_reason(
+            stale_ria, earliest=earliest, anchor=anchor
+        )
+        == "published_before_window"
+    )
+
+
+def test_fetch_tier_rejects_path_dates_outside_search_window(monkeypatch: pytest.MonkeyPatch):
+    from app.source_tiers_policy import SourceTiersPolicy
+
+    policy = SourceTiersPolicy(
+        prompt_text="test",
+        aggregator_hosts=(),
+        tier1_hosts=("ria.ru", "tass.ru"),
+        tier2_hosts=("technologyreview.com",),
+        tier3_hosts=(),
+        tier4_hosts=(),
+        banned_media_hosts=(),
+        foreign_agent_hosts=(),
+        russian_host_markers=(),
+        blocked_search_hosts=(),
+        search_seed_urls=(),
+    )
+
+    def _fake_fetch(settings, query, limit, *, proxy=None, search_context_size=None, include_domains=None, allowed_hosts=None):
+        hosts = allowed_hosts or []
+        out: list[str] = []
+        if "ria.ru" in hosts:
+            out.append("https://ria.ru/20250621/meditsina-2024549851.html")
+            out.append("https://ria.ru/20260605/meditsina-2096118654.html")
+        if "technologyreview.com" in hosts:
+            out.append(
+                "https://www.technologyreview.com/2026/06/05/1051212/"
+                "ai-generated-artwork-raises-questions-about-authorship-and-copyright-law/"
+            )
+        return out
+
+    monkeypatch.setattr(news_search, "fetch_article_urls_raw_merged", _fake_fetch)
+    settings = SimpleNamespace(enable_web_fetch=True, proxyapi_web_search_enabled=True)
+    urls = news_search.fetch_tier_prioritized_raw_urls(
+        settings,
+        window_prefix="after:2026-06-01 before:2026-06-08 ",
+        topic_terms="ИИ нейросети",
+        product_excludes="-продукт",
+        fetch_limit=20,
+        proxy=MagicMock(),
+        policy=policy,
+    )
+    assert "https://ria.ru/20260605/meditsina-2096118654.html" in urls
+    assert all("20250621" not in u for u in urls)
+    assert all("technologyreview.com" not in u for u in urls)
 
 
 def test_listing_page_urls_rejected():
@@ -254,6 +342,67 @@ def test_fetch_tier_prioritized_raw_urls_enforces_host_diversity(monkeypatch: py
     assert len(urls) <= 24
 
 
+def test_fetch_curious_prioritized_reaches_tech_hosts_with_small_cap(monkeypatch: pytest.MonkeyPatch):
+    from app.curious_source_policy import CuriousSourcePolicy
+
+    policy = CuriousSourcePolicy(
+        curious_tier1_hosts=("popmech.ru", "dzen.ru", "reddit.com", "theverge.com"),
+        curious_tier2_hosts=("habr.com", "vc.ru", "neurohive.io"),
+        curious_ru_entertainment_hosts=("popmech.ru", "dzen.ru"),
+        curious_ru_tech_hosts=("habr.com", "vc.ru", "neurohive.io"),
+        curious_foreign_hosts=("reddit.com", "theverge.com"),
+        aggregator_hosts=(),
+        banned_media_hosts=(),
+        blocked_search_hosts=(),
+        russian_host_markers=("popmech.ru", "dzen.ru", "habr.com", "vc.ru", "neurohive.io"),
+        search_seed_urls=("https://vc.ru/ai", "https://neurohive.io/"),
+    )
+    calls: list[list[str]] = []
+
+    def _fake_fetch(
+        settings,
+        query,
+        limit,
+        *,
+        proxy=None,
+        search_context_size=None,
+        include_domains=None,
+        allowed_hosts=None,
+        curious_search=False,
+    ):
+        hosts = list(allowed_hosts or [])
+        calls.append(hosts)
+        if "habr.com" in hosts:
+            return ["https://habr.com/ru/news/2026/06/06/funny-ai"]
+        if "vc.ru" in hosts:
+            return ["https://vc.ru/ai/2950909-polzovateli-nedovolny-novymi-limitami-google-gemini"]
+        if "popmech.ru" in hosts:
+            return ["https://www.popmech.ru/science/funny-ai-art-id6541839/"]
+        if "reddit.com" in hosts:
+            return ["https://www.reddit.com/r/ChatGPT/comments/funny_ai_fail/"]
+        return []
+
+    monkeypatch.setattr(news_search, "fetch_article_urls_raw_merged", _fake_fetch)
+    settings = SimpleNamespace(enable_web_fetch=True, proxyapi_web_search_enabled=True)
+    urls = news_search.fetch_curious_prioritized_raw_urls(
+        settings,
+        window_prefix="after:2026-05-07 before:2026-06-06 ",
+        topic_terms_ru="нейросеть ИИ курьёз",
+        topic_terms_foreign="AI fail funny",
+        product_excludes="-pricing",
+        fetch_limit=5,
+        proxy=MagicMock(),
+        policy=policy,
+    )
+
+    assert calls
+    assert any("habr.com" in hosts or "vc.ru" in hosts for hosts in calls)
+    assert any("reddit.com" in hosts for hosts in calls)
+    assert urls[0].startswith("https://www.popmech.ru/")
+    assert any("habr.com" in u or "vc.ru" in u for u in urls)
+    assert any("reddit.com" in hosts for hosts in calls)
+
+
 def test_search_url_prefilter_rejects_aggregator_listing_not_article():
     listing = "https://news.google.com/search?q=artificial+intelligence"
     # aggregator_source по умолчанию выключен — ленту режет news_listing_page, не blanket-агрегатор
@@ -304,7 +453,7 @@ def test_fetch_tier_prioritized_skips_tier34_when_pool_near_full(monkeypatch: py
         fetch_limit=20,
         proxy=MagicMock(),
         policy=policy,
-        current_verified=8,
+        current_verified=10,
     )
     all_hosts = {h for batch in calls for h in batch}
     assert "habr.com" not in all_hosts

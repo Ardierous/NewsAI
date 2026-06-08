@@ -63,6 +63,14 @@ def test_url_path_compact_ria_date_in_window():
         assert ds._url_path_date_before_digest_window(d, url) is False
 
 
+def test_url_path_date_after_anchor_rejected():
+    d = _digest("2026-06-08", days=7, kind="calendar")
+    url = "https://example.com/news/2026/06/15/future-article"
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 6, 8)):
+        with patch.object(ds, "digest_earliest_news_date", return_value=date(2026, 6, 1)):
+            assert ds._url_path_date_before_digest_window(d, url) is True
+
+
 def test_url_in_window_overrides_stale_meta():
     d = _digest("2026-05-19", days=3, kind="calendar")
     url = "https://ria.ru/20260519/ii-2093333250.html"

@@ -27,6 +27,7 @@ from app.schemas import (
     Step1DiscoveredNewsOut,
     OrderRequest,
     SelectRequest,
+    Step2AddManualUrlRequest,
     Step0Request,
     Step0Response,
     PoolCollectionStatsOut,
@@ -387,6 +388,16 @@ def save_step1_discovered_feedback(
         "rated_at": row.rated_at.isoformat() if row.rated_at else None,
         "ratings_export_path": export_path,
     }
+
+
+@router.post("/{digest_id}/step2/manual-url")
+def step2_add_manual_url(digest_id: int, payload: Step2AddManualUrlRequest, db: Session = Depends(get_db)) -> dict:
+    service = DigestService(db)
+    urls = list(payload.urls or [])
+    single = str(payload.url or "").strip()
+    if single:
+        urls.insert(0, single)
+    return service.add_manual_urls_to_pool(digest_id, urls)
 
 
 @router.post("/{digest_id}/step2/select")

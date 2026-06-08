@@ -279,8 +279,8 @@ def test_search_ingest_does_not_pre_mark_verified_urls_as_seen(monkeypatch: pyte
     seen_fp: set[str] = set()
     rows = service._ingest_step1_urls_with_listing_expansion(
         digest,
-        ["https://techcrunch.com/2026/05/19/openai-ai-news/"],
-        "2026-05-19T12:00:00+03:00",
+        ["https://techcrunch.com/2026/05/14/openai-ai-news/"],
+        "2026-05-14T12:00:00+03:00",
         seen_fp,
         limit=1,
     )
@@ -824,6 +824,63 @@ def test_ai_optimal_order_does_not_auto_run_step3(monkeypatch: pytest.MonkeyPatc
     assert service.load_step2_order_rationale(digest.id).startswith("Сильный заход")
 
 
+def test_step2_add_manual_url_appends_to_pool(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    service.db.add(
+        NewsCandidate(
+            digest_id=digest.id,
+            original_number=1,
+            title="Из поиска",
+            url="https://ria.ru/article/1",
+            source="ria.ru",
+            tier="Tier-1",
+            published_at="2026-05-13T12:00:00",
+            category="search",
+            description="Web-поиск",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=8,
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+        )
+    )
+    service.db.commit()
+
+    manual_url = "https://habr.com/ru/news/manual-step2/"
+    bundle = {
+        "ok": True,
+        "is_listing_page": False,
+        "final_url": manual_url,
+        "display_url": manual_url,
+        "article_markers": True,
+        "soft_article_signals": True,
+        "headline": "Нейросеть и искусственный интеллект: ручная ссылка",
+        "topic_corpus": "искусственный интеллект нейросети",
+        "headline_strict": True,
+        "published_at": "2026-05-13T12:00:00",
+    }
+    monkeypatch.setattr(ds, "_fetch_article_page_bundle", lambda url: bundle)
+
+    result = service.add_manual_urls_to_pool(digest.id, [manual_url])
+
+    assert len(result["added"]) == 1
+    assert result["pool_count"] == 2
+    row = service.db.query(NewsCandidate).filter(NewsCandidate.id == result["added"][0]["id"]).one()
+    assert "шаге 2" in row.description
+    assert row.page_verified
+    assert service._is_manual_required_candidate(row.verification_comment, row.description)
+    assert service.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).count() == 2
+
+    dup = service.add_manual_urls_to_pool(digest.id, [manual_url])
+    assert dup["added"] == []
+    assert manual_url in dup["skipped_duplicates"]
+
+
 def test_select_news_manual_picks_ignore_legacy_telegram_manual_required(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
     digest.status = STATUS_STEP1
@@ -1044,6 +1101,56 @@ def test_step1_partial_rebuild_keeps_marked_candidates(monkeypatch: pytest.Monke
     assert keep_urls.issubset(result_urls)
     assert not dropped_urls.intersection(result_urls), "невыбранные из старого пула не должны вернуться"
     assert any("fresh" in u and "example.com" in u for u in result_urls)
+
+
+def test_step1_partial_rebuild_accepts_short_pool_with_new_candidates(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+
+    score_rows = [{"title": f"Candidate {i}", "url": f"https://source{i}.example.com/news/{i}"} for i in range(10)]
+    monkeypatch.setattr(service.workflow, "run_candidates_score", lambda verify_rows, now_msk, **kw: score_rows)
+
+    def fake_verify(_digest_id: int, item: dict, **_kwargs) -> None:
+        item["headline_editorial_ok"] = True
+        item["link_status"] = True
+        item["is_aggregator"] = False
+        item["verification_comment"] = ""
+        item["title"] = f"ИИ: {item.get('title', 'Новость')}"
+        item["source"] = "Example"
+        item["published_at"] = "2026-05-14T12:00:00"
+        item["category"] = "technology"
+        item["description"] = "Описание"
+        item["significance_score"] = 2
+        item["novelty_score"] = 2
+        item["impact_score"] = 2
+        item["total_score"] = 6
+        item["reliability_status"] = "✅ подтверждено"
+
+    monkeypatch.setattr(service, "_verify_llm_candidate_dict", fake_verify)
+
+    first = service.run_step_1(digest.id, [])
+    keep_ids = [first[0].id, first[1].id, first[2].id]
+    keep_urls = {first[0].url, first[1].url, first[2].url}
+    dropped_urls = {c.url for c in first[3:]}
+
+    fresh_rows = [
+        {"original_number": i + 1, "title": f"Fresh {i}", "url": f"https://fresh{i}.example.com/news/{i}"}
+        for i in range(3)
+    ]
+    monkeypatch.setattr(service.workflow, "run_candidates_research", lambda digest_type, now_msk, manual_urls: fresh_rows)
+    monkeypatch.setattr(service.workflow, "run_candidates_verify", lambda research_rows: [dict(x) for x in research_rows])
+    monkeypatch.setattr(
+        service.workflow,
+        "run_candidates_score",
+        lambda verify_rows, now_msk, **kw: [dict(x) for x in verify_rows],
+    )
+
+    rows = service.run_step_1(digest.id, [], rebuild=True, keep_candidate_ids=keep_ids)
+
+    result_urls = {r.url for r in rows}
+    assert len(rows) == 6
+    assert keep_urls.issubset(result_urls)
+    assert any("fresh" in u and "example.com" in u for u in result_urls)
+    assert not dropped_urls.intersection(result_urls)
 
 
 def test_step1_rebuild_from_selected_clears_downstream(monkeypatch: pytest.MonkeyPatch):

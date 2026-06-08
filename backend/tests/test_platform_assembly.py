@@ -4,6 +4,8 @@ from app.services.platform_assembly import (
     DZEN_NEWS_SEP,
     DZEN_POST_MAX_CHARS,
     HEADER_TITLE,
+    HEADER_TITLE_CURIOUS,
+    HEADER_TITLE_SERIOUS,
     MAX_NEWS_SEP,
     assemble_dzen,
     assemble_max,
@@ -126,6 +128,15 @@ def test_dzen_subscription_before_hashtags():
 
 def test_digest_docx_filename():
     assert digest_docx_filename("2026-05-16", 5) == "digest_2026-05-16_id5.docx"
+
+
+def test_curious_digest_uses_funny_header_title():
+    payload = {**_sample_payload(), "digest_type": "curious"}
+    tg = assemble_telegram(payload)
+    assert HEADER_TITLE_CURIOUS in tg
+    assert HEADER_TITLE_SERIOUS not in tg
+    assert assemble_max(payload).count("⚡") == 1
+    assert HEADER_TITLE_CURIOUS in assemble_vk(payload)
 
 
 def test_assemble_platform_outputs_all_keys():

@@ -6,11 +6,20 @@ import re
 from datetime import date, datetime
 from typing import Any
 
+from app.services.digest_type_policy import is_curious_digest
+
 MAX_NEWS_SEP = "..."
 DZEN_NEWS_SEP = "—"
 SEP_VK = "· · ·"
-HEADER_TITLE = "⚡Пять актуальных новостей про ИИ"
-DEFAULT_LEAD = "Коротко: главные сдвиги в мире ИИ и вокруг экосистемы продуктов за сегодня."
+HEADER_TITLE_SERIOUS = "⚡Пять актуальных новостей про ИИ"
+HEADER_TITLE_CURIOUS = "⚡Пять забавных новостей про ИИ"
+# Обратная совместимость для тестов и импортов.
+HEADER_TITLE = HEADER_TITLE_SERIOUS
+DEFAULT_LEAD_SERIOUS = "Коротко: главные сдвиги в мире ИИ и вокруг экосистемы продуктов за сегодня."
+DEFAULT_LEAD_CURIOUS = (
+    "Коротко: пять забавных, странных и неожиданных историй про нейросети и ИИ за этот период."
+)
+DEFAULT_LEAD = DEFAULT_LEAD_SERIOUS
 
 _MONTHS_RU = (
     "января",
@@ -146,6 +155,18 @@ def subscription_vk_block() -> str:
     )
 
 
+def resolve_header_title(payload: dict[str, Any]) -> str:
+    if is_curious_digest(payload.get("digest_type")):
+        return HEADER_TITLE_CURIOUS
+    return HEADER_TITLE_SERIOUS
+
+
+def resolve_default_lead(payload: dict[str, Any]) -> str:
+    if is_curious_digest(payload.get("digest_type")):
+        return DEFAULT_LEAD_CURIOUS
+    return DEFAULT_LEAD_SERIOUS
+
+
 def normalize_hashtag_tokens(tags: list[Any], minimum: int, maximum: int) -> str:
     seen: list[str] = []
     for t in tags:
@@ -170,7 +191,7 @@ def resolve_lead(payload: dict[str, Any], platform: str = "telegram") -> str:
     custom = str(payload.get(key) or "").strip()
     if custom:
         return custom
-    return DEFAULT_LEAD
+    return resolve_default_lead(payload)
 
 
 HTML_LAYOUT_PLATFORMS = frozenset({"max", "dzen"})
@@ -288,6 +309,7 @@ def _dzen_post_news_block(item: dict[str, Any], *, max_body_chars: int) -> str:
 
 def assemble_telegram(payload: dict[str, Any]) -> str:
     date_ru = format_digest_date_ru(payload.get("date"))
+    header_title = resolve_header_title(payload)
     lead = resolve_lead(payload, "telegram")
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
     news_blocks: list[str] = []
@@ -296,7 +318,7 @@ def assemble_telegram(payload: dict[str, Any]) -> str:
         news_blocks.append(f"{_news_link_line(item['title'], item['url'])}\n{summary}")
     body = "\n\n".join(news_blocks)
     text = (
-        f"**{HEADER_TITLE} | {date_ru}**\n\n"
+        f"**{header_title} | {date_ru}**\n\n"
         f"{lead}\n\n"
         f"{body}\n\n"
         f"{subscription_md_inline()}\n\n"
@@ -308,12 +330,13 @@ def assemble_telegram(payload: dict[str, Any]) -> str:
 def assemble_max(payload: dict[str, Any]) -> str:
     """HTML для веб-редактора MAX: жирная шапка, ссылки в заголовках, отступы через <br>."""
     date_ru = format_digest_date_ru(payload.get("date"))
+    header_title = resolve_header_title(payload)
     lead = resolve_lead(payload, "max")
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
     news_blocks = [_max_news_block(item) for item in payload.get("selected_news") or []]
     body = f"<br><br>{MAX_NEWS_SEP}<br><br>".join(news_blocks)
     text = (
-        f"<b>{escape_html_text(HEADER_TITLE)} | {escape_html_text(date_ru)}</b><br><br>"
+        f"<b>{escape_html_text(header_title)} | {escape_html_text(date_ru)}</b><br><br>"
         f"{escape_html_text(lead)}<br><br>"
         f"{body}<br><br>"
         f"{subscription_html_inline()}<br><br>"
@@ -324,6 +347,7 @@ def assemble_max(payload: dict[str, Any]) -> str:
 
 def assemble_vk(payload: dict[str, Any]) -> str:
     date_ru = format_digest_date_ru(payload.get("date"))
+    header_title = resolve_header_title(payload)
     lead = resolve_lead(payload, "vk")
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 3, 5)
     news_blocks: list[str] = []
@@ -334,7 +358,7 @@ def assemble_vk(payload: dict[str, Any]) -> str:
         news_blocks.append(f"{title}\n{summary}\nПодробности: {url}")
     body = f"\n\n{SEP_VK}\n\n".join(news_blocks)
     text = (
-        f"{HEADER_TITLE} | {date_ru}\n\n"
+        f"{header_title} | {date_ru}\n\n"
         f"{lead}\n\n"
         f"{SEP_VK}\n\n"
         f"{body}\n\n"
@@ -347,14 +371,15 @@ def assemble_vk(payload: dict[str, Any]) -> str:
 def assemble_dzen(payload: dict[str, Any]) -> str:
     """HTML для веб-редактора Дзена — не более 4096 символов (см. справку Дзена)."""
     date_ru = format_digest_date_ru(payload.get("date"))
+    header_title = resolve_header_title(payload)
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 3, 5)
     intro = str(payload.get("dzen_intro") or "").strip()
     if not intro:
-        intro = DEFAULT_LEAD
+        intro = resolve_default_lead(payload)
     intro = _truncate_at_word(intro, 280)
     footer = f"<br><br>{subscription_html_inline()}<br><br>{escape_html_text(tags)}"
     header = (
-        f"<b>{escape_html_text(HEADER_TITLE)} | {escape_html_text(date_ru)}</b><br><br>"
+        f"<b>{escape_html_text(header_title)} | {escape_html_text(date_ru)}</b><br><br>"
         f"{escape_html_text(intro)}<br><br>"
     )
     news = list(payload.get("selected_news") or [])

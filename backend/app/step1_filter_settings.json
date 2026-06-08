@@ -2,7 +2,7 @@
   "version": 2,
   "serious": {
     "min_discovered_pages": 10,
-    "min_collection_iterations": 3,
+    "min_collection_iterations": 5,
     "filters": [
       {
         "id": "published_before_window",
@@ -16,7 +16,7 @@
       },
       {
         "id": "published_date_undefined",
-        "enabled": true,
+        "enabled": false,
         "order": 3
       },
       {
@@ -98,7 +98,7 @@
   },
   "curious": {
     "min_discovered_pages": 10,
-    "min_collection_iterations": 4,
+    "min_collection_iterations": 5,
     "filters": [
       {
         "id": "published_before_window",

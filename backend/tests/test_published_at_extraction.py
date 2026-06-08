@@ -61,6 +61,59 @@ def test_parse_russian_date_with_time():
     assert got.hour == 22 and got.minute == 40
 
 
+def test_curious_rejects_dry_product_launch():
+    item = {"url": "https://habr.com/ru/news/1037344/"}
+    bundle = {
+        "ok": True,
+        "final_url": item["url"],
+        "display_url": item["url"],
+        "is_listing_page": False,
+        "article_markers": True,
+        "soft_article_signals": True,
+        "headline": "Google AI Studio теперь делает нативные Android-приложения",
+        "topic_corpus": "искусственный интеллект нейросети Google AI Studio разработчики Android приложения",
+        "published_at": "2026-05-20T15:08:23+03:00",
+    }
+    svc = SimpleNamespace(
+        _step1_curious_mode=True,
+        _ensure_russian_candidate_title=lambda _d, _u, h: h,
+    )
+    digest = _digest("2026-06-06", days=30)
+
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 6, 6)):
+        ds.DigestService._verify_llm_candidate_dict(svc, digest, item, prefetched_bundle=bundle)
+
+    assert item.get("link_status") is False
+    assert "off_topic_not_curious" in str(item.get("verification_comment") or "")
+
+
+def test_curious_keeps_borderline_story_with_soft_penalty():
+    item = {"url": "https://vc.ru/ai/2950909/"}
+    bundle = {
+        "ok": True,
+        "final_url": item["url"],
+        "display_url": item["url"],
+        "is_listing_page": False,
+        "article_markers": True,
+        "soft_article_signals": True,
+        "headline": "Пользователи недовольны новыми лимитами Google Gemini",
+        "topic_corpus": "пользователи жалуются на странный кейс вокруг чат-бота Gemini",
+        "published_at": "2026-05-20T15:08:23+03:00",
+    }
+    svc = SimpleNamespace(
+        _step1_curious_mode=True,
+        _ensure_russian_candidate_title=lambda _d, _u, h: h,
+    )
+    digest = _digest("2026-06-06", days=30)
+
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 6, 6)):
+        ds.DigestService._verify_llm_candidate_dict(svc, digest, item, prefetched_bundle=bundle)
+
+    assert item.get("headline_editorial_ok") is True
+    assert item.get("link_status") is True
+    assert item.get("curious_tone_score", 0) >= 2
+
+
 def test_extract_published_at_from_1tv_like_html():
     chunk = '<span class="PlayerBlockHeading_date__5Man1">26 апреля 2026, 22:40</span>'
     got = ds._extract_published_at_from_page(chunk, "https://www.1tv.ru/news/2026-04-26/540448")

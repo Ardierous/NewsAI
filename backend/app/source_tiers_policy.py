@@ -166,6 +166,56 @@ def policy_tier_host_groups(policy: SourceTiersPolicy | None = None) -> tuple[tu
     )
 
 
+# Зарубежные editorial: web_search часто «конструирует» URL (404). Ищем после RU-батчей.
+_FOREIGN_EDITORIAL_DEFER_HOST_MARKERS = (
+    "technologyreview.com",
+    "spectrum.ieee.org",
+    "wired.com",
+    "sciencedaily.com",
+    "techxplore.com",
+)
+
+
+def _is_defer_editorial_search_host(host_marker: str) -> bool:
+    h = str(host_marker or "").lower()
+    return any(marker in h for marker in _FOREIGN_EDITORIAL_DEFER_HOST_MARKERS)
+
+
+def policy_tier_host_groups_ru_first(
+    policy: SourceTiersPolicy | None = None,
+) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """
+    RU/ .ru хосты первыми, зарубежные editorial — в конце (дешевле: меньше бесполезных ProxyAPI-батчей).
+    """
+    p = policy or get_source_tiers_policy()
+    ru_groups: list[tuple[str, tuple[str, ...]]] = []
+    foreign_groups: list[tuple[str, tuple[str, ...]]] = []
+    defer_groups: list[tuple[str, tuple[str, ...]]] = []
+
+    for tier_label, hosts in policy_tier_host_groups(p):
+        ru_hosts: list[str] = []
+        foreign_hosts: list[str] = []
+        defer_hosts: list[str] = []
+        for host_marker in hosts:
+            h = str(host_marker or "").strip().lower()
+            if not h:
+                continue
+            if _is_defer_editorial_search_host(h):
+                defer_hosts.append(h)
+            elif is_russian_host(h, p) or h.endswith(".ru"):
+                ru_hosts.append(h)
+            else:
+                foreign_hosts.append(h)
+        if ru_hosts:
+            ru_groups.append((tier_label, tuple(dict.fromkeys(ru_hosts))))
+        if foreign_hosts:
+            foreign_groups.append((tier_label, tuple(dict.fromkeys(foreign_hosts))))
+        if defer_hosts:
+            defer_groups.append((f"{tier_label}-defer", tuple(dict.fromkeys(defer_hosts))))
+
+    return tuple([*ru_groups, *foreign_groups, *defer_groups])
+
+
 def batched_site_host_groups(hosts: tuple[str, ...], *, batch_size: int = 3) -> list[tuple[str, ...]]:
     """Разбивает маркеры хостов на батчи для site: запросов."""
     clean = [str(h or "").strip().lower() for h in hosts if str(h or "").strip()]

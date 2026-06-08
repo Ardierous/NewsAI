@@ -1,14 +1,15 @@
 from app.services import digest_service as ds
 
 
-def _item(url: str, *, press: bool = False, score: int = 5) -> dict:
+def _item(url: str, *, press: bool = False, score: int = 5, title: str | None = None, curious_low: bool = False) -> dict:
     host = url.split("/")[2] if "/" in url else "x.com"
     return {
         "url": url,
-        "title": f"Title {host}",
+        "title": title or f"Title {host}",
         "source": host,
         "tier": "Tier-2",
         "total_score": score,
+        "curious_tone_low": curious_low,
         "headline_editorial_ok": True,
         "link_status": True,
         "is_aggregator": False,
@@ -29,6 +30,33 @@ def test_rebalance_curious_skips_press_quota() -> None:
     press_in = sum(1 for x in out if ds._is_substantive_press_for_pool(x))
     assert press_in == 0
     assert len(out) == 4
+
+
+def test_rebalance_curious_prefers_entertaining_story_over_dry_ai_news() -> None:
+    dry = _item(
+        "https://habr.com/ru/news/dry",
+        score=9,
+        title="Google представила новую версию Gemini для разработчиков",
+        curious_low=True,
+    )
+    dry["tier"] = "Curious-T2"
+    funny = _item(
+        "https://vc.ru/ai/funny",
+        score=5,
+        title="Gemini сломала сайт, удалив 30 тысяч строк кода",
+    )
+    funny["tier"] = "Curious-T1"
+    out = ds._rebalance_verified_pool([dry, funny], target=1, digest_type="curious")
+    assert out[0]["url"] == funny["url"]
+
+
+def test_rebalance_curious_prefers_tier1_when_tone_equal() -> None:
+    t1 = _item("https://www.popmech.ru/a", score=6, title="Смешной фейл нейросети")
+    t1["tier"] = "Curious-T1"
+    t2 = _item("https://habr.com/ru/news/b", score=6, title="Тоже смешной фейл нейросети")
+    t2["tier"] = "Curious-T2"
+    out = ds._rebalance_verified_pool([t2, t1], target=1, digest_type="curious")
+    assert out[0]["url"] == t1["url"]
 
 
 def test_titles_near_duplicates_true_for_same_story() -> None:

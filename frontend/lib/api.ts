@@ -198,6 +198,24 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ selected_ids, top5 }),
     }),
+  step2AddManualUrls: (id: number, urls: string[]) =>
+    request<{
+      added: Array<{
+        id: number;
+        url: string;
+        title: string;
+        page_verified?: boolean;
+        headline_editorial_ok?: boolean;
+        link_status?: boolean;
+      }>;
+      skipped_duplicates: string[];
+      pool_count: number;
+      detail?: string;
+    }>(`/digests/${id}/step2/manual-url`, {
+      method: "POST",
+      body: JSON.stringify({ urls }),
+      timeoutMs: LONG_POST_MS,
+    }),
   orderNews: (id: number, ordered_candidate_ids: number[]) =>
     request<any>(`/digests/${id}/step2/order`, {
       method: "POST",

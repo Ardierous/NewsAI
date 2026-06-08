@@ -30,7 +30,7 @@ def test_step1_config_economy_defaults():
     assert cfg["telegram_via_proxyapi"] is False
     assert cfg["telegram_direct_fallback"] is True
     assert cfg["web_search_context_size"] == "low"
-    assert cfg["tier_max_web_search_batches"] == 6
+    assert cfg["tier_max_web_search_batches"] == 12
     assert cfg["web_search_prefer_alt_providers"] is False
 
 

@@ -1,9 +1,11 @@
 import base64
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from datetime import date
 
 from openai import OpenAI
@@ -16,6 +18,42 @@ from app.services.usage_cost import estimate_cost_rub_from_usage
 
 logger = logging.getLogger("app.proxyapi")
 _EST_COST_TOTAL_RUB = 0.0
+_LOG_CONTEXT: ContextVar[dict[str, str]] = ContextVar("proxyapi_log_context", default={})
+
+
+def _safe_header_value(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\r\n]+", " ", text)
+    return text[:256]
+
+
+def _log_headers(source: str) -> dict[str, str]:
+    ctx = dict(_LOG_CONTEXT.get() or {})
+    ctx["Source"] = source
+    ctx.setdefault("App", "news-digest")
+    headers: dict[str, str] = {}
+    for key, value in ctx.items():
+        safe_key = re.sub(r"[^A-Za-z0-9_-]+", "-", str(key).strip())[:64].strip("-")
+        safe_value = _safe_header_value(value)
+        if safe_key and safe_value:
+            headers[f"X-Log-{safe_key}"] = safe_value
+    return headers
+
+
+@contextmanager
+def proxyapi_log_context(**kwargs: Any) -> Iterator[None]:
+    clean = {str(k): _safe_header_value(v) for k, v in kwargs.items() if v is not None}
+    token = _LOG_CONTEXT.set({**(_LOG_CONTEXT.get() or {}), **clean})
+    try:
+        yield
+    finally:
+        _LOG_CONTEXT.reset(token)
+
+
+def set_proxyapi_log_context(**kwargs: Any) -> None:
+    """Метаданные для ProxyAPI X-Log-* в текущем рабочем потоке."""
+    clean = {str(k): _safe_header_value(v) for k, v in kwargs.items() if v is not None}
+    _LOG_CONTEXT.set(clean)
 
 
 def _extract_cached_tokens(usage: Any) -> int | None:
@@ -41,8 +79,11 @@ def _extract_cached_tokens(usage: Any) -> int | None:
 
 def _log_proxyapi_usage(response: Any, *, kind: str, model: str) -> None:
     global _EST_COST_TOTAL_RUB
+    request_id = _proxyapi_request_id(response)
     usage = getattr(response, "usage", None)
     if usage is None:
+        if request_id:
+            logger.info("ProxyAPI request | kind=%s model=%s request_id=%s usage=-", kind, model, request_id)
         return
     prompt = getattr(usage, "prompt_tokens", None) or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
     completion = getattr(usage, "completion_tokens", None) or (
@@ -55,9 +96,10 @@ def _log_proxyapi_usage(response: Any, *, kind: str, model: str) -> None:
     if est_cost_rub is not None:
         _EST_COST_TOTAL_RUB += est_cost_rub
     logger.info(
-        "ProxyAPI usage | kind=%s model=%s prompt_tokens=%s completion_tokens=%s cached_tokens=%s est_cost_rub=%s est_total_rub=%s",
+        "ProxyAPI usage | kind=%s model=%s request_id=%s prompt_tokens=%s completion_tokens=%s cached_tokens=%s est_cost_rub=%s est_total_rub=%s",
         kind,
         model,
+        request_id or "-",
         prompt,
         completion,
         cached,
@@ -66,10 +108,63 @@ def _log_proxyapi_usage(response: Any, *, kind: str, model: str) -> None:
     )
 
 
+def _proxyapi_request_id(response: Any) -> str | None:
+    for attr in ("_request_id", "request_id", "id"):
+        value = getattr(response, attr, None)
+        if value:
+            return str(value)
+    return None
+
+
+def _proxyapi_error_details(exc: BaseException) -> tuple[str | None, str | None, str | None, str | None]:
+    status = getattr(exc, "status_code", None)
+    request_id = getattr(exc, "request_id", None)
+    error_type = getattr(exc, "type", None) or getattr(exc, "code", None)
+    error_message = getattr(exc, "message", None)
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error")
+        if isinstance(err, dict):
+            error_type = error_type or err.get("type") or err.get("code")
+            error_message = error_message or err.get("message")
+        else:
+            error_type = error_type or body.get("type") or body.get("code")
+            error_message = error_message or body.get("message")
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if request_id is None and headers is not None:
+        try:
+            request_id = headers.get("X-Request-ID") or headers.get("x-request-id")
+        except Exception:
+            request_id = None
+    return (
+        str(status) if status is not None else None,
+        str(request_id) if request_id else None,
+        str(error_type) if error_type else None,
+        str(error_message) if error_message else None,
+    )
+
+
+def _log_proxyapi_exception(exc: BaseException, *, kind: str, model: str) -> None:
+    status, request_id, error_type, error_message = _proxyapi_error_details(exc)
+    logger.warning(
+        "ProxyAPI error | kind=%s model=%s status=%s request_id=%s error_type=%s error_message=%s error=%s",
+        kind,
+        model,
+        status or "-",
+        request_id or "-",
+        error_type or "-",
+        (error_message or "-")[:500],
+        str(exc)[:500],
+    )
+
+
 def _is_proxyapi_budget_error(exc: BaseException) -> bool:
     text = str(exc).lower()
+    status = getattr(exc, "status_code", None)
     return (
-        "budget exceeded" in text
+        status == 402
+        or "budget exceeded" in text
         or "402" in text
         or ("insufficient" in text and "balance" in text)
         or ("нулев" in text and "баланс" in text)
@@ -90,23 +185,35 @@ class ProxyApiClient:
             default_headers={"Authorization": f"Bearer {settings.proxyapi_api_key}"},
         )
 
-    def chat(self, system_prompt: str, user_prompt: str, model: str | None = None) -> str:
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        model: str | None = None,
+        *,
+        max_completion_tokens: int = 800,
+        log_source: str = "chat",
+    ) -> str:
+        use_model = proxyapi_chat_model(model or self.settings.proxyapi_model)
         try:
             response = self.client.chat.completions.create(
-                model=proxyapi_chat_model(model or self.settings.proxyapi_model),
+                model=use_model,
                 temperature=0.2,
+                max_completion_tokens=max(16, int(max_completion_tokens or 800)),
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
+                extra_headers=_log_headers(log_source),
             )
             self._last_api_response = response
-            _log_proxyapi_usage(response, kind="chat.completions", model=proxyapi_chat_model(model or self.settings.proxyapi_model))
+            _log_proxyapi_usage(response, kind="chat.completions", model=use_model)
             return response.choices[0].message.content or ""
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
-            logger.exception("Ошибка chat.completions | model=%s", model or self.settings.proxyapi_model)
+            _log_proxyapi_exception(exc, kind="chat.completions", model=use_model)
+            logger.exception("Ошибка chat.completions | model=%s", use_model)
             raise RuntimeError("ProxyAPI chat request failed") from exc
 
     def generate_image(self, prompt: str, output_file: Path, model: str | None = None) -> Path:
@@ -138,6 +245,7 @@ class ProxyApiClient:
         search_context_size: str | None = None,
         allowed_hosts: list[str] | None = None,
         fallback_on_empty: bool = False,
+        curious_search: bool = False,
     ) -> list[str]:
         """
         Реальный веб-поиск через ProxyAPI (OpenAI Responses API + tool web_search).
@@ -153,26 +261,42 @@ class ProxyApiClient:
             "ОБЯЗАТЕЛЬНО: игнорируй все старые/архивные/evergreen статьи даже если они идеально релевантны по ключам — бери ТОЛЬКО опубликованные после указанной даты (after:). "
             "Если инструмент поиска возвращает старые URL — отбрасывай их и продолжай поиск свежих. "
             "Приоритет: публикации за последние 1-7 дней в пределах окна. "
-            "Только материалы про искусственный интеллект, нейросети, машинное обучение или крупные модели (GPT, Gemini, Claude и т.п.). "
         )
+        if curious_search:
+            user_prompt += (
+                "Режим курьёзного дайджеста: ищи ТОЛЬКО забавные, смешные, вирусные, абсурдные и неожиданные истории про ИИ "
+                "(фейлы, глюки, жалобы пользователей, мемы, дипфейки, странные кейсы, кринж, пранки). "
+                "НЕ возвращай обычные tech/product-новости, обзоры моделей, регуляторику, инвестиции, конференции и пресс-релизы. "
+                "Если материал звучит как деловая или нейтральная AI-новость без юмора/фейла — пропускай. "
+            )
+        else:
+            user_prompt += (
+                "Только материалы про искусственный интеллект, нейросети, машинное обучение или крупные модели (GPT, Gemini, Claude и т.п.). "
+            )
         if allowed_hosts:
             clean_hosts = [str(h).strip() for h in allowed_hosts if str(h).strip()]
             hosts_csv = ", ".join(clean_hosts)
-            policy = get_source_tiers_policy(self.settings.source_tiers_path)
-            has_aggregator_scope = any(
-                any(marker in host.lower() for marker in policy.aggregator_hosts) for host in clean_hosts
-            )
-            if has_aggregator_scope:
+            if curious_search:
                 user_prompt += (
-                    f"Опорные домены для поиска сюжета: {hosts_csv}. "
-                    "Можно использовать их как агрегаторы-навигацию, но в ответе верни прямые URL первоисточников "
-                    "на сайтах из policy tier-1..tier-4. "
-                )
-            else:
-                user_prompt += (
-                    f"Искать ТОЛЬКО на доменах из политики источников: {hosts_csv}. "
+                    f"Искать ТОЛЬКО на доменах курьёзных источников: {hosts_csv}. "
                     "Не возвращай URL с других сайтов. "
                 )
+            else:
+                policy = get_source_tiers_policy(self.settings.source_tiers_path)
+                has_aggregator_scope = any(
+                    any(marker in host.lower() for marker in policy.aggregator_hosts) for host in clean_hosts
+                )
+                if has_aggregator_scope:
+                    user_prompt += (
+                        f"Опорные домены для поиска сюжета: {hosts_csv}. "
+                        "Можно использовать их как агрегаторы-навигацию, но в ответе верни прямые URL первоисточников "
+                        "на сайтах из policy tier-1..tier-4. "
+                    )
+                else:
+                    user_prompt += (
+                        f"Искать ТОЛЬКО на доменах из политики источников: {hosts_csv}. "
+                        "Не возвращай URL с других сайтов. "
+                    )
         else:
             user_prompt += (
                 "Можно использовать агрегаторы и дайджесты для поиска сюжета, но итоговые ссылки должны вести на первоисточник. "
@@ -180,6 +304,8 @@ class ProxyApiClient:
         user_prompt += (
             "Нужны прямые URL отдельных HTML-статей (не рубрики, не ленты, не разделы вроде /neiroseti или /articles/artificial_intelligence/, "
             "не агрегаторы, не Google News, не Reddit, не главные страницы, не поиск). "
+            "КРИТИЧНО: не выдумывай и не конструируй URL по шаблону — копируй только точные ссылки из результатов поиска (snippets). "
+            "Не подставляй даты или numeric id «на глаз» (типичные 404 на technologyreview.com, wired.com и т.п.). "
             f"Ответ: строго JSON-массив из не более {limit} строк — каждая строка один полный URL, без markdown и без пояснений."
         )
         location = {
@@ -202,6 +328,8 @@ class ProxyApiClient:
                 model=model,
                 tools=tools,
                 input=[{"role": "user", "content": user_prompt}],
+                max_output_tokens=min(900, max(220, int(limit) * 28)),
+                extra_headers=_log_headers("step1_web_search"),
             )
             self._last_api_response = response
             _log_proxyapi_usage(response, kind="responses.web_search", model=model)
@@ -236,6 +364,7 @@ class ProxyApiClient:
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
+            _log_proxyapi_exception(exc, kind="responses.web_search", model=model)
             logger.warning("ProxyAPI responses web_search failed, fallback to search-preview", exc_info=True)
         return self._search_news_urls_chat_preview(user_prompt, limit, search_context_size=ctx_size)
 
@@ -252,6 +381,7 @@ class ProxyApiClient:
             response = self.client.chat.completions.create(
                 model=preview_model,
                 messages=[{"role": "user", "content": user_prompt}],
+                max_completion_tokens=min(900, max(220, int(limit) * 28)),
                 web_search_options={
                     "search_context_size": ctx_size,
                     "user_location": {
@@ -263,6 +393,7 @@ class ProxyApiClient:
                         },
                     },
                 },
+                extra_headers=_log_headers("step1_web_search_preview"),
             )
             self._last_api_response = response
             _log_proxyapi_usage(response, kind="chat.web_search_preview", model=preview_model)
@@ -279,6 +410,7 @@ class ProxyApiClient:
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
+            _log_proxyapi_exception(exc, kind="chat.web_search_preview", model=preview_model)
             logger.exception("ProxyAPI chat search-preview failed | model=%s", preview_model)
             return []
 
@@ -350,8 +482,11 @@ class ProxyApiClient:
                 model=model,
                 tools=tools,
                 input=[{"role": "user", "content": user_prompt}],
+                max_output_tokens=min(1200, max(350, int(max_links) * 30)),
+                extra_headers=_log_headers("step1_telegram_search"),
             )
             self._last_api_response = response
+            _log_proxyapi_usage(response, kind="responses.telegram_search", model=model)
             urls = extract_urls_from_responses_payload(response, limit=max_links)
             html_pages = self._extract_tme_html_snippets(response)
             if urls:
@@ -365,6 +500,7 @@ class ProxyApiClient:
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
+            _log_proxyapi_exception(exc, kind="responses.telegram_search", model=model)
             logger.warning(
                 "ProxyAPI telegram digest failed, fallback to search-preview | channel=%s",
                 ch,
@@ -408,6 +544,7 @@ class ProxyApiClient:
             response = self.client.chat.completions.create(
                 model=preview_model,
                 messages=[{"role": "user", "content": user_prompt}],
+                max_completion_tokens=min(1200, max(350, int(limit) * 30)),
                 web_search_options={
                     "search_context_size": ctx_size,
                     "user_location": {
@@ -419,8 +556,10 @@ class ProxyApiClient:
                         },
                     },
                 },
+                extra_headers=_log_headers("step1_telegram_preview"),
             )
             self._last_api_response = response
+            _log_proxyapi_usage(response, kind="chat.telegram_preview", model=preview_model)
             text = response.choices[0].message.content or ""
             urls = extract_http_urls_from_text(text, limit=limit)
             if urls:
@@ -433,6 +572,7 @@ class ProxyApiClient:
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
+            _log_proxyapi_exception(exc, kind="chat.telegram_preview", model=preview_model)
             logger.exception("ProxyAPI telegram chat preview failed | model=%s", preview_model)
             return []
 
@@ -454,7 +594,13 @@ class ProxyApiClient:
             "items — массив из 5 объектов с полями candidate_id (int), output_position (1..5, все уникальны), "
             "ordering_reason (1–2 предложения: почему эта позиция удерживает читателя)."
         )
-        raw = self.chat(system_prompt, user_prompt, model=use_model)
+        raw = self.chat(
+            system_prompt,
+            user_prompt,
+            model=use_model,
+            max_completion_tokens=900,
+            log_source="step2_order",
+        )
         parsed_items, overall_rationale = _parse_ordering_payload(raw)
         allowed_ids = {int(x["candidate_id"]) for x in items if x.get("candidate_id") is not None}
         if not isinstance(parsed_items, list) or len(parsed_items) != 5:
@@ -520,12 +666,19 @@ class ProxyApiClient:
                     {"role": "user", "content": user_prompt},
                 ],
                 text={"format": {"type": "json_schema", "name": "payload", "schema": response_schema}},
+                max_output_tokens=1200,
+                extra_headers=_log_headers("responses_json"),
             )
+            self._last_api_response = response
+            _log_proxyapi_usage(response, kind="responses.json", model=self.settings.proxyapi_model)
             text = response.output_text
             import json
 
             return json.loads(text)
         except Exception as exc:
+            if _is_proxyapi_budget_error(exc):
+                self.last_error_kind = "budget_exceeded"
+            _log_proxyapi_exception(exc, kind="responses.json", model=self.settings.proxyapi_model)
             logger.exception("Ошибка responses.create | model=%s", self.settings.proxyapi_model)
             raise RuntimeError("ProxyAPI responses request failed") from exc
 

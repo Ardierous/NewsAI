@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.proxyapi_client import ProxyApiClient
+from app.proxyapi_client import ProxyApiClient, set_proxyapi_log_context
 
 
 def _settings(**kwargs):
@@ -77,3 +77,28 @@ def test_search_passes_supplement_context_size(monkeypatch: pytest.MonkeyPatch):
 
     tools = client.client.responses.create.call_args.kwargs["tools"]
     assert tools[0]["search_context_size"] == "low"
+    assert client.client.responses.create.call_args.kwargs["max_output_tokens"] == 220
+
+
+def test_search_passes_proxyapi_log_headers(monkeypatch: pytest.MonkeyPatch):
+    client = ProxyApiClient.__new__(ProxyApiClient)
+    client.settings = _settings()
+    client.last_error_kind = None
+    client._last_api_response = None
+    client.client = MagicMock()
+
+    resp = MagicMock()
+    resp.output_text = '["https://ria.ru/20260519/a.html"]'
+    resp.output = []
+    client.client.responses.create.return_value = resp
+    set_proxyapi_log_context(DigestId=42, Step="step1", DigestType="curious")
+
+    with patch("app.proxyapi_client.extract_urls_from_responses_payload", return_value=["https://ria.ru/20260519/a.html"]):
+        client.search_news_article_urls("q", limit=3, search_context_size="low")
+
+    headers = client.client.responses.create.call_args.kwargs["extra_headers"]
+    assert headers["X-Log-DigestId"] == "42"
+    assert headers["X-Log-Step"] == "step1"
+    assert headers["X-Log-DigestType"] == "curious"
+    assert headers["X-Log-Source"] == "step1_web_search"
+    set_proxyapi_log_context()

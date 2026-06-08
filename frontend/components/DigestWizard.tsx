@@ -274,7 +274,7 @@ function isManualRequiredCandidate(c: { verification_comment?: string; descripti
   const comment = String(c.verification_comment || "");
   const desc = String(c.description || "");
   if (comment.includes("TELEGRAM_SEED:") || desc.includes("Telegram-монитор")) return false;
-  return desc.includes("поле URL на шаге 1");
+  return desc.includes("поле URL на шаге 1") || desc.includes("поле URL на шаге 2");
 }
 
 type Step2PickCandidate = {
@@ -390,7 +390,9 @@ function categoryLabel(c: {
 }
 
 function isTier5ForbiddenMedia(c: { tier?: string; is_aggregator?: boolean }): boolean {
-  return String(c.tier || "") === "Tier-5" && !Boolean(c.is_aggregator);
+  const tier = String(c.tier || "");
+  if (tier === "Curious-T5") return true;
+  return tier === "Tier-5" && !Boolean(c.is_aggregator);
 }
 
 function rejectReasonCodes(text: string): string[] {
@@ -413,7 +415,7 @@ const REJECT_REASON_LABELS: Record<string, string> = {
   non_article_page: "на странице нет нормального заголовка материала (как у обычной статьи)",
   off_topic_not_ai: "по тексту страницы тема не про искусственный интеллект и нейросети — это другая тематика",
   off_topic_not_curious:
-    "курьёзный выпуск: материал слишком сухой или деловой, без забавного/неожиданного угла (фильтр забавного тона)",
+    "только курьёзный выпуск: сухой официоз (релиз, регуляторика, инвестиции) отклонён; нейтральные AI-материалы остаются с пониженным приоритетом",
   excluded_from_final_pool:
     "страница прошла проверку, но не вошла в финальный список кандидатов (лимит rebalance, квоты источников)",
   headline_low_quality:
@@ -557,6 +559,7 @@ export function DigestWizard({ digestId }: Props) {
   const [progressLabel, setProgressLabel] = useState("");
   const [error, setError] = useState("");
   const [manualUrls, setManualUrls] = useState("");
+  const [step2ManualUrls, setStep2ManualUrls] = useState("");
   const [selected, setSelected] = useState<number[]>([]);
   const [orderEditMode, setOrderEditMode] = useState(false);
   const [hookVariant, setHookVariant] = useState<"A" | "B" | "V" | "">("");
@@ -800,6 +803,8 @@ export function DigestWizard({ digestId }: Props) {
     hasSelectableInPool &&
     digestStatus !== "draft" &&
     digestStatus !== "step_0";
+  const canAddStep2ManualUrl =
+    hasCandidatePool && digestStatus !== "draft" && digestStatus !== "step_0";
   const selectionWasSaved =
     hasConfirmedSelection ||
     hasAnalyticsBlocks ||
@@ -1035,6 +1040,44 @@ export function DigestWizard({ digestId }: Props) {
       const res = await api.selectNews(digestId, [], true);
       if (Array.isArray(res?.selected_ids) && res.selected_ids.length === 5) {
         setSelected(res.selected_ids);
+      }
+    });
+  };
+
+  const addStep2ManualUrls = async () => {
+    const urls = step2ManualUrls
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!urls.length) {
+      setError("Вставьте хотя бы одну ссылку на статью.");
+      return;
+    }
+    await run("Шаг 2: проверка и добавление ссылки в пул…", async () => {
+      const res = await api.step2AddManualUrls(digestId, urls);
+      setStep2ManualUrls("");
+      await loadDigest({ skipProgress: true, preserveSelection: true });
+      const addedIds = (res?.added || [])
+        .filter((row) => row.id && candidateSelectableForStep2(row))
+        .map((row) => row.id);
+      if (addedIds.length) {
+        setSelected((prev) => {
+          const next = [...prev];
+          for (const id of addedIds) {
+            if (next.length >= 5) break;
+            if (!next.includes(id)) next.push(id);
+          }
+          return next;
+        });
+      }
+      if (res?.skipped_duplicates?.length) {
+        setError(`Уже в пуле: ${res.skipped_duplicates.join(", ")}`);
+      } else if (res?.detail && !(res?.added || []).length) {
+        setError(res.detail);
+      } else if ((res?.added || []).length && !addedIds.length) {
+        setError(
+          "Ссылка добавлена, но не прошла проверку «Можно в топ‑5». Откройте карточку — причина в описании; укажите прямую ссылку на статью про ИИ.",
+        );
       }
     });
   };
@@ -2725,6 +2768,30 @@ export function DigestWizard({ digestId }: Props) {
                 </>
               )}
             </p>
+          ) : null}
+          {canAddStep2ManualUrl ? (
+            <div style={{ marginBottom: 14 }}>
+              <p className="wizard-hint-do" style={{ fontSize: "0.95rem", margin: "0 0 8px" }}>
+                Не хватает новостей в пуле? Вставьте прямую ссылку на статью — она пройдёт ту же проверку, что и на шаге 1,
+                и <strong>обязательно</strong> попадёт в итоговую пятёрку при подтверждении.
+              </p>
+              <textarea
+                rows={2}
+                placeholder="Ссылка на статью (каждая с новой строки). Должна открываться и вести на материал про ИИ."
+                value={step2ManualUrls}
+                onChange={(e) => setStep2ManualUrls(e.target.value)}
+              />
+              <div style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  disabled={loading || !step2ManualUrls.trim()}
+                  title="Проверить страницу и добавить в список кандидатов без пересборки пула"
+                  onClick={() => void addStep2ManualUrls()}
+                >
+                  Добавить ссылку в пул
+                </button>
+              </div>
+            </div>
           ) : null}
           {candidatesSorted.length > 0 ? (
             poolCollection?.pool?.total || poolCollection?.last_run ? (

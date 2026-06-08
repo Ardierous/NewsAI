@@ -1,33 +1,63 @@
 # Источники для курьёзного выпуска (шаг 1). Не смешивать с source_tiers.txt (только serious).
-
-Курьёзный дайджест: забавные, неожиданные, лёгкие истории про ИИ для выходного читателя.
-Поиск идёт только по доменам ниже; tier-1…4 из source_tiers.txt на курьёзном шаге 1 не используются.
+#
+# Curious-T1 / Curious-T2 — собственная двухуровневая политика курьёзного дайджеста.
+# Серьёзный выпуск использует только source_tiers.txt (Tier-1…Tier-5).
 
 --- HOST_RULES ---
 
-[curious_ru_entertainment_hosts]
-maximonline.ru
-klerk.ru
-proza.ru
+# Curious-T1 — сарказм, мемы, пользовательские истории, вирусный угол (приоритет в пуле и поиске)
+[curious_tier1_hosts]
+theregister.com
+theverge.com
+gizmodo.com
+boingboing.net
+futurism.com
+reddit.com
 dzen.ru
 zen.yandex.ru
-hi-tech.mail.ru
-pressfeed.ru
+popmech.ru
+hi-news.ru
+dtf.ru
+vc.ru
+
+# Curious-T2 — IT-сообщества, разборы, лонгриды, добор (ниже T1)
+[curious_tier2_hosts]
+arstechnica.com
+wired.com
+bbc.com
+ycombinator.com
+news.ycombinator.com
+habr.com
+neurohive.io
+nplus1.ru
+tproger.ru
+
+[curious_ru_entertainment_hosts]
+dzen.ru
+zen.yandex.ru
+popmech.ru
+hi-news.ru
+dtf.ru
+vc.ru
 
 [curious_ru_tech_hosts]
 habr.com
-vc.ru
-shvedkov.pro
+neurohive.io
+nplus1.ru
+tproger.ru
 
 [curious_foreign_hosts]
-datasciencedojo.com
+theregister.com
+theverge.com
+gizmodo.com
+boingboing.net
+futurism.com
 reddit.com
-magichour.ai
-imgur.com
-9gag.com
+arstechnica.com
+wired.com
+bbc.com
 ycombinator.com
-thenextweb.com
-particle.news
+news.ycombinator.com
 
 [aggregator_hosts]
 news.google.com
@@ -56,27 +86,38 @@ youtube.com
 youtu.be
 tiktok.com
 vk.com
-t.me
-telegram.me
 
 [russian_host_markers]
-maximonline.ru
-pressfeed.ru
-klerk.ru
-hi-tech.mail.ru
-proza.ru
 dzen.ru
-habr.com
+zen.yandex.ru
+popmech.ru
+hi-news.ru
+dtf.ru
 vc.ru
-shvedkov.pro
+habr.com
+neurohive.io
+nplus1.ru
+tproger.ru
 yandex.ru
-mail.ru
-vk.com
 
 [search_seed_urls]
 https://dzen.ru/
-https://maximonline.ru/
 https://vc.ru/ai
 https://habr.com/ru/hubs/artificial_intelligence/
-https://hi-tech.mail.ru/
-https://klerk.ru/
+https://www.hi-news.ru/
+https://www.popmech.ru/
+https://dtf.ru/
+https://neurohive.io/
+https://tproger.ru/
+https://www.reddit.com/r/ChatGPT/
+https://www.reddit.com/r/aiArt/
+https://www.reddit.com/r/facepalm/
+https://news.ycombinator.com/
+https://www.theverge.com/ai-artificial-intelligence
+https://www.theregister.com/
+https://gizmodo.com/
+https://boingboing.net/
+https://futurism.com/
+https://arstechnica.com/
+https://www.wired.com/
+https://www.bbc.com/future

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import date
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
@@ -27,7 +28,12 @@ from app.source_tiers_policy import (
     is_aggregator_source,
     is_blocked_search_host,
     is_policy_tier_source,
-    policy_tier_host_groups,
+    is_russian_host,
+    policy_tier_host_groups_ru_first,
+)
+from app.services.digest_type_policy import (
+    step1_curious_entertainment_anchor_en,
+    step1_curious_entertainment_anchor_ru,
 )
 from app.services.step1_candidate_policy import is_product_tool_landing_url
 
@@ -73,6 +79,157 @@ _AUTH_GATE_PATH_RE = re.compile(r"/auth(?:/|$|\?)", re.IGNORECASE)
 
 
 _SUSPICIOUS_DATE_SEGMENT = re.compile(r"/(\d{8})(?:/|$)")
+_URL_PATH_DATE_COMPACT_RE = re.compile(r"/(\d{4})(\d{2})(\d{2})(?:/|$)")
+_URL_PATH_DATE_DASH_RE = re.compile(r"/(\d{4})-(\d{2})-(\d{2})(?:/|$)")
+_URL_PATH_DATE_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})(?:/|$)")
+_EDITORIAL_DATED_STORY_RE = re.compile(
+    r"^/\d{4}/\d{2}/\d{2}/\d{6,8}/([^/?#]+)",
+    re.IGNORECASE,
+)
+_LLM_GENERIC_SLUG_TAIL_RE = re.compile(
+    r"(?:raises-questions|revolutionizes|accelerates|transforms-the|breakthrough-in|game-changer|reshapes-the)",
+    re.IGNORECASE,
+)
+_SYNTHETIC_EDITORIAL_HOST_MARKERS = (
+    "technologyreview.com",
+    "wired.com",
+    "theverge.com",
+    "arstechnica.com",
+    "scientificamerican.com",
+)
+_FOREIGN_EDITORIAL_ACCEPT_CAP_HOSTS = (
+    "technologyreview.com",
+    "spectrum.ieee.org",
+    "wired.com",
+    "sciencedaily.com",
+    "techxplore.com",
+)
+_MIT_TR_VALID_STORY_PATH_RE = re.compile(
+    r"^/\d{4}/\d{2}/\d{2}/\d{6,8}/",
+    re.IGNORECASE,
+)
+_EDITORIAL_YEAR_SUFFIX_SLUG_RE = re.compile(
+    r"/\d{4}/\d{2}/\d{2}/[^/]*-(?:202[4-9]|2030)(?:/|$)",
+    re.IGNORECASE,
+)
+
+
+def parse_search_window_dates(window_prefix: str) -> tuple[date | None, date | None]:
+    """Из after:/before: в префиксе поискового запроса — границы окна (inclusive)."""
+    prefix = window_prefix or ""
+    earliest: date | None = None
+    anchor: date | None = None
+    m_after = re.search(r"after:(\d{4}-\d{2}-\d{2})", prefix)
+    if m_after:
+        try:
+            earliest = date.fromisoformat(m_after.group(1))
+        except ValueError:
+            pass
+    m_before = re.search(r"before:(\d{4}-\d{2}-\d{2})", prefix)
+    if m_before:
+        try:
+            anchor = date.fromisoformat(m_before.group(1))
+        except ValueError:
+            pass
+    return earliest, anchor
+
+
+def url_path_publication_day(url: str) -> date | None:
+    """Календарный день из path URL (compact, dash, slash) без HTTP."""
+    try:
+        path = urlparse(url).path or ""
+    except Exception:
+        return None
+    for pattern in (_URL_PATH_DATE_COMPACT_RE, _URL_PATH_DATE_DASH_RE, _URL_PATH_DATE_RE):
+        m = pattern.search(path)
+        if not m:
+            continue
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+    return None
+
+
+def search_url_path_date_outside_window(
+    url: str,
+    *,
+    earliest: date | None,
+    anchor: date | None,
+) -> bool:
+    """True, если дата в path явно вне [earliest, anchor]."""
+    pub_day = url_path_publication_day(url)
+    if pub_day is None:
+        return False
+    if earliest is not None and pub_day < earliest:
+        return True
+    if anchor is not None and pub_day > anchor:
+        return True
+    return False
+
+
+def _fake_numeric_story_id(story_id: str) -> bool:
+    sid = (story_id or "").strip()
+    if not sid.isdigit() or len(sid) < 6:
+        return False
+    if sid.startswith("123456") or sid.startswith("000000"):
+        return True
+    return len(set(sid)) <= 2
+
+
+def _mit_tr_invented_path(norm_path: str) -> bool:
+    """MIT TR: реальные статьи — /YYYY/MM/DD/<6-8 digit id>/slug; без id — типичная галлюцинация."""
+    if not re.match(r"^/\d{4}/\d{2}/\d{2}/", norm_path):
+        return False
+    if _MIT_TR_VALID_STORY_PATH_RE.match(norm_path):
+        id_m = re.match(r"^/\d{4}/\d{2}/\d{2}/(\d+)/", norm_path)
+        return bool(id_m and _fake_numeric_story_id(id_m.group(1)))
+    return True
+
+
+def url_suspected_synthetic_editorial_story(url: str) -> bool:
+    """Выдуманные URL editorial-сайтов (без HTTP): шаблонный slug, фейковый id, path без story id."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    try:
+        parsed = urlparse(u)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "").rstrip("/")
+    except Exception:
+        return False
+    if not any(marker in host for marker in _SYNTHETIC_EDITORIAL_HOST_MARKERS):
+        return False
+    norm_path = path if path.startswith("/") else f"/{path}"
+    if "technologyreview.com" in host and _mit_tr_invented_path(norm_path):
+        return True
+    if _EDITORIAL_YEAR_SUFFIX_SLUG_RE.search(norm_path):
+        return True
+    m = _EDITORIAL_DATED_STORY_RE.match(norm_path)
+    if not m:
+        return False
+    slug = m.group(1).lower()
+    if _fake_numeric_story_id(slug):
+        return True
+    return slug.count("-") >= 4 and len(slug) >= 40 and bool(_LLM_GENERIC_SLUG_TAIL_RE.search(slug))
+
+
+def search_url_raw_reject_reason(
+    url: str,
+    *,
+    earliest: date | None = None,
+    anchor: date | None = None,
+) -> str | None:
+    """Отсев сырого URL сразу после web_search (до HTTP шага 1)."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return "invalid_url"
+    pre = search_url_prefilter_reason(u)
+    if pre:
+        return pre
+    if search_url_path_date_outside_window(u, earliest=earliest, anchor=anchor):
+        return "published_before_window"
+    return None
 
 
 def _suspicious_eight_digit_path_segment(seg: str) -> bool:
@@ -118,6 +275,8 @@ def url_suspected_hallucinated(url: str) -> bool:
     for m in _SUSPICIOUS_DATE_SEGMENT.finditer(path):
         if _suspicious_eight_digit_path_segment(m.group(1)):
             return True
+    if url_suspected_synthetic_editorial_story(u):
+        return True
     return False
 
 
@@ -167,6 +326,8 @@ def search_url_prefilter_reason(
     *,
     tier_strict: bool = False,
     curious_strict: bool = False,
+    earliest: date | None = None,
+    anchor: date | None = None,
 ) -> str | None:
     """Код отказа до HTTP-проверки (поиск/ингест). None — можно качать страницу."""
     enabled = is_enabled or (lambda _fid: True)
@@ -205,6 +366,9 @@ def search_url_prefilter_reason(
         ),
         "llm_hallucinated_url": url_suspected_hallucinated(u),
         "product_tool_page": is_product_tool_landing_url(u),
+        "published_before_window": search_url_path_date_outside_window(
+            u, earliest=earliest, anchor=anchor
+        ),
     }
     sequence = [x for x in (order or []) if x in checks]
     for fid in (
@@ -214,6 +378,7 @@ def search_url_prefilter_reason(
         "news_listing_page",
         "llm_hallucinated_url",
         "product_tool_page",
+        "published_before_window",
     ):
         if fid not in sequence:
             sequence.append(fid)
@@ -273,6 +438,7 @@ def fetch_article_urls_raw_merged(
     allowed_hosts: list[str] | None = None,
     force_proxyapi: bool = False,
     proxy_fallback_on_empty: bool = False,
+    curious_search: bool = False,
 ) -> list[str]:
     """
     Сырые уникальные URL (до _filter_search_urls).
@@ -305,6 +471,7 @@ def fetch_article_urls_raw_merged(
                 search_context_size=search_context_size,
                 allowed_hosts=allowed_hosts,
                 fallback_on_empty=proxy_fallback_on_empty,
+                curious_search=curious_search,
             )
             if proxy_urls:
                 merged = _uniq_urls([*merged, *proxy_urls])
@@ -351,15 +518,24 @@ def fetch_tier_prioritized_raw_urls(
     raw_target = max(14, min(fetch_limit, 22))
     min_unique_hosts_target = max(6, min(10, max(fetch_limit // 2, 6)))
     max_urls_per_host = max(2, min(4, max(fetch_limit // 12, 2)))
+    short_pool = max(0, int(current_verified or 0)) < 10
+    if short_pool:
+        max_urls_per_host = max(3, min(5, max_urls_per_host + 1))
     merged: list[str] = []
     seen: set[str] = set()
     host_counts: dict[str, int] = {}
     max_batches = max(1, int(getattr(settings, "step1_tier_max_web_search_batches", 6) or 6))
+    if short_pool:
+        raw_target = max(raw_target, min(fetch_limit, 30))
+        min_unique_hosts_target = max(4, min_unique_hosts_target - 2)
+        max_batches = max(max_batches, 10)
     batches_used = 0
     medium_escalations_used = 0
     preview_fallbacks_used = 0
     max_medium_escalations = 3
     max_preview_fallbacks = 1
+    window_earliest, window_anchor = parse_search_window_dates(window_prefix)
+    ru_hosts_seen = 0
 
     def _enough_coverage() -> bool:
         return len(merged) >= raw_target and len(host_counts) >= min_unique_hosts_target
@@ -369,22 +545,34 @@ def fetch_tier_prioritized_raw_urls(
             u = str(raw or "").strip()
             if not u.startswith("http") or not is_policy_tier_source(u, p):
                 continue
+            if search_url_raw_reject_reason(
+                u, earliest=window_earliest, anchor=window_anchor
+            ):
+                continue
             key = u.lower().rstrip("/")
             if key in seen:
                 continue
             host = (urlparse(u).hostname or "").lower()
             if host and host_counts.get(host, 0) >= max_urls_per_host:
                 continue
+            if any(marker in host for marker in _FOREIGN_EDITORIAL_ACCEPT_CAP_HOSTS):
+                if host_counts.get(host, 0) >= 1:
+                    continue
             seen.add(key)
             merged.append(u)
             if host:
                 host_counts[host] = host_counts.get(host, 0) + 1
 
-    for tier_label, hosts in policy_tier_host_groups(p):
+    for tier_label, hosts in policy_tier_host_groups_ru_first(p):
         if not hosts:
             continue
-        if current_verified >= 8 and tier_label in ("Tier-3", "Tier-4"):
+        base_tier = tier_label.removesuffix("-defer")
+        if current_verified >= 10 and base_tier in ("Tier-3", "Tier-4"):
             continue
+        if tier_label.endswith("-defer"):
+            # Дорогие батчи с частыми 404: только если RU-выдача не наполнила пул.
+            if _enough_coverage() or (ru_hosts_seen >= 2 and len(merged) >= max(8, raw_target // 2)):
+                continue
         if _enough_coverage():
             break
         for batch in batched_site_host_groups(hosts, batch_size=3):
@@ -473,15 +661,18 @@ def fetch_tier_prioritized_raw_urls(
                     proxy_fallback_on_empty=use_preview_fallback,
                 )
             batches_used += 1
+            if any(is_russian_host(h, p) or str(h).endswith(".ru") for h in batch):
+                ru_hosts_seen += 1
             _accept(batch_urls)
     if merged:
         logger.info(
-            "Tier-поиск: итого URL из политики tier-1…4 | count=%s unique_hosts=%s batches=%s/%s cap=%s",
+            "Tier-поиск: итого URL из политики tier-1…4 | count=%s unique_hosts=%s batches=%s/%s cap=%s ru_batches=%s",
             len(merged),
             len(host_counts),
             batches_used,
             max_batches,
             fetch_limit,
+            ru_hosts_seen,
         )
     return merged[:fetch_limit]
 
@@ -503,41 +694,99 @@ def fetch_curious_prioritized_raw_urls(
     """
     p = policy or get_curious_source_policy()
     seeds = p.search_seed_urls
-    per_batch_limit = max(14, min(36, max(fetch_limit // 4, 16)))
+    per_batch_limit = max(18, min(40, max(fetch_limit // 3, 20)))
     merged: list[str] = []
     seen: set[str] = set()
+    host_counts: dict[str, int] = {}
+    max_urls_per_host = 5
+    collect_cap = max(fetch_limit * 3, fetch_limit + 24, 60)
+
+    window_earliest, window_anchor = parse_search_window_dates(window_prefix)
+
+    def _rank_url(url: str) -> tuple[int, int, int]:
+        day = url_path_publication_day(url)
+        host = (urlparse(url).hostname or "").lower()
+        if search_url_path_date_outside_window(
+            url, earliest=window_earliest, anchor=window_anchor
+        ):
+            fresh_rank = 2
+        elif day:
+            fresh_rank = 0
+        elif any(h in host for h in (*p.curious_tier1_hosts, *p.curious_tier2_hosts)):
+            # Curious-T1/T2 часто без даты в path — не штрафуем за «неизвестную свежесть».
+            fresh_rank = 0
+        else:
+            fresh_rank = 1
+        if any(h in host for h in p.curious_tier1_hosts):
+            source_rank = 0
+        elif any(h in host for h in p.curious_tier2_hosts):
+            source_rank = 1
+        else:
+            source_rank = 2
+        return (fresh_rank, source_rank, -(day.toordinal() if day else 0))
 
     def _accept(urls: list[str]) -> None:
         for raw in urls:
             u = str(raw or "").strip()
             if not u.startswith("http") or not is_curious_policy_source(u, p):
                 continue
+            if search_url_raw_reject_reason(
+                u, earliest=window_earliest, anchor=window_anchor
+            ):
+                continue
             key = u.lower().rstrip("/")
             if key in seen:
                 continue
+            host = (urlparse(u).hostname or "").lower()
+            if host and host_counts.get(host, 0) >= max_urls_per_host:
+                continue
             seen.add(key)
             merged.append(u)
+            if host:
+                host_counts[host] = host_counts.get(host, 0) + 1
 
-    for tier_label, hosts in curious_host_search_groups(p):
+    groups = list(curious_host_search_groups(p))
+    groups.sort(
+        key=lambda x: {
+            "Curious-T1": 0,
+            "Curious-T2": 1,
+            "Curious-T2-Aggregators": 2,
+        }.get(x[0], 9)
+    )
+    for tier_label, hosts in groups:
         if not hosts:
             continue
-        if len(merged) >= fetch_limit:
+        # В curious-поиске нельзя останавливаться на первой группе доменов:
+        # иначе cap заполняется старым evergreen-контентом и поиск не доходит до Habr/VC/foreign.
+        if len(merged) >= collect_cap:
             break
-        terms = topic_terms_foreign if tier_label == "Curious-Foreign" else topic_terms_ru
         for batch in batched_site_host_groups(hosts, batch_size=3):
+            if tier_label == "Curious-T2":
+                terms = topic_terms_ru if any(h in batch for h in p.curious_ru_tech_hosts) else topic_terms_foreign
+            elif tier_label == "Curious-T1":
+                terms = topic_terms_ru if any(h in batch for h in p.curious_ru_entertainment_hosts) else topic_terms_foreign
+            else:
+                terms = topic_terms_ru
             matching_seeds = [s for s in seeds if any(marker in s.lower() for marker in batch)]
             seed_hint = ""
             if matching_seeds:
                 seed_hint = " Рекомендуемые разделы: " + ", ".join(matching_seeds[:8]) + ". "
             site_part = " OR ".join(f"site:{h}" for h in batch)
             agg_hint = ""
-            if tier_label == "Curious-Tier2-Aggregators":
+            if tier_label == "Curious-T2-Aggregators":
                 agg_hint = (
-                    " Домены агрегаторов Tier-2: только прямые URL статей первоисточников, "
+                    " Домены агрегаторов Curious-T2: только прямые URL статей первоисточников, "
                     "не ленты/поиск/теги. "
                 )
             query = (
-                f"{window_prefix}{seed_hint}{terms} "
+                f"{window_prefix}{seed_hint}"
+                f"ОБЯЗАТЕЛЬНО: в заголовке или тексте должен быть развлекательный угол "
+                f"({step1_curious_entertainment_anchor_ru() if terms == topic_terms_ru else step1_curious_entertainment_anchor_en()}). "
+                f"{terms} "
+                "Только свежие отдельные статьи внутри окна дат; не возвращай архивы, подборки, справки, вакансии, "
+                "ленты, рубрики и evergreen-материалы. "
+                "Приоритет: забавные, смешные, вирусные, абсурдные и неожиданные истории про ИИ; "
+                "не возвращай сухие пресс-релизы, регуляторику, инвестиции, обзоры моделей и новости «компания представила модель». "
                 f"Искать ТОЛЬКО на доменах: {', '.join(batch)}. ({site_part}) "
                 f"{agg_hint}{product_excludes}"
             )
@@ -555,15 +804,22 @@ def fetch_curious_prioritized_raw_urls(
                 search_context_size=search_context_size,
                 include_domains=list(batch),
                 allowed_hosts=list(batch),
+                curious_search=True,
             )
             _accept(batch_urls)
+        if len(merged) >= collect_cap:
+            break
     if merged:
+        merged.sort(key=_rank_url)
         logger.info(
-            "Курьёз-поиск: итого URL | count=%s cap=%s",
+            "Курьёз-поиск: итого URL | count=%s hosts=%s cap=%s return=%s",
             len(merged),
-            fetch_limit,
+            len(host_counts),
+            collect_cap,
+            min(len(merged), max(fetch_limit * 2, fetch_limit + 12)),
         )
-    return merged[:fetch_limit]
+    return_cap = max(fetch_limit * 2, fetch_limit + 12, 48)
+    return merged[: min(len(merged), return_cap)]
 
 
 def fetch_article_urls_from_search(

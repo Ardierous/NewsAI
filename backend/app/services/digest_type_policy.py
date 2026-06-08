@@ -23,16 +23,42 @@ _STEP1_TOPIC_TERMS_SERIOUS_EN = (
     "regulation research breakthrough deployment partnership investment "
 )
 
+# Обязательный «развлекательный» якорь в поиске — без него выдача уходит в обычные tech-новости.
+_STEP1_CURIOUS_ENTERTAINMENT_ANCHOR_RU = (
+    '(курьёз OR "ИИ ляпы" OR "нейросеть ошиблась" OR "галлюцинации нейросети" OR '
+    '"смешной ИИ-арт" OR "абсурд нейросети" OR "ИИ сочинил" OR '
+    "забавн OR смешн OR ржач OR угар OR фейл OR провал OR глюк OR абсурд OR мем OR кринж OR "
+    "вирусн OR пранк OR дипфейк OR нейровидео OR facepalm)"
+)
+
+_STEP1_CURIOUS_ENTERTAINMENT_ANCHOR_EN = (
+    '("AI fails" OR "funny AI art" OR "AI hallucinations" OR "weird AI" OR "AI mistakes" OR '
+    '"AI video" OR hilarious OR bizarre OR meme OR viral OR facepalm OR cringe OR prank OR roast OR '
+    "deepfake OR plot OR twist OR users OR complained OR broke OR epic OR fail)"
+)
+
 _STEP1_TOPIC_TERMS_CURIOUS_RU = (
-    "нейросеть ИИ чат-бот курьёз забавный смешной неожиданный нелепый абсурдный "
-    "фейл провал глюк ошибка мем анекдот история галлюцинация перепутал "
+    f"{_STEP1_CURIOUS_ENTERTAINMENT_ANCHOR_RU} "
+    "(нейросеть OR ИИ OR чат-бот OR ChatGPT OR Gemini) "
+    "неожиданный нелепый пользователи пожаловались возмутились сломала удалила код странный кейс "
+    "галлюцинация перепутал скандал на этой неделе сегодня вчера reddit "
     "заголовок на русском языке "
 )
 
 # Для зарубежных батчей curious_source_hosts — узкий EN-хвост, не деловая повестка.
 _STEP1_TOPIC_TERMS_CURIOUS_EN = (
-    "AI fail funny bizarre unexpected meme chatbot "
+    f"{_STEP1_CURIOUS_ENTERTAINMENT_ANCHOR_EN} "
+    "(AI OR chatbot OR neural OR LLM) sarcastic ironic unexpected users complained furious "
+    "this week deepfake scandal "
 )
+
+
+def step1_curious_entertainment_anchor_ru() -> str:
+    return _STEP1_CURIOUS_ENTERTAINMENT_ANCHOR_RU
+
+
+def step1_curious_entertainment_anchor_en() -> str:
+    return _STEP1_CURIOUS_ENTERTAINMENT_ANCHOR_EN
 
 _STEP1_PRODUCT_EXCLUDES_COMMON = (
     "-pricing -demo -trial -signup -download -features -product -tool -chatbot -assistant "
@@ -43,8 +69,9 @@ _STEP1_PRODUCT_EXCLUDES_COMMON = (
 _STEP1_PRODUCT_EXCLUDES_SERIOUS_EXTRA = "-blog -opinion "
 
 _STEP1_PRODUCT_EXCLUDES_CURIOUS_EXTRA = (
-    "-opinion -regulation -investment -partnership -earnings "
-    "-регулирование -инвестиц -партнёрств -законопроект -прорыв "
+    "-opinion -regulation -investment -partnership -earnings -conference -summit -framework -guideline "
+    "-регулирование -инвестиц -партнёрств -законопроект -прорыв -конференц -саммит -отчёт -выручк "
+    "-представил -анонсировал -выпустил -релиз -новая версия "
 )
 
 
@@ -95,8 +122,11 @@ def step1_research_editorial_block(digest_type: str | None) -> str:
 def step1_scoring_editorial_block(digest_type: str | None) -> str:
     if is_curious_digest(digest_type):
         return (
-            "digest_type=curious: повышай total_score забавным, неожиданным, вирусным и «человечным» материалам про ИИ; "
-            "снижай баллы сухим пресс-релизам, регуляторике и корпоративному официозу. "
+            "digest_type=curious: повышай total_score только забавным, неожиданным, вирусным и «человечным» материалам про ИИ; "
+            "максимально повышай истории с фейлом, багом, жалобами пользователей, абсурдом, кринжем, мемом, дипфейком, "
+            "странным экспериментом, ироничным скандалом или вирусным эффектом. "
+            "резко снижай баллы (до 1–3) сухим пресс-релизам, регуляторике, инвестициям, корпоративному официозу, "
+            "конференциям и обычным новостям «компания представила/выпустила модель». "
             "В пуле не должно остаться «серьёзных» новостей без курьёзного/удивительного угла."
         )
     return (
@@ -121,7 +151,9 @@ def step2_order_system_prompt(digest_type: str | None) -> str:
     if is_curious_digest(digest_type):
         return (
             base
-            + " Выпуск курьёзный (выходной): ставь в начало самую смешную/удивительную новость, "
-            "чередуй лёгкий тон, избегай «тяжёлого» финала — лучше яркий позитивный или ироничный аккорд."
+            + " Выпуск курьёзный (выходной): ставь в начало самую смешную, странную или вирусную новость. "
+            "Выше должны идти фейлы, глюки, жалобы пользователей, абсурдные кейсы, мемность и неожиданные человеческие истории. "
+            "Сухие деловые AI-новости, регуляторику, инвестиции, пресс-релизы и «компания представила модель» оставляй ниже "
+            "даже при высоком tier или формальном score. Чередуй лёгкий тон, избегай «тяжёлого» финала — лучше яркий позитивный или ироничный аккорд."
         )
     return base + " Выпуск деловой: сильная важная новость в начале, сбалансированный ритм без развлекательного перекоса."

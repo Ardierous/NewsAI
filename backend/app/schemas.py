@@ -208,6 +208,11 @@ class SelectRequest(BaseModel):
     top5: bool = False
 
 
+class Step2AddManualUrlRequest(BaseModel):
+    url: str = ""
+    urls: list[str] = Field(default_factory=list)
+
+
 class OrderRequest(BaseModel):
     ordered_candidate_ids: list[int] = Field(default_factory=list)
 
