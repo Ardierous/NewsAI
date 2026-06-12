@@ -5,7 +5,7 @@
 
 --- HOST_RULES ---
 
-# Curious-T1 — сарказм, мемы, пользовательские истории, вирусный угол (приоритет в пуле и поиске)
+# Curious-T1 — UGC, мемы, вирусный угол, развлекательные медиа (приоритет в пуле и поиске)
 [curious_tier1_hosts]
 theregister.com
 theverge.com
@@ -13,14 +13,20 @@ gizmodo.com
 boingboing.net
 futurism.com
 reddit.com
+pikabu.ru
 dzen.ru
 zen.yandex.ru
 popmech.ru
 hi-news.ru
 dtf.ru
 vc.ru
+vk.com
+boredpanda.com
+mashable.com
+buzzfeed.com
+knowyourmeme.com
 
-# Curious-T2 — IT-сообщества, разборы, лонгриды, добор (ниже T1)
+# Curious-T2 — IT-сообщества, технологические СМИ, форумы, добор
 [curious_tier2_hosts]
 arstechnica.com
 wired.com
@@ -31,20 +37,47 @@ habr.com
 neurohive.io
 nplus1.ru
 tproger.ru
+tjournal.ru
+secretmag.ru
+lifehacker.ru
+ferra.ru
+3dnews.ru
+ixbt.com
+kot.sh
+pulse.mail.ru
+vice.com
+huggingface.co
+civitai.com
+youtube.com
+youtu.be
+m.youtube.com
+tgstat.ru
+telemetr.io
+telemetr.me
 
 [curious_ru_entertainment_hosts]
+pikabu.ru
 dzen.ru
 zen.yandex.ru
 popmech.ru
 hi-news.ru
 dtf.ru
 vc.ru
+vk.com
+pulse.mail.ru
 
 [curious_ru_tech_hosts]
 habr.com
 neurohive.io
 nplus1.ru
 tproger.ru
+tjournal.ru
+secretmag.ru
+lifehacker.ru
+ferra.ru
+3dnews.ru
+ixbt.com
+kot.sh
 
 [curious_foreign_hosts]
 theregister.com
@@ -53,11 +86,20 @@ gizmodo.com
 boingboing.net
 futurism.com
 reddit.com
+boredpanda.com
+mashable.com
+buzzfeed.com
+knowyourmeme.com
 arstechnica.com
 wired.com
 bbc.com
 ycombinator.com
 news.ycombinator.com
+vice.com
+huggingface.co
+civitai.com
+youtube.com
+youtu.be
 
 [aggregator_hosts]
 news.google.com
@@ -82,42 +124,74 @@ wikipedia.org
 x.com
 twitter.com
 mobile.twitter.com
-youtube.com
-youtu.be
 tiktok.com
-vk.com
 
 [russian_host_markers]
+pikabu.ru
 dzen.ru
 zen.yandex.ru
 popmech.ru
 hi-news.ru
 dtf.ru
 vc.ru
+vk.com
 habr.com
 neurohive.io
 nplus1.ru
 tproger.ru
+tjournal.ru
+secretmag.ru
+lifehacker.ru
+ferra.ru
+3dnews.ru
+ixbt.com
+kot.sh
+pulse.mail.ru
+tgstat.ru
+telemetr.io
+telemetr.me
 yandex.ru
 
 [search_seed_urls]
-https://dzen.ru/
+https://pikabu.ru/tag/нейросети
+https://pikabu.ru/tag/Искусственный%20интеллект
+https://dtf.ru/memes
 https://vc.ru/ai
+https://vc.ru/offtop
+https://dzen.ru/
+https://pulse.mail.ru/
 https://habr.com/ru/hubs/artificial_intelligence/
+https://habr.com/ru/hub/humor/
 https://www.hi-news.ru/
 https://www.popmech.ru/
-https://dtf.ru/
-https://neurohive.io/
-https://tproger.ru/
+https://tjournal.ru/tech
+https://secretmag.ru/technologies
+https://lifehacker.ru/topics/technology/
+https://www.ferra.ru/
+https://3dnews.ru/software/
+https://www.ixbt.com/news/
+https://kot.sh/
 https://www.reddit.com/r/ChatGPT/
+https://www.reddit.com/r/StableDiffusion/
+https://www.reddit.com/r/midjourney/
+https://www.reddit.com/r/badAIgeneratedArt/
+https://www.reddit.com/r/singularity/
 https://www.reddit.com/r/aiArt/
 https://www.reddit.com/r/facepalm/
+https://www.boredpanda.com/
+https://mashable.com/category/artificial-intelligence/
+https://www.buzzfeed.com/tag/ai
+https://knowyourmeme.com/
 https://news.ycombinator.com/
 https://www.theverge.com/ai-artificial-intelligence
 https://www.theregister.com/
 https://gizmodo.com/
 https://boingboing.net/
 https://futurism.com/
-https://arstechnica.com/
-https://www.wired.com/
-https://www.bbc.com/future
+https://arstechnica.com/ai/
+https://www.wired.com/tag/artificial-intelligence/
+https://www.vice.com/en/topic/artificial-intelligence
+https://huggingface.co/spaces
+https://civitai.com/
+https://t.me/s/habr
+https://tgstat.ru/

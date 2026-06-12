@@ -21,11 +21,24 @@ def _digest(dtype: str) -> SimpleNamespace:
 
 def test_search_routing_separate_for_serious_and_curious() -> None:
     serious = resolve_step1_search_routing("serious", query_override=None, tier_strict_setting=True)
-    curious = resolve_step1_search_routing("curious", query_override=None, tier_strict_setting=True)
+    curious = resolve_step1_search_routing(
+        "curious",
+        query_override=None,
+        tier_strict_setting=True,
+    )
+    curious_hybrid = resolve_step1_search_routing(
+        "curious",
+        query_override=None,
+        tier_strict_setting=True,
+        curious_use_serious_tiers=True,
+    )
     assert serious.route == "serious_tier"
     assert serious.curious_strict is False
     assert curious.route == "curious_hosts"
     assert curious.curious_strict is True
+    assert curious.curious_verify is True
+    assert curious_hybrid.route == "serious_tier"
+    assert curious_hybrid.curious_strict is False
 
 
 def test_topic_terms_do_not_cross_digest_types() -> None:

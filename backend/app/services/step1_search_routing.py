@@ -1,7 +1,9 @@
 """
-Маршрутизация веб-поиска шага 1: серьёзный (source_tiers) и курьёзный (curious_source_hosts) не смешиваются.
+Маршрутизация веб-поиска шага 1.
 
-Правило: digest_type=curious → только curious_hosts; иначе — прежняя логика tier_strict / legacy.
+- serious → source_tiers.txt (tier_strict)
+- curious + curious_use_serious_tiers → source_tiers для сбора URL, curious_verify для тона
+- curious без флага → curious_source_hosts.txt
 """
 
 from __future__ import annotations
@@ -35,13 +37,15 @@ def resolve_step1_search_routing(
     *,
     query_override: str | None,
     tier_strict_setting: bool,
+    curious_use_serious_tiers: bool = False,
 ) -> Step1SearchRouting:
     """
     Выбор контура поиска и prefilter для одного батча шага 1.
 
-    - curious + без override → curious_source_hosts.txt, curious_strict prefilter
-    - serious + tier_strict → source_tiers.txt (как раньше)
-    - иначе → legacy open query (+ добор tier-1 при нехватке URL)
+    - curious + curious_use_serious_tiers → source_tiers (как serious), фильтр тона curious на verify
+    - curious без флага → curious_source_hosts.txt, curious_strict prefilter
+    - serious + tier_strict → source_tiers.txt
+    - иначе → legacy open query
     """
     curious = is_curious_digest(digest_type)
     if query_override is not None:
@@ -50,6 +54,13 @@ def resolve_step1_search_routing(
             tier_strict=False,
             curious_strict=False,
             curious_verify=curious,
+        )
+    if curious and curious_use_serious_tiers:
+        return Step1SearchRouting(
+            route="serious_tier",
+            tier_strict=True,
+            curious_strict=False,
+            curious_verify=True,
         )
     if curious:
         return Step1SearchRouting(

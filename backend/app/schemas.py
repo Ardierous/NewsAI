@@ -163,6 +163,8 @@ class CandidateOut(BaseModel):
     is_foreign_agent: bool = False
     is_aggregator: bool = False
     is_duplicate: bool = False
+    material_form: str = "article"
+    not_ad_disclosure: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -200,6 +202,11 @@ class CandidateOut(BaseModel):
             payload.get("verification_comment"),
             payload.get("description"),
         )
+        from app.services.step1_candidate_policy import has_not_ad_disclosure, parse_material_form_from_comment
+
+        comment = str(payload.get("verification_comment") or "")
+        payload["material_form"] = parse_material_form_from_comment(comment)
+        payload["not_ad_disclosure"] = has_not_ad_disclosure(comment)
         return payload
 
 

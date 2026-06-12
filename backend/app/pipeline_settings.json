@@ -20,6 +20,7 @@
     "verify_workers": 8,
     "crew_fallback_only_if_empty": false,
     "tier_strict_search": true,
+    "curious_use_serious_tiers": false,
     "telegram_monitor_enabled": true,
     "telegram_monitor_channels": "technokratos,AI_UD",
     "telegram_max_pages": 4,

@@ -15,6 +15,11 @@ def test_curious_policy_accepts_ru_and_foreign_hosts() -> None:
     assert is_curious_policy_source("https://vc.ru/ai/123-test")
     assert is_curious_policy_source("https://www.popmech.ru/science/ai-fail")
     assert is_curious_policy_source("https://www.reddit.com/r/MachineLearning/comments/abc/")
+    assert is_curious_policy_source("https://pikabu.ru/story/ai_fail_123")
+    assert is_curious_policy_source("https://tjournal.ru/tech/ai-experiment")
+    assert is_curious_policy_source("https://www.boredpanda.com/funny-ai-fails/")
+    assert is_curious_policy_source("https://vk.com/wall-123_456")
+    assert is_curious_policy_source("https://civitai.com/models/123")
 
 
 def test_curious_tier_labels_are_independent_from_serious() -> None:
@@ -66,3 +71,9 @@ def test_curious_hosts_file_exists() -> None:
     assert len(policy.curious_ru_entertainment_hosts) >= 5
     assert len(policy.curious_ru_tech_hosts) >= 3
     assert "ria.ru" not in policy.all_search_hosts()
+    assert "pikabu.ru" in policy.curious_tier1_hosts
+    assert "boredpanda.com" in policy.curious_tier1_hosts
+    assert "vk.com" in policy.curious_tier1_hosts
+    assert "vk.com" not in policy.blocked_search_hosts
+    assert "youtube.com" in policy.curious_tier2_hosts
+    assert "youtube.com" not in policy.blocked_search_hosts

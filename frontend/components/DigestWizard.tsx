@@ -350,6 +350,18 @@ const CATEGORY_LABELS: Record<string, string> = {
   analytics: "LLM-добор",
 };
 
+const MATERIAL_FORM_CHIP_LABELS: Record<string, string> = {
+  article: "Форма: статья",
+  training: "Форма: обучение",
+  service: "Форма: услуга",
+  press: "Форма: пресс-релиз",
+  research: "Форма: исследование",
+  finance: "Форма: финансы",
+  military: "Форма: военная сфера",
+  breakthrough: "Форма: прорыв ИИ",
+  legislation: "Форма: законодательство",
+};
+
 function resolveOriginCategory(c: {
   category?: string;
   verification_comment?: string;
@@ -2887,6 +2899,16 @@ export function DigestWizard({ digestId }: Props) {
                       {c.category || c.verification_comment || c.description ? (
                         <span className="news-chip" title="Как материал попал в пул">
                           {categoryLabel(c)}
+                        </span>
+                      ) : null}
+                      {c.material_form && c.material_form !== "article" ? (
+                        <span className="news-chip" title="Тип страницы по содержимому и URL">
+                          {MATERIAL_FORM_CHIP_LABELS[String(c.material_form)] || `Форма: ${c.material_form}`}
+                        </span>
+                      ) : null}
+                      {c.not_ad_disclosure ? (
+                        <span className="news-chip ok" title="Образовательный или сервисный материал, не рекламный пост">
+                          Не реклама
                         </span>
                       ) : null}
                       {c.tier ? <span className="news-chip">{c.tier}</span> : null}

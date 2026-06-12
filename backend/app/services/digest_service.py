@@ -76,9 +76,22 @@ from app.services.news_search import (
 from app.services.step1_candidate_policy import (
     has_substantive_news_event_signal as _has_substantive_news_event_signal,
     is_press_release_candidate_dict as _is_press_release_candidate_dict,
+    apply_material_form_to_candidate as _apply_material_form_to_candidate,
+    classify_material_form as _classify_material_form,
+    has_substantive_news_event_signal as _has_substantive_news_event_signal,
     is_product_tool_landing_url as _is_product_tool_landing_url,
+    is_research_pool_item as _is_research_pool_item,
+    is_research_science_candidate as _is_research_science_candidate,
     is_substantive_press_for_pool as _is_substantive_press_for_pool,
+    is_training_education_candidate as _is_training_education_candidate,
+    is_theme_pool_item as _is_theme_pool_item,
+    is_training_pool_item as _is_training_pool_item,
     looks_like_product_tool_promo as _looks_like_product_tool_promo,
+    pool_item_theme as _pool_item_theme,
+    SERIOUS_POOL_THEME_QUOTAS,
+    theme_pool_quota as _theme_pool_quota,
+    MATERIAL_FORM_SERVICE,
+    MATERIAL_FORM_TRAINING,
 )
 from app.services.step1_recent_top5 import (
     article_page_fingerprint,
@@ -1852,8 +1865,12 @@ def _rebalance_verified_pool(
         if len(pool) >= STEP1_MIN_VERIFIED and ru_in_pool < int(target * ru_min):
             max_ru = min(target, max(max_ru, ru_in_pool + (target - ru_in_pool)))
     else:
-        min_press = max(0, int(round(target * STEP1_PRESS_SHARE_MIN + 0.499)))
-        max_press = max(min_press, int(target * STEP1_PRESS_SHARE_MAX))
+        min_press = 0
+        max_press = 0
+        min_ru = 0
+        max_ru = target
+
+    serious_theme_rebalance = not is_curious_digest(digest_type)
 
     def _rank_key(x: dict[str, Any]) -> tuple[int, int, int]:
         total = int(x.get("total_score", 0))
@@ -1871,6 +1888,17 @@ def _rebalance_verified_pool(
                 total += 4
         if _looks_like_product_tool_promo(x):
             total -= 8
+        if serious_theme_rebalance:
+            title = str(x.get("title") or "")
+            excerpt = str(x.get("article_excerpt") or x.get("description") or "")
+            corpus = f"{title} {excerpt}"
+            theme = _pool_item_theme(x) or _classify_material_form(x, extra=corpus)
+            if theme in SERIOUS_POOL_THEME_QUOTAS:
+                total += 8
+            elif _is_substantive_press_for_pool(x, extra=corpus):
+                total += 5
+            elif _has_substantive_news_event_signal(x, extra=corpus):
+                total += 3
         tier_raw = str(x.get("tier") or "Tier-9")
         if is_curious_digest(digest_type):
             tier_num = curious_tier_priority(tier_raw)
@@ -1891,7 +1919,13 @@ def _rebalance_verified_pool(
     host_count: dict[str, int] = {}
     ru_count = 0
     press_count = 0
+    theme_counts: dict[str, int] = {theme: 0 for theme in SERIOUS_POOL_THEME_QUOTAS}
     selected_fps: set[str] = set()
+
+    def _bump_theme_counts(item: dict[str, Any]) -> None:
+        theme = _pool_item_theme(item)
+        if theme:
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
 
     def force_add_pinned(item: dict[str, Any]) -> bool:
         """Отмеченные пользователем при частичной пересборке — всегда в пуле (без квот RU/press)."""
@@ -1907,6 +1941,7 @@ def _rebalance_verified_pool(
             ru_count += 1
         if _is_substantive_press_for_pool(item):
             press_count += 1
+        _bump_theme_counts(item)
         return True
 
     def add_item(item: dict[str, Any]) -> bool:
@@ -1930,6 +1965,10 @@ def _rebalance_verified_pool(
             return False
         if is_press and press_count >= max_press:
             return False
+        if serious_theme_rebalance:
+            theme = _pool_item_theme(item)
+            if theme and theme_counts.get(theme, 0) >= _theme_pool_quota(theme):
+                return False
         chosen.append(item)
         selected_fps.add(fp)
         host_count[host] = host_count.get(host, 0) + 1
@@ -1937,6 +1976,7 @@ def _rebalance_verified_pool(
             ru_count += 1
         if is_press:
             press_count += 1
+        _bump_theme_counts(item)
         return True
 
     # Сначала закреплённые (частичная пересборка): без квот, иначе rebalance выкидывает отмеченные.
@@ -1961,8 +2001,19 @@ def _rebalance_verified_pool(
             if add_item(item):
                 current += 1
 
-    fill_minimum(press_count, min_press, _is_substantive_press_for_pool)
-    fill_minimum(ru_count, min_ru, lambda x: _is_russian_host(_host_from_url(str(x.get("url") or ""))))
+    if serious_theme_rebalance:
+        for theme, quota in SERIOUS_POOL_THEME_QUOTAS.items():
+            available = sum(1 for x in pool if _pool_item_theme(x) == theme)
+            if available <= 0:
+                continue
+            fill_minimum(
+                theme_counts.get(theme, 0),
+                min(quota, available),
+                lambda x, theme_key=theme: _is_theme_pool_item(x, theme_key),
+            )
+    else:
+        fill_minimum(press_count, min_press, _is_substantive_press_for_pool)
+        fill_minimum(ru_count, min_ru, lambda x: _is_russian_host(_host_from_url(str(x.get("url") or ""))))
 
     need_min = min(target, STEP1_MIN_VERIFIED)
     if len(chosen) < need_min and len(ranked) >= need_min:
@@ -1971,6 +2022,7 @@ def _rebalance_verified_pool(
             max(target, STEP1_MIN_VERIFIED),
             pinned_fps=pinned_fps,
             prechosen=chosen,
+            digest_type=digest_type,
         )
 
     for item in chosen:
@@ -1985,8 +2037,10 @@ def _rebalance_verified_pool_host_cap_only(
     pinned_fps: set[str] | None = None,
     prechosen: list[dict[str, Any]] | None = None,
     per_host_cap: int | None = None,
+    digest_type: str | None = None,
 ) -> list[dict[str, Any]]:
     """Добор до target только по лимиту на источник, без квот RU/press (если квоты съели пул)."""
+    apply_theme_caps = not is_curious_digest(digest_type)
     pinned_fps = pinned_fps or set()
     prechosen = prechosen or []
     host_cap = max(1, int(per_host_cap or STEP1_MAX_PER_SOURCE))
@@ -2008,6 +2062,15 @@ def _rebalance_verified_pool_host_cap_only(
     ranked = sorted(pool, key=_rank_key, reverse=True)
     chosen: list[dict[str, Any]] = []
     host_count: dict[str, int] = {}
+    theme_counts: dict[str, int] = (
+        {theme: 0 for theme in SERIOUS_POOL_THEME_QUOTAS} if apply_theme_caps else {}
+    )
+    for row in prechosen:
+        if not apply_theme_caps:
+            continue
+        theme = _pool_item_theme(row)
+        if theme:
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
     selected_fps: set[str] = set()
     for item in prechosen:
         fp = _url_fingerprint(str(item.get("url") or ""))
@@ -2032,11 +2095,16 @@ def _rebalance_verified_pool_host_cap_only(
         host = _publisher_host_key(item)
         if host_count.get(host, 0) >= host_cap:
             return False
+        theme = _pool_item_theme(item) if apply_theme_caps else ""
+        if theme and theme_counts.get(theme, 0) >= _theme_pool_quota(theme):
+            return False
         if _looks_like_product_tool_promo(item):
             return False
         chosen.append(item)
         selected_fps.add(fp)
         host_count[host] = host_count.get(host, 0) + 1
+        if theme:
+            theme_counts[theme] = theme_counts.get(theme, 0) + 1
         return True
 
     for item in ranked:
@@ -3606,13 +3674,24 @@ class DigestService:
                     snapshot_preview_row(item)
                     register_reject(item)
                     return
-                if step1_filter_enabled.get("product_tool_promo", True) and _looks_like_product_tool_promo(item):
+                promo_corpus = (
+                    f"{item.get('title', '')} {item.get('description', '')} "
+                    f"{item.get('article_excerpt', '')}"
+                )
+                material_form = _classify_material_form(item, extra=promo_corpus)
+                if (
+                    step1_filter_enabled.get("product_tool_promo", True)
+                    and _looks_like_product_tool_promo(item, promo_corpus)
+                    and material_form not in (MATERIAL_FORM_TRAINING, MATERIAL_FORM_SERVICE)
+                ):
                     _append_reject_reason(item, "product_tool_promo")
                     item["headline_editorial_ok"] = False
                     item["link_status"] = False
                     snapshot_preview_row(item)
                     register_reject(item)
                     return
+                if item.get("headline_editorial_ok") and item.get("link_status"):
+                    _apply_material_form_to_candidate(item, extra=promo_corpus)
                 _normalize_candidate_source(item)
                 fp = _url_fingerprint(str(item.get("url", "")))
                 if not fp or fp in seen_fp:
@@ -4443,6 +4522,7 @@ class DigestService:
                     min(rebalance_target, len(verified_pool_before_rebalance)),
                     pinned_fps=pinned_fps,
                     per_host_cap=relaxed_host_cap,
+                    digest_type=digest.digest_type,
                 )
             else:
                 verified_pool = _rebalance_verified_pool(
@@ -4458,6 +4538,7 @@ class DigestService:
                     min(rebalance_target, len(verified_pool_before_rebalance)),
                     pinned_fps=pinned_fps,
                     per_host_cap=relaxed_host_cap,
+                    digest_type=digest.digest_type,
                 )
             elif (
                 len(verified_pool) < STEP1_MIN_VERIFIED
@@ -4468,6 +4549,7 @@ class DigestService:
                     max(rebalance_target, STEP1_MIN_VERIFIED),
                     pinned_fps=pinned_fps,
                     per_host_cap=relaxed_host_cap,
+                    digest_type=digest.digest_type,
                 )
             if not _pool_respects_source_cap(verified_pool):
                 logger.error(
@@ -5794,30 +5876,32 @@ class DigestService:
                 comment = f"{comment} МАРКИРОВКА: ИНОСТРАННЫЙ_АГЕНТ"
             policy_fields: dict[str, Any] = {}
             _apply_source_policy_from_url(policy_fields, stored)
-            result.append(
-                {
-                    "original_number": idx,
-                    "title": title,
-                    "url": stored[:1000],
-                    "source": host,
-                    "tier": policy_fields["tier"],
-                    "published_at": published_at[:100],
-                    "category": "manual" if mandatory else "telegram_seed",
-                    "description": desc,
-                    "significance_score": 3,
-                    "novelty_score": 3,
-                    "impact_score": 3,
-                    "total_score": 9,
-                    "reliability_status": policy_fields["reliability_status"],
-                    "is_foreign_agent": _is_foreign_agent_source(stored),
-                    "is_aggregator": policy_fields["is_aggregator"],
-                    "is_duplicate": False,
-                    "verification_comment": comment,
-                    "link_status": link_ok,
-                    "headline_editorial_ok": headline_editorial_ok,
-                    "page_verified": page_verified,
-                }
-            )
+            candidate_row: dict[str, Any] = {
+                "original_number": idx,
+                "title": title,
+                "url": stored[:1000],
+                "source": host,
+                "tier": policy_fields["tier"],
+                "published_at": published_at[:100],
+                "category": "manual" if mandatory else "telegram_seed",
+                "description": desc,
+                "significance_score": 3,
+                "novelty_score": 3,
+                "impact_score": 3,
+                "total_score": 9,
+                "reliability_status": policy_fields["reliability_status"],
+                "is_foreign_agent": _is_foreign_agent_source(stored),
+                "is_aggregator": policy_fields["is_aggregator"],
+                "is_duplicate": False,
+                "verification_comment": comment,
+                "link_status": link_ok,
+                "headline_editorial_ok": headline_editorial_ok,
+                "page_verified": page_verified,
+            }
+            if page_verified and headline_editorial_ok:
+                promo_corpus = f"{title} {desc} {bundle.get('topic_corpus', '')}"
+                _apply_material_form_to_candidate(candidate_row, extra=promo_corpus)
+            result.append(candidate_row)
         return result
 
     def _skeleton_dict_from_search_url(self, url: str, now_msk: str, seq: int) -> dict[str, Any]:
@@ -5940,9 +6024,10 @@ class DigestService:
         )
 
     def _step1_prioritize_search_urls(self, urls: list[str], digest: Digest | None = None) -> list[str]:
-        """Сортирует URL перед HTTP: serious — tier+дата; curious — entertainment+дата."""
+        """Сортирует URL перед HTTP: serious — tier+дата; curious — entertainment или tier+дата (гибрид)."""
         if digest is not None and is_curious_digest(digest.digest_type):
-            return self._step1_prioritize_curious_search_urls(urls, digest)
+            if not bool(getattr(self.settings, "step1_curious_use_serious_tiers", False)):
+                return self._step1_prioritize_curious_search_urls(urls, digest)
         from app.source_tiers_policy import tier2_search_host_markers
 
         policy = get_source_tiers_policy(self.settings.source_tiers_path)
@@ -6049,6 +6134,18 @@ class DigestService:
             "-archive -tag -tags -opinion -column -vacancy -jobs -events -digest"
         )
 
+    def _step1_research_science_query(self, digest: Digest) -> str:
+        """Прорывы, исследования и научные публикации про ИИ."""
+        earliest = digest_earliest_news_date(digest)
+        return (
+            f"after:{earliest.isoformat()} "
+            "\"искусственный интеллект\" OR \"нейросеть\" OR LLM OR \"машинное обучение\" "
+            "прорыв OR исследование OR \"научные данные\" OR \"научная работа\" OR benchmark OR paper OR study "
+            "site:habr.com OR site:nplus1.ru OR site:indicator.ru OR site:sciencedaily.com OR site:techxplore.com "
+            "OR site:spectrum.ieee.org OR site:technologyreview.com OR site:openai.com OR site:deepmind.google "
+            "-course -курс -обучение -webinar -pricing -demo -trial -signup -vacancy"
+        )
+
     def _step1_curious_angles_query(self, digest: Digest) -> str:
         """Доп. запрос для курьёзного выпуска: забавные/неожиданные углы (не пресс-релизы)."""
         earliest = digest_earliest_news_date(digest)
@@ -6104,17 +6201,18 @@ class DigestService:
         )
 
     def _step1_press_release_query(self, digest: Digest) -> str:
+        """Официальные заявления и пресс-релизы: wire-сервисы и блоги крупных AI-компаний."""
         earliest = digest_earliest_news_date(digest)
         return (
             f"after:{earliest.isoformat()} "
-            "\"press release\" OR \"official announcement\" OR partnership OR investment OR regulation OR "
-            "\"research breakthrough\" OR deployment OR \"federal program\" "
-            "\"artificial intelligence\" OR \"generative AI\" OR LLM "
-            "site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com "
-            "OR inurl:/press OR inurl:/newsroom "
-            "-pricing -demo -trial -signup -download -features -product -tool -chatbot -assistant "
-            "-launches -introduces "
-            "-blog -opinion -vacancy -careers -webinar -podcast"
+            "\"artificial intelligence\" OR \"generative AI\" OR LLM OR \"нейросеть\" OR \"искусственный интеллект\" "
+            "(\"press release\" OR \"official announcement\" OR partnership OR investment OR deployment OR "
+            "launches OR introduces OR \"rolls out\" OR roadmap OR strategy OR внедрение OR партнёрство OR план) "
+            "site:openai.com OR site:blogs.nvidia.com OR site:anthropic.com OR site:microsoft.com OR site:ibm.com "
+            "OR site:yandex.ru OR site:sber.ru OR site:sberbank.ru OR site:vk.company "
+            "OR site:businesswire.com OR site:prnewswire.com OR site:globenewswire.com "
+            "OR inurl:/press OR inurl:/newsroom OR inurl:/blog "
+            "-pricing -demo -trial -signup -download -vacancy -careers -webinar -podcast -tutorial -how-to"
         )
 
     def _step1_topup_search_until_minimum(
@@ -6159,10 +6257,12 @@ class DigestService:
                     return self._step1_curious_angles_query(digest)
                 if round_idx % 3 == 2:
                     return self._step1_curious_viral_query(digest)
-            elif round_idx % 4 == 1:
+            elif round_idx % 5 == 1:
                 return self._step1_fresh_breaking_query(digest)
-            elif round_idx % 4 == 2:
+            elif round_idx % 5 == 2:
                 return self._step1_press_release_query(digest)
+            elif round_idx % 5 == 3:
+                return self._step1_research_science_query(digest)
             base = self._step1_fresh_tier1_query(digest)
             if round_idx % 2 == 0 and saturated_hosts:
                 return _step1_search_query_exclude_saturated_hosts(base, saturated_hosts)
@@ -6603,6 +6703,7 @@ class DigestService:
             digest.digest_type,
             query_override=query_override,
             tier_strict_setting=bool(getattr(self.settings, "step1_tier_strict_search", True)),
+            curious_use_serious_tiers=bool(getattr(self.settings, "step1_curious_use_serious_tiers", False)),
         )
         tier_strict = search_route.tier_strict
         curious_strict = search_route.curious_strict
@@ -6645,7 +6746,7 @@ class DigestService:
 
         if search_route.uses_curious_hosts:
             logger.info(
-                "Шаг 1: курьёзный поиск по curious_source_hosts (без source_tiers) | digest_id=%s route=%s",
+                "Шаг 1: курьёзный поиск по curious_source_hosts | digest_id=%s route=%s",
                 digest.id,
                 search_route.route,
             )
@@ -6665,11 +6766,18 @@ class DigestService:
                 seen_raw.add(key)
                 raw_unique.append(str(u).strip())
         elif search_route.uses_source_tiers:
-            logger.info(
-                "Шаг 1: tier-строгий поиск по source_tiers | digest_id=%s route=%s",
-                digest.id,
-                search_route.route,
-            )
+            if search_route.curious_verify:
+                logger.info(
+                    "Шаг 1: курьёзный выпуск — поиск по source_tiers, фильтр тона curious | digest_id=%s route=%s",
+                    digest.id,
+                    search_route.route,
+                )
+            else:
+                logger.info(
+                    "Шаг 1: tier-строгий поиск по source_tiers | digest_id=%s route=%s",
+                    digest.id,
+                    search_route.route,
+                )
             for u in fetch_tier_prioritized_raw_urls(
                 self.settings,
                 window_prefix=window_hint,
@@ -7165,7 +7273,10 @@ class DigestService:
             _append_reject_reason(item, "non_article_page")
             return
         curious_mode = getattr(self, "_step1_curious_mode", False) is True
-        if curious_mode:
+        curious_serious_tiers = curious_mode and bool(
+            getattr(self.settings, "step1_curious_use_serious_tiers", False)
+        )
+        if curious_mode and not curious_serious_tiers:
             tier, is_aggregator, reliability_status = classify_curious_source(u)
             if is_curious_blocked_host(u) and is_enabled("forbidden_media_source"):
                 item["link_status"] = False
@@ -7278,14 +7389,18 @@ class DigestService:
             return
         item["title"] = final_title
         promo_corpus = f"{final_title} {item.get('description', '')} {bundle.get('topic_corpus', '')}"
+        material_form = _classify_material_form(item, extra=promo_corpus)
         if _is_product_tool_landing_url(stored) and is_enabled("product_tool_page"):
-            item["link_status"] = False
-            _append_reject_reason(item, "product_tool_page")
-            return
+            if material_form not in (MATERIAL_FORM_TRAINING, MATERIAL_FORM_SERVICE):
+                item["link_status"] = False
+                _append_reject_reason(item, "product_tool_page")
+                return
         if _looks_like_product_tool_promo(item, promo_corpus) and is_enabled("product_tool_promo"):
-            item["link_status"] = False
-            _append_reject_reason(item, "product_tool_promo")
-            return
+            if material_form not in (MATERIAL_FORM_TRAINING, MATERIAL_FORM_SERVICE):
+                item["link_status"] = False
+                _append_reject_reason(item, "product_tool_promo")
+                return
+        _apply_material_form_to_candidate(item, extra=promo_corpus)
         item["headline_editorial_ok"] = True
         item["page_verified"] = True
         item["article_excerpt"] = _truncate_article_excerpt(topic_excerpt)
@@ -7384,6 +7499,7 @@ class DigestService:
             digest.digest_type,
             query_override=None,
             tier_strict_setting=bool(getattr(self.settings, "step1_tier_strict_search", True)),
+            curious_use_serious_tiers=bool(getattr(self.settings, "step1_curious_use_serious_tiers", False)),
         )
         tier_strict = search_route.tier_strict
         curious_strict = search_route.curious_strict

@@ -18,6 +18,22 @@ def _item(url: str, *, press: bool = False, score: int = 5, title: str | None = 
     }
 
 
+def test_rebalance_curious_skips_serious_theme_quotas() -> None:
+    pool = []
+    for i in range(5):
+        pool.append(
+            {
+                **_item(f"https://publisher{i}.example.com/research/{i}", score=10 - i),
+                "material_form": "research",
+                "verification_comment": "MATERIAL_FORM:research",
+            }
+        )
+    serious_out = ds._rebalance_verified_pool(pool, target=5, digest_type="serious")
+    curious_out = ds._rebalance_verified_pool(pool, target=5, digest_type="curious")
+    assert sum(1 for x in serious_out if x.get("material_form") == "research") <= 2
+    assert sum(1 for x in curious_out if x.get("material_form") == "research") == 5
+
+
 def test_rebalance_curious_skips_press_quota() -> None:
     pool = [
         _item("https://ria.ru/a1", press=False, score=9),

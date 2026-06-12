@@ -1,7 +1,9 @@
 from app.services.curious_tone import (
     curious_tone_score,
     curious_total_score_from_tone,
+    has_curious_positive_signal,
     is_dry_serious_curious_news,
+    passes_curious_pool_gate,
     passes_curious_tone_gate,
 )
 
@@ -80,3 +82,33 @@ def test_rejects_neutral_tech_overview_without_humor() -> None:
 
 def test_curious_total_score_prefers_entertaining_over_low_tone() -> None:
     assert curious_total_score_from_tone(5, low=False) > curious_total_score_from_tone(1, low=True)
+
+
+def test_expanded_ru_curious_markers() -> None:
+    for title in (
+        "Казус с нейросетью в метро",
+        "Конфуз на презентации ИИ-бота",
+        "Ляп в промпте ChatGPT",
+        "Прокол при запуске голосового агента",
+        "Хохма про машинное обучение",
+        "Уморительная байка про GPT",
+        "Комичный парадокс в ответе Claude",
+    ):
+        assert has_curious_positive_signal(title, ""), title
+
+
+def test_expanded_en_curious_markers() -> None:
+    for title in (
+        "Hilarious AI mishap at airport",
+        "Ridiculous blooper from voice assistant",
+        "Wacky spoof of ChatGPT launch",
+        "Side-splitting gaffe by coding bot",
+    ):
+        assert has_curious_positive_signal(title, ""), title
+
+
+def test_pool_gate_accepts_marker_without_explicit_fail() -> None:
+    assert passes_curious_pool_gate(
+        "Уморительная история: нейросеть перепутала заказы",
+        "искусственный интеллект",
+    )

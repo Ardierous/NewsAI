@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     step1_verify_workers: int = 6
     step1_crew_fallback_only_if_empty: bool = True
     step1_tier_strict_search: bool = True
+    step1_curious_use_serious_tiers: bool = False
     step1_telegram_monitor_enabled: bool = True
     step1_telegram_monitor_channels: str = "technokratos"
     step1_telegram_max_pages: int = 2

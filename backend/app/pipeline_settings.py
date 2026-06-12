@@ -35,6 +35,7 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "verify_workers": 6,
             "crew_fallback_only_if_empty": True,
             "tier_strict_search": True,
+            "curious_use_serious_tiers": False,
             "telegram_monitor_enabled": True,
             "telegram_monitor_channels": "technokratos",
             "telegram_max_pages": 2,
@@ -132,6 +133,10 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         step1_raw.get("crew_fallback_only_if_empty"), step1["crew_fallback_only_if_empty"]
     )
     step1["tier_strict_search"] = _coerce_bool(step1_raw.get("tier_strict_search"), step1["tier_strict_search"])
+    step1["curious_use_serious_tiers"] = _coerce_bool(
+        step1_raw.get("curious_use_serious_tiers"),
+        step1.get("curious_use_serious_tiers", False),
+    )
     step1["telegram_monitor_enabled"] = _coerce_bool(
         step1_raw.get("telegram_monitor_enabled"), step1["telegram_monitor_enabled"]
     )
@@ -239,6 +244,7 @@ def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
         "step1_verify_workers": s1["verify_workers"],
         "step1_crew_fallback_only_if_empty": s1["crew_fallback_only_if_empty"],
         "step1_tier_strict_search": s1["tier_strict_search"],
+        "step1_curious_use_serious_tiers": s1["curious_use_serious_tiers"],
         "step1_telegram_monitor_enabled": s1["telegram_monitor_enabled"],
         "step1_telegram_monitor_channels": s1["telegram_monitor_channels"],
         "step1_telegram_max_pages": s1["telegram_max_pages"],

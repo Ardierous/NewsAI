@@ -14,13 +14,32 @@ def test_serious_default_uses_source_tiers_only() -> None:
     assert r.curious_verify is False
 
 
-def test_curious_never_uses_source_tiers_route() -> None:
-    r = resolve_step1_search_routing("curious", query_override=None, tier_strict_setting=True)
+def test_curious_default_uses_curious_hosts() -> None:
+    r = resolve_step1_search_routing(
+        "curious",
+        query_override=None,
+        tier_strict_setting=True,
+    )
     assert r.route == "curious_hosts"
     assert r.uses_curious_hosts
     assert not r.uses_source_tiers
     assert r.tier_strict is False
     assert r.curious_strict is True
+    assert r.curious_verify is True
+
+
+def test_curious_optional_serious_tiers_hybrid() -> None:
+    r = resolve_step1_search_routing(
+        "curious",
+        query_override=None,
+        tier_strict_setting=True,
+        curious_use_serious_tiers=True,
+    )
+    assert r.route == "serious_tier"
+    assert r.uses_source_tiers
+    assert not r.uses_curious_hosts
+    assert r.tier_strict is True
+    assert r.curious_strict is False
     assert r.curious_verify is True
 
 
