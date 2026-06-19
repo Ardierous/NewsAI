@@ -1,51 +1,68 @@
-# Оптимизация стоимости шага 1 — шаги 1–3
+# Оптимизация стоимости шага 1
 
-Проверка после каждого шага: один прогон шага 1 → «Зафиксировать» → сравнить с [STEP1_OPTIMIZATION_BASELINE.md](STEP1_OPTIMIZATION_BASELINE.md) (~80 ₽).
+Текущая конфигурация экономии ProxyAPI и внешних API. Основной источник — [backend/app/pipeline_settings.json](../backend/app/pipeline_settings.json).
 
-## Шаг 1 — конфиг (сделано)
+## Принципы
 
-| Параметр | Было | Стало |
-|----------|------|-------|
-| `max_cost_rub` | 50 | **40** |
-| `web_search_context_size` | medium (.env) | **low** (pipeline) |
-| `telegram_via_proxyapi` | true | **false** |
-| `telegram_direct_fallback` | false | **true** |
-| `telegram_proxyapi_context_size` | medium | **low** |
+1. **ProxyAPI web_search** — основной источник URL; SerpAPI/Tavily выключены по умолчанию.
+2. **Context size `low`** — для tier-батчей и supplement; `medium` включается только в short-pool режиме (verified < 10).
+3. **Telegram direct** — парсинг `t.me/s/` без ProxyAPI.
+4. **Кэш web_search** — повторные запросы не тарифицируются повторно (TTL 90 д).
+5. **Strict citations** — для serious tier_strict URL только из citations; меньше HTTP на выдуманные ссылки.
+6. **Лимит tier-батчей** — до 12 за проход; supplement ограничен при нехватке пула.
 
-**Тест:** `pytest tests/test_step1_cost_optimization.py::test_step1_config_economy_defaults -q`
+## Текущие параметры
 
-**Живой прогон:** перезапуск backend, новый выпуск шаг 0→1, кнопка «Зафиксировать». Ожидание: **−10…25 ₽** (без ProxyAPI-Telegram).
+| Параметр | Значение | Эффект |
+|----------|----------|--------|
+| `max_cost_rub` | 50 | Потолок ₽ на шаг 1 |
+| `web_search_context_size` | low | Меньше токенов на батч |
+| `web_search_context_size_supplement` | low | То же для добора |
+| `tier_max_web_search_batches` | 12 | Лимит ProxyAPI-вызовов за tier-проход |
+| `web_search_prefer_alt_providers` | false | Только ProxyAPI (без SerpAPI/Tavily) |
+| `web_search_cache_enabled` | true | Кэш ответов 90 д |
+| `telegram_via_proxyapi` | false | Telegram без ProxyAPI |
+| `telegram_direct_fallback` | true | Прямой HTTP к t.me/s/ |
+| `telegram_proxyapi_context_size` | low | На случай fallback через ProxyAPI |
+| `crew_fallback_only_if_empty` | false | Crew только при verified < 10, не «если пусто» |
 
-## Шаг 2 — лимит tier-батчей + лог кэша (сделано)
+## Альтернативные провайдеры (опционально)
 
-| Параметр | Значение |
-|----------|----------|
-| `tier_max_web_search_batches` | **6** за один tier-проход |
-| Логи | `ProxyAPI usage \| … cached_tokens=…` ([кэш промптов](https://proxyapi.ru/docs/openai-prompt-caching)) |
+Код SerpAPI/Tavily остаётся в репозитории. Для включения:
 
-**Тест:** `pytest tests/test_step1_cost_optimization.py::test_tier_search_respects_max_batches tests/test_step1_cost_optimization.py::test_log_proxyapi_usage_reads_cached_tokens -q`
+1. Добавить ключи в `backend/.env`: `SERPAPI_API_KEY`, `TAVILY_API_KEY`.
+2. Установить `"web_search_prefer_alt_providers": true` в `pipeline_settings.json`.
 
-**Живой прогон:** смотреть `backend/logs/app-*.log` — `batches=6/6`, меньше строк `ProxyAPI web_search`. Ожидание: **−15…30 ₽** к шагу 1.
+Без ключей экономия идёт за счёт параметров таблицы выше.
 
-## Шаг 3 — альт. провайдеры (SerpAPI/Tavily) — **выключено**
+## Реестр URL
 
-| Параметр | Значение |
-|----------|----------|
-| `web_search_prefer_alt_providers` | **false** (режим «только ProxyAPI») |
-| `SERPAPI_API_KEY` / `TAVILY_API_KEY` | не нужны |
+`step1_url_registry_reuse_enabled: true` (config.py) — переиспользование проверенных URL между прогонами снижает число web_search-вызовов. При нехватке пула (verified < 10) реестр **не** используется как основной seed — приоритет свежему поиску.
 
-Код шага 3 остаётся в репозитории: при появлении ключей можно включить `web_search_prefer_alt_providers: true`.  
-Без ключей экономия идёт за счёт шагов 1–2 (low, Telegram direct, лимит 6 батчей, ранний стоп).
-
-**Тест:** `pytest tests/test_step1_cost_optimization.py -q`
-
-## Шаг 4 — не делаем
-
-Кэш сырых URL в приложении (SQLite) — отложен.
-
-## Полный pytest
+## Тесты
 
 ```bash
 cd backend
-python -m pytest tests/test_step1_cost_optimization.py tests/test_news_search.py tests/test_pipeline_settings.py -q
+python -m pytest tests/test_step1_cost_optimization.py tests/test_news_search.py tests/test_step1_web_search_cache.py tests/test_pipeline_settings.py -q
 ```
+
+Ключевые тесты:
+
+- `test_step1_config_economy_defaults` — параметры экономии в конфиге
+- `test_tier_search_respects_max_batches` — лимит tier-батчей
+- `test_log_proxyapi_usage_reads_cached_tokens` — учёт cached_tokens
+
+## Живой прогон
+
+1. Перезапустить backend.
+2. Новый выпуск шаг 0→1.
+3. Смотреть `backend/logs/app-*.log`:
+   - `ProxyAPI usage | … cached_tokens=…`
+   - `Tier-поиск: … batches=N/12`
+   - `Web search: … citations=…`
+4. `GET /digests/{id}/step1/statistics` — `proxyapi_cost_rub`, воронка.
+
+## Связанные документы
+
+- [STEP1_OPTIMIZATION_BASELINE.md](STEP1_OPTIMIZATION_BASELINE.md) — целевые метрики
+- [STEP1_PIPELINE.md](STEP1_PIPELINE.md) — полная дорожка шага 1
