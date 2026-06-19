@@ -2,6 +2,7 @@
 
 from datetime import date
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from app.config import get_settings
 from app.services import digest_service as ds
@@ -61,6 +62,29 @@ def test_curious_prioritize_prefers_entertainment_over_tier_host() -> None:
     assert ordered[0].startswith("https://www.popmech.ru/")
 
 
+def test_curious_prioritize_prefers_keyword_slug_over_neutral_same_host() -> None:
+    from app.services.curious_tone import curious_raw_url_keyword_score
+
+    svc = ds.DigestService.__new__(ds.DigestService)
+    digest = _digest("curious")
+    funny = "https://vc.ru/ai/2953773-neiroset-smeshno-oshiblasya"
+    dry = "https://vc.ru/ai/2953773-rastushchie-zatraty-na-ii-agentov"
+    assert curious_raw_url_keyword_score(funny) > curious_raw_url_keyword_score(dry)
+    ordered = svc._step1_prioritize_curious_search_urls([dry, funny], digest)
+    assert ordered[0] == funny
+
+
+def test_curious_prioritize_drops_urls_outside_window() -> None:
+    svc = ds.DigestService.__new__(ds.DigestService)
+    digest = _digest("curious")
+    urls = [
+        "https://futurism.com/2023/04/01/epic-ai-fail",
+        "https://www.popmech.ru/science/funny-ai-id1/",
+    ]
+    ordered = svc._step1_prioritize_curious_search_urls(urls, digest)
+    assert ordered == ["https://www.popmech.ru/science/funny-ai-id1/"]
+
+
 def test_serious_prioritize_still_prefers_tier1_over_entertainment() -> None:
     svc = ds.DigestService.__new__(ds.DigestService)
     svc.settings = SimpleNamespace(source_tiers_path=get_settings().source_tiers_path)
@@ -69,7 +93,8 @@ def test_serious_prioritize_still_prefers_tier1_over_entertainment() -> None:
         "https://www.popmech.ru/science/funny-ai-id1/",
         "https://ria.ru/20260606/serious-ai.html",
     ]
-    ordered = svc._step1_prioritize_search_urls(urls, digest)
+    with patch.object(ds, "digest_news_anchor_date", return_value=digest.date):
+        ordered = svc._step1_prioritize_search_urls(urls, digest)
     assert ordered[0].startswith("https://ria.ru/")
 
 
@@ -81,3 +106,12 @@ def test_curious_search_query_uses_curious_seed_hint_not_tiers() -> None:
     assert "curious_source_hosts" in curious_q
     assert "tier-файла" in serious_q or "tier-2" in serious_q.lower()
     assert "curious_source_hosts" not in serious_q
+
+
+def test_search_query_includes_publication_year() -> None:
+    svc = ds.DigestService.__new__(ds.DigestService)
+    svc.settings = SimpleNamespace(source_tiers_path=get_settings().source_tiers_path)
+    digest = _digest("curious")
+    digest.date = date(2026, 6, 16)
+    q = svc._step1_search_query(digest)
+    assert "Год публикации: 2026" in q

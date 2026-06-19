@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
+from contextvars import ContextVar
 from datetime import date
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -16,12 +18,14 @@ if TYPE_CHECKING:
     from app.proxyapi_client import ProxyApiClient
 
 from app.curious_source_policy import (
+    curious_aggregator_host_markers,
     curious_host_search_groups,
     get_curious_source_policy,
     is_curious_aggregator_source,
     is_curious_blocked_host,
     is_curious_policy_source,
 )
+from app.services.step1_filters import CURIOUS_PREFILTER_DEFAULT_ORDER, record_step1_filter_reject
 from app.source_tiers_policy import (
     batched_site_host_groups,
     get_source_tiers_policy,
@@ -35,7 +39,8 @@ from app.services.digest_type_policy import (
     step1_curious_entertainment_anchor_en,
     step1_curious_entertainment_anchor_ru,
 )
-from app.services.step1_candidate_policy import is_product_tool_landing_url
+from app.services.curious_tone import curious_raw_url_rank_key
+from app.services.step1_candidate_policy import is_product_tool_landing_url, is_support_documentation_url
 
 logger = logging.getLogger("app.news_search")
 
@@ -76,12 +81,99 @@ _ARXIV_LIST_PATH_RE = re.compile(r"^/list(?:/|$)", re.IGNORECASE)
 _RIA_YEAR_INDEX_RE = re.compile(r"^/\d{8}/\d{4}\.html$", re.IGNORECASE)
 _AUTHOR_PATH_RE = re.compile(r"/authors?(?:/|$|\?)", re.IGNORECASE)
 _AUTH_GATE_PATH_RE = re.compile(r"/auth(?:/|$|\?)", re.IGNORECASE)
+_SECTION_LISTING_PATH_RE = re.compile(
+    r"(?:^|/)(?:humor|humour|umor|memes|kek|funny)(?:/|$)",
+    re.IGNORECASE,
+)
+_DTF_USER_PROFILE_RE = re.compile(r"^/id\d+/?$", re.IGNORECASE)
 
 
 _SUSPICIOUS_DATE_SEGMENT = re.compile(r"/(\d{8})(?:/|$)")
-_URL_PATH_DATE_COMPACT_RE = re.compile(r"/(\d{4})(\d{2})(\d{2})(?:/|$)")
-_URL_PATH_DATE_DASH_RE = re.compile(r"/(\d{4})-(\d{2})-(\d{2})(?:/|$)")
-_URL_PATH_DATE_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})(?:/|$)")
+_URL_PATH_DATE_COMPACT_RE = re.compile(r"/(\d{8})(?:/|\.html?|$)", re.IGNORECASE)
+_URL_PATH_DATE_DASH_RE = re.compile(r"/(\d{4})-(\d{1,2})-(\d{1,2})(?:/|$)")
+_URL_PATH_DATE_RE = re.compile(r"/(\d{4})/(\d{1,2})/(\d{1,2})(?:/|$)")
+_URL_PATH_DATE_DOT_DMY_RE = re.compile(r"/(\d{1,2})\.(\d{1,2})\.(\d{4})(?:/|$)")
+_URL_PATH_DATE_SLASH_DMY_RE = re.compile(r"/(\d{1,2})/(\d{1,2})/(\d{4})(?:/|$)")
+_URL_PATH_DATE_DASH_DMY_RE = re.compile(r"/(\d{1,2})-(\d{1,2})-(\d{4})(?:/|$)")
+_URL_PATH_DATE_EMBEDDED_ISO_RE = re.compile(
+    r"(?:^|[/_\-.])(\d{4})-(\d{1,2})-(\d{1,2})(?:[/_\-.]|\.html?|$)",
+    re.IGNORECASE,
+)
+_URL_PATH_MIN_YEAR = 2010
+_URL_PATH_MAX_YEAR = 2032
+
+
+def _url_path_plausible_ymd(year: int, month: int, day: int) -> date | None:
+    if year < _URL_PATH_MIN_YEAR or year > _URL_PATH_MAX_YEAR:
+        return None
+    if month < 1 or month > 12 or day < 1 or day > 31:
+        return None
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _url_path_disambiguate_day_month(first: int, second: int, year: int) -> date | None:
+    """DD/MM/YYYY vs MM/DD/YYYY: при неоднозначности — европейский DD/MM."""
+    if first > 31 or second > 31:
+        return None
+    if first > 12 and second <= 12:
+        return _url_path_plausible_ymd(year, second, first)
+    if second > 12 and first <= 12:
+        return _url_path_plausible_ymd(year, first, second)
+    if first <= 12 and second <= 12:
+        return _url_path_plausible_ymd(year, second, first) or _url_path_plausible_ymd(
+            year, first, second
+        )
+    return None
+
+
+def _url_path_date_from_compact(segment: str) -> date | None:
+    if len(segment) != 8 or not segment.isdigit():
+        return None
+    return _url_path_plausible_ymd(int(segment[:4]), int(segment[4:6]), int(segment[6:8]))
+
+
+def url_path_publication_day(url: str) -> date | None:
+    """Календарный день из path URL: YYYY/MM/DD, YYYYMMDD, DD.MM.YYYY, DD/MM/YYYY и т.п."""
+    try:
+        path = (urlparse(url).path or "").rstrip("/")
+    except Exception:
+        return None
+    if not path:
+        return None
+
+    for pattern in (_URL_PATH_DATE_COMPACT_RE,):
+        m = pattern.search(path)
+        if m:
+            got = _url_path_date_from_compact(m.group(1))
+            if got:
+                return got
+
+    for pattern in (_URL_PATH_DATE_RE, _URL_PATH_DATE_DASH_RE, _URL_PATH_DATE_EMBEDDED_ISO_RE):
+        m = pattern.search(path)
+        if not m:
+            continue
+        got = _url_path_plausible_ymd(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if got:
+            return got
+
+    m = _URL_PATH_DATE_DOT_DMY_RE.search(path)
+    if m:
+        got = _url_path_plausible_ymd(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        if got:
+            return got
+
+    for pattern in (_URL_PATH_DATE_SLASH_DMY_RE, _URL_PATH_DATE_DASH_DMY_RE):
+        m = pattern.search(path)
+        if not m:
+            continue
+        got = _url_path_disambiguate_day_month(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        if got:
+            return got
+
+    return None
 _EDITORIAL_DATED_STORY_RE = re.compile(
     r"^/\d{4}/\d{2}/\d{2}/\d{6,8}/([^/?#]+)",
     re.IGNORECASE,
@@ -112,6 +204,35 @@ _EDITORIAL_YEAR_SUFFIX_SLUG_RE = re.compile(
     r"/\d{4}/\d{2}/\d{2}/[^/]*-(?:202[4-9]|2030)(?:/|$)",
     re.IGNORECASE,
 )
+_SLUG_ONLY_DATED_EDITORIAL_RE = re.compile(
+    r"^/\d{4}/\d{2}/\d{2}/([^/?#]+)$",
+    re.IGNORECASE,
+)
+_SLUG_ONLY_EDITORIAL_HOST_MARKERS = (
+    "techcrunch.com",
+    "thenextweb.com",
+    "wired.com",
+    "theverge.com",
+)
+_LLM_GENERIC_SLUG_PHRASE_RE = re.compile(
+    r"(?:^|-)(?:"
+    r"ai-company-announces|ai-startup-launches|announces-partnership|"
+    r"launches-new-product|partnership-with-major|breakthroughs-20\d{2}|"
+    r"automating-marketing|major-retailer|ai-breakthroughs|ai-ethics-debate"
+    r")(?:-|$)",
+    re.IGNORECASE,
+)
+
+_STRICT_CITATIONS_ONLY: ContextVar[bool] = ContextVar("step1_strict_web_search_citations", default=False)
+
+
+def set_step1_strict_web_search_citations(strict: bool) -> None:
+    """Serious/tier_strict: не добирать URL из текста модели при нуле citations."""
+    _STRICT_CITATIONS_ONLY.set(bool(strict))
+
+
+def _step1_strict_citations_active() -> bool:
+    return bool(_STRICT_CITATIONS_ONLY.get())
 
 
 def parse_search_window_dates(window_prefix: str) -> tuple[date | None, date | None]:
@@ -134,20 +255,20 @@ def parse_search_window_dates(window_prefix: str) -> tuple[date | None, date | N
     return earliest, anchor
 
 
-def url_path_publication_day(url: str) -> date | None:
-    """Календарный день из path URL (compact, dash, slash) без HTTP."""
-    try:
-        path = urlparse(url).path or ""
-    except Exception:
-        return None
-    for pattern in (_URL_PATH_DATE_COMPACT_RE, _URL_PATH_DATE_DASH_RE, _URL_PATH_DATE_RE):
-        m = pattern.search(path)
-        if not m:
+def publication_day_from_url_candidates(*urls: str | None) -> date | None:
+    """Первая распознанная дата в path среди переданных URL (seed, финальный и т.д.)."""
+    seen: set[str] = set()
+    for raw in urls:
+        u = str(raw or "").strip()
+        if not u.startswith("http"):
             continue
-        try:
-            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        except ValueError:
+        key = u.lower().rstrip("/")
+        if key in seen:
             continue
+        seen.add(key)
+        pub_day = url_path_publication_day(u)
+        if pub_day is not None:
+            return pub_day
     return None
 
 
@@ -187,6 +308,19 @@ def _mit_tr_invented_path(norm_path: str) -> bool:
     return True
 
 
+def _slug_only_editorial_synthetic(host: str, norm_path: str) -> bool:
+    """Slug-only /YYYY/MM/DD/title/ на TechCrunch и др. — типичная галлюцинация web_search."""
+    if not any(marker in host for marker in _SLUG_ONLY_EDITORIAL_HOST_MARKERS):
+        return False
+    m = _SLUG_ONLY_DATED_EDITORIAL_RE.match(norm_path)
+    if not m:
+        return False
+    slug = m.group(1).lower()
+    if _LLM_GENERIC_SLUG_PHRASE_RE.search(slug):
+        return True
+    return slug.count("-") >= 5 and len(slug) >= 48 and bool(_LLM_GENERIC_SLUG_TAIL_RE.search(slug))
+
+
 def url_suspected_synthetic_editorial_story(url: str) -> bool:
     """Выдуманные URL editorial-сайтов (без HTTP): шаблонный slug, фейковый id, path без story id."""
     u = (url or "").strip()
@@ -198,9 +332,11 @@ def url_suspected_synthetic_editorial_story(url: str) -> bool:
         path = (parsed.path or "").rstrip("/")
     except Exception:
         return False
+    norm_path = path if path.startswith("/") else f"/{path}"
+    if _slug_only_editorial_synthetic(host, norm_path):
+        return True
     if not any(marker in host for marker in _SYNTHETIC_EDITORIAL_HOST_MARKERS):
         return False
-    norm_path = path if path.startswith("/") else f"/{path}"
     if "technologyreview.com" in host and _mit_tr_invented_path(norm_path):
         return True
     if _EDITORIAL_YEAR_SUFFIX_SLUG_RE.search(norm_path):
@@ -219,16 +355,32 @@ def search_url_raw_reject_reason(
     *,
     earliest: date | None = None,
     anchor: date | None = None,
+    is_enabled: Any | None = None,
+    curious_strict: bool = False,
+    tier_strict: bool = False,
 ) -> str | None:
     """Отсев сырого URL сразу после web_search (до HTTP шага 1)."""
     u = (url or "").strip()
     if not u.startswith("http"):
-        return "invalid_url"
-    pre = search_url_prefilter_reason(u)
+        code = "invalid_url"
+        if is_enabled is None or is_enabled(code):
+            record_step1_filter_reject(code)
+            return code
+        return None
+    pre = search_url_prefilter_reason(
+        u,
+        is_enabled=is_enabled,
+        curious_strict=curious_strict,
+        tier_strict=tier_strict,
+        earliest=earliest,
+        anchor=anchor,
+    )
     if pre:
         return pre
     if search_url_path_date_outside_window(u, earliest=earliest, anchor=anchor):
-        return "published_before_window"
+        if is_enabled is None or is_enabled("published_before_window"):
+            record_step1_filter_reject("published_before_window")
+            return "published_before_window"
     return None
 
 
@@ -262,8 +414,12 @@ def url_suspected_hallucinated(url: str) -> bool:
     if not u.startswith("http"):
         return True
     try:
-        path = (urlparse(u).path or "").rstrip("/")
+        parsed = urlparse(u)
+        path = (parsed.path or "").rstrip("/")
+        host = (parsed.hostname or "").lower()
     except Exception:
+        return True
+    if host in ("example.com", "www.example.com") or host.endswith(".example") or "invented" in host:
         return True
     if not path or path == "/":
         return True
@@ -316,6 +472,29 @@ def is_listing_page_url(url: str) -> bool:
         return True
     if re.search(r"^/technologies/?$", path):
         return True
+    if _SECTION_LISTING_PATH_RE.search(path):
+        return True
+    if "dtf.ru" in host and _DTF_USER_PROFILE_RE.match(path):
+        return True
+    return False
+
+
+def is_editorial_listing_title(title: str) -> bool:
+    """Заголовок ленты/рубрики/профиля — не отдельная статья (после HTTP)."""
+    t = (title or "").strip()
+    if len(t) < 8:
+        return False
+    low = t.lower()
+    if re.search(r"^новост\w*\s+\S", t, flags=re.IGNORECASE):
+        return True
+    if re.search(r"^новости\s*,\s*\d", t, flags=re.IGNORECASE):
+        return True
+    if re.search(r"^юмор\s*—", t, flags=re.IGNORECASE):
+        return True
+    if "все статьи и новости" in low or "все материалы по теме" in low:
+        return True
+    if re.match(r"^.{1,120}\(id\d+\)\s*$", t):
+        return True
     return False
 
 
@@ -364,6 +543,7 @@ def search_url_prefilter_reason(
             or is_listing_page_url(u)
             or is_topic_pool_page_url(u)
         ),
+        "support_documentation_page": is_support_documentation_url(u),
         "llm_hallucinated_url": url_suspected_hallucinated(u),
         "product_tool_page": is_product_tool_landing_url(u),
         "published_before_window": search_url_path_date_outside_window(
@@ -371,19 +551,26 @@ def search_url_prefilter_reason(
         ),
     }
     sequence = [x for x in (order or []) if x in checks]
-    for fid in (
-        "non_policy_source",
-        "aggregator_source",
-        "forbidden_media_source",
-        "news_listing_page",
-        "llm_hallucinated_url",
-        "product_tool_page",
-        "published_before_window",
-    ):
+    default_tail = (
+        tuple(x for x in CURIOUS_PREFILTER_DEFAULT_ORDER if x in checks)
+        if curious_strict
+        else (
+            "non_policy_source",
+            "aggregator_source",
+            "forbidden_media_source",
+            "news_listing_page",
+            "support_documentation_page",
+            "llm_hallucinated_url",
+            "product_tool_page",
+            "published_before_window",
+        )
+    )
+    for fid in default_tail:
         if fid not in sequence:
             sequence.append(fid)
     for fid in sequence:
         if enabled(fid) and checks.get(fid):
+            record_step1_filter_reject(fid)
             return fid
     return None
 
@@ -427,6 +614,39 @@ def is_topic_pool_page_url(url: str) -> bool:
     return False
 
 
+def is_step1_listing_seed_url(url: str) -> bool:
+    """
+    URL ленты/рубрики/агрегатора: разворачивать в статьи на шаге 1, не брать как кандидата.
+    Шире, чем is_listing_page_url — совпадает с эвристикой prefilter news_listing_page.
+    """
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    if is_listing_page_url(u) or is_topic_pool_page_url(u):
+        return True
+    if is_curious_aggregator_source(u) or is_aggregator_source(u):
+        return True
+    try:
+        path = (urlparse(u).path or "").rstrip("/").lower() or "/"
+    except Exception:
+        return False
+    if path in ("", "/"):
+        return True
+    if any(x in path for x in ("/search", "/tag/", "/tags/", "/category/", "/topics/")):
+        return True
+    if path.endswith("/neiroseti"):
+        return True
+    if path.endswith("/artificial_intelligence") or path.endswith("/artificial-intelligence"):
+        return True
+    if path in ("/artificial-intelligence", "/ai", "/topic/artificial-intelligence"):
+        return True
+    if re.search(r"^/articles/[\w_-]+$", path):
+        return True
+    if is_search_noise_url(u):
+        return True
+    return False
+
+
 def fetch_article_urls_raw_merged(
     settings: "Settings",
     query: str,
@@ -437,7 +657,7 @@ def fetch_article_urls_raw_merged(
     include_domains: list[str] | None = None,
     allowed_hosts: list[str] | None = None,
     force_proxyapi: bool = False,
-    proxy_fallback_on_empty: bool = False,
+    proxy_fallback_on_empty: bool = True,
     curious_search: bool = False,
 ) -> list[str]:
     """
@@ -445,44 +665,110 @@ def fetch_article_urls_raw_merged(
     При web_search_prefer_alt_providers: SerpAPI/Tavily первыми, ProxyAPI — если мало URL или force_proxyapi.
     """
     fetch_cap = max(limit, 15)
-    prefer_alt = bool(getattr(settings, "step1_web_search_prefer_alt_providers", True))
+    prefer_alt = bool(getattr(settings, "step1_web_search_prefer_alt_providers", False))
     min_before_proxy = max(0, int(getattr(settings, "step1_min_urls_before_proxyapi", 5) or 5))
     merged: list[str] = []
 
-    if settings.serpapi_api_key:
-        merged.extend(_serpapi_google_news_urls(settings.serpapi_api_key, query, fetch_cap))
-    if settings.tavily_api_key:
-        merged.extend(
-            _tavily_search_urls(
-                settings.tavily_api_key,
-                query,
-                fetch_cap,
-                include_domains=include_domains or allowed_hosts,
+    from app.services.step1_phase_timers import step1_phase
+
+    with step1_phase("alt_search"):
+        if settings.serpapi_api_key:
+            merged.extend(_serpapi_google_news_urls(settings.serpapi_api_key, query, fetch_cap))
+        if settings.tavily_api_key:
+            merged.extend(
+                _tavily_search_urls(
+                    settings.tavily_api_key,
+                    query,
+                    fetch_cap,
+                    include_domains=include_domains or allowed_hosts,
+                )
             )
-        )
     merged = _uniq_urls(merged)
 
     need_proxy = force_proxyapi or not prefer_alt or len(merged) < min_before_proxy
     if need_proxy and settings.enable_web_fetch and settings.proxyapi_web_search_enabled and proxy is not None:
-        try:
-            proxy_urls = proxy.search_news_article_urls(
-                query,
-                limit=fetch_cap,
-                search_context_size=search_context_size,
-                allowed_hosts=allowed_hosts,
-                fallback_on_empty=proxy_fallback_on_empty,
-                curious_search=curious_search,
-            )
-            if proxy_urls:
-                merged = _uniq_urls([*merged, *proxy_urls])
-                logger.info(
-                    "Веб-поиск: ProxyAPI web_search | count=%s prefer_alt=%s force=%s",
-                    len(proxy_urls),
-                    prefer_alt,
-                    force_proxyapi,
+        from app.services.step1_web_search_stats import (
+            current_step1_web_search_stats,
+            record_empty_citation_web_search,
+            step1_web_search_api_cap_reached,
+        )
+
+        ws = current_step1_web_search_stats()
+        empty_streak_skip = (
+            ws is not None
+            and int(getattr(ws, "empty_citation_streak", 0) or 0) >= 4
+            and not force_proxyapi
+        )
+        if (
+            current_step1_web_search_stats() is not None
+            and current_step1_web_search_stats().api_cap is not None
+            and step1_web_search_api_cap_reached()
+        ) or empty_streak_skip:
+            if empty_streak_skip:
+                logger.warning(
+                    "Веб-поиск: ProxyAPI пропущен — серия пустых citation URL (%s) | query=%s",
+                    getattr(ws, "empty_citation_streak", 0),
+                    query[:120],
                 )
-        except Exception:
-            logger.warning("ProxyAPI web_search: ошибка запроса", exc_info=True)
+            else:
+                logger.warning(
+                    "Веб-поиск: ProxyAPI пропущен — лимит web_search API шага 1 | query=%s",
+                    query[:120],
+                )
+        else:
+            with step1_phase("web_search"):
+                proxy_urls: list[str] | None = None
+                cache_used = False
+                use_cache = not force_proxyapi and bool(getattr(settings, "step1_web_search_cache_enabled", True))
+                if use_cache:
+                    from app.services.step1_web_search_cache import get_cached_proxy_search_urls
+
+                    proxy_urls = get_cached_proxy_search_urls(
+                        settings,
+                        query=query,
+                        limit=fetch_cap,
+                        search_context_size=search_context_size,
+                        allowed_hosts=allowed_hosts,
+                        curious_search=curious_search,
+                        proxy_fallback_on_empty=proxy_fallback_on_empty,
+                    )
+                    if proxy_urls:
+                        cache_used = True
+                if proxy_urls is None:
+                    try:
+                        proxy_urls = proxy.search_news_article_urls(
+                            query,
+                            limit=fetch_cap,
+                            search_context_size=search_context_size,
+                            allowed_hosts=allowed_hosts,
+                            fallback_on_empty=proxy_fallback_on_empty,
+                            curious_search=curious_search,
+                        )
+                        if use_cache and proxy_urls:
+                            from app.services.step1_web_search_cache import store_proxy_search_urls_cache
+
+                            store_proxy_search_urls_cache(
+                                settings,
+                                proxy_urls,
+                                query=query,
+                                limit=fetch_cap,
+                                search_context_size=search_context_size,
+                                allowed_hosts=allowed_hosts,
+                                curious_search=curious_search,
+                                proxy_fallback_on_empty=proxy_fallback_on_empty,
+                            )
+                    except Exception:
+                        logger.warning("ProxyAPI web_search: ошибка запроса", exc_info=True)
+                        proxy_urls = []
+                if proxy_urls:
+                    merged = _uniq_urls([*merged, *proxy_urls])
+                    logger.info(
+                        "Веб-поиск: ProxyAPI web_search | count=%s prefer_alt=%s force=%s cache=%s",
+                        len(proxy_urls),
+                        prefer_alt,
+                        force_proxyapi,
+                        cache_used,
+                    )
 
     out = _uniq_urls(merged)
     if out:
@@ -507,6 +793,8 @@ def fetch_tier_prioritized_raw_urls(
     policy: Any | None = None,
     seed_urls: tuple[str, ...] | None = None,
     current_verified: int = 0,
+    pool_shortfall: int = 0,
+    deadline_monotonic: float | None = None,
 ) -> list[str]:
     """
     Поиск строго по tier-1 → tier-4 из source_tiers.txt: батчи site: запросов по хостам политики.
@@ -514,21 +802,26 @@ def fetch_tier_prioritized_raw_urls(
     """
     p = policy or get_source_tiers_policy()
     seeds = tuple(seed_urls or p.search_seed_urls)
-    per_batch_limit = max(6, min(12, max(fetch_limit // 6, 6)))
-    raw_target = max(14, min(fetch_limit, 22))
-    min_unique_hosts_target = max(6, min(10, max(fetch_limit // 2, 6)))
-    max_urls_per_host = max(2, min(4, max(fetch_limit // 12, 2)))
-    short_pool = max(0, int(current_verified or 0)) < 10
+    short_pool = max(0, int(current_verified or 0)) < 10 or max(0, int(pool_shortfall or 0)) > 0
     if short_pool:
-        max_urls_per_host = max(3, min(5, max_urls_per_host + 1))
+        # Как в курьёзной ветке: больше URL на батч и не останавливаться на первой «достаточной» выдаче.
+        per_batch_limit = max(14, min(32, max(fetch_limit // 3, 16)))
+        raw_target = max(20, min(fetch_limit, 36))
+        min_unique_hosts_target = max(6, min(12, max(fetch_limit // 3, 8)))
+        max_urls_per_host = max(3, min(5, max(fetch_limit // 10, 3)))
+    else:
+        per_batch_limit = max(6, min(12, max(fetch_limit // 6, 6)))
+        raw_target = max(14, min(fetch_limit, 22))
+        min_unique_hosts_target = max(6, min(10, max(fetch_limit // 2, 6)))
+        max_urls_per_host = max(2, min(4, max(fetch_limit // 12, 2)))
     merged: list[str] = []
     seen: set[str] = set()
     host_counts: dict[str, int] = {}
     max_batches = max(1, int(getattr(settings, "step1_tier_max_web_search_batches", 6) or 6))
     if short_pool:
-        raw_target = max(raw_target, min(fetch_limit, 30))
-        min_unique_hosts_target = max(4, min_unique_hosts_target - 2)
         max_batches = max(max_batches, 10)
+        if pool_shortfall >= 5:
+            max_batches = max(max_batches, 14)
     batches_used = 0
     medium_escalations_used = 0
     preview_fallbacks_used = 0
@@ -536,8 +829,18 @@ def fetch_tier_prioritized_raw_urls(
     max_preview_fallbacks = 1
     window_earliest, window_anchor = parse_search_window_dates(window_prefix)
     ru_hosts_seen = 0
+    tier_ctx = (
+        "medium"
+        if short_pool
+        else str(search_context_size or "low").strip().lower() or "low"
+    )
+    tier_phase_started = time.monotonic()
+    tier_phase_wall_sec = 150 if short_pool and pool_shortfall >= 5 else (90 if short_pool else None)
+    empty_batch_streak = 0
 
     def _enough_coverage() -> bool:
+        if short_pool and pool_shortfall >= 5:
+            return False
         return len(merged) >= raw_target and len(host_counts) >= min_unique_hosts_target
 
     def _accept(urls: list[str]) -> None:
@@ -564,6 +867,17 @@ def fetch_tier_prioritized_raw_urls(
                 host_counts[host] = host_counts.get(host, 0) + 1
 
     for tier_label, hosts in policy_tier_host_groups_ru_first(p):
+        if tier_phase_wall_sec is not None and (time.monotonic() - tier_phase_started) >= tier_phase_wall_sec:
+            logger.warning(
+                "Tier-поиск: остановка по лимиту фазы | merged=%s batches=%s wall_sec=%s",
+                len(merged),
+                batches_used,
+                tier_phase_wall_sec,
+            )
+            break
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            logger.warning("Tier-поиск: остановка по лимиту времени | batches=%s", batches_used)
+            break
         if not hosts:
             continue
         base_tier = tier_label.removesuffix("-defer")
@@ -571,11 +885,16 @@ def fetch_tier_prioritized_raw_urls(
             continue
         if tier_label.endswith("-defer"):
             # Дорогие батчи с частыми 404: только если RU-выдача не наполнила пул.
+            if short_pool and len(merged) < 6:
+                continue
             if _enough_coverage() or (ru_hosts_seen >= 2 and len(merged) >= max(8, raw_target // 2)):
                 continue
         if _enough_coverage():
             break
         for batch in batched_site_host_groups(hosts, batch_size=3):
+            if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+                logger.warning("Tier-поиск: остановка по лимиту времени в батче | tier=%s", tier_label)
+                break
             if _enough_coverage() or batches_used >= max_batches:
                 break
             matching_seeds = [s for s in seeds if any(marker in s.lower() for marker in batch)]
@@ -628,14 +947,16 @@ def fetch_tier_prioritized_raw_urls(
                 query,
                 limit=per_batch_limit,
                 proxy=proxy,
-                search_context_size=search_context_size,
+                search_context_size=tier_ctx,
                 include_domains=include_domains,
                 allowed_hosts=allowed_hosts,
+                force_proxyapi=short_pool,
+                proxy_fallback_on_empty=short_pool,
             )
             if (
                 not batch_urls
-                and search_context_size == "low"
-                and (tier_label in ("Tier-1", "Tier-2") or has_aggregator_hosts)
+                and tier_ctx == "low"
+                and (tier_label in ("Tier-1", "Tier-2") or has_aggregator_hosts or short_pool)
                 and medium_escalations_used < max_medium_escalations
             ):
                 medium_escalations_used += 1
@@ -658,9 +979,20 @@ def fetch_tier_prioritized_raw_urls(
                     search_context_size="medium",
                     include_domains=include_domains,
                     allowed_hosts=allowed_hosts,
-                    proxy_fallback_on_empty=use_preview_fallback,
+                    proxy_fallback_on_empty=use_preview_fallback or short_pool,
+                    force_proxyapi=short_pool,
                 )
             batches_used += 1
+            if not batch_urls:
+                empty_batch_streak += 1
+            else:
+                empty_batch_streak = 0
+            if short_pool and empty_batch_streak >= 4 and len(merged) >= 4:
+                logger.warning(
+                    "Tier-поиск: остановка — серия пустых батчей при достаточном merged | merged=%s",
+                    len(merged),
+                )
+                break
             if any(is_russian_host(h, p) or str(h).endswith(".ru") for h in batch):
                 ru_hosts_seen += 1
             _accept(batch_urls)
@@ -688,6 +1020,9 @@ def fetch_curious_prioritized_raw_urls(
     proxy: "ProxyApiClient | None" = None,
     search_context_size: str | None = None,
     policy: Any | None = None,
+    max_search_batches: int | None = None,
+    skip_aggregator_tier: bool = False,
+    pool_shortfall: int = 0,
 ) -> list[str]:
     """
     Поиск для курьёзного выпуска: сначала RU-домены из curious_source_hosts.txt, затем зарубежные.
@@ -699,11 +1034,20 @@ def fetch_curious_prioritized_raw_urls(
     seen: set[str] = set()
     host_counts: dict[str, int] = {}
     max_urls_per_host = 5
-    collect_cap = max(fetch_limit * 3, fetch_limit + 24, 60)
+    collect_cap = max(fetch_limit * 3, fetch_limit + 24, 48) if max_search_batches else max(
+        fetch_limit * 4, fetch_limit + 40, 80
+    )
+    agg_markers = curious_aggregator_host_markers(p)
+    search_batches_used = 0
+    escalate_shortfall = max(0, int(pool_shortfall or 0))
+
+    def _host_is_aggregator_marker(host: str) -> bool:
+        h = (host or "").lower()
+        return bool(h) and any(m in h for m in agg_markers)
 
     window_earliest, window_anchor = parse_search_window_dates(window_prefix)
 
-    def _rank_url(url: str) -> tuple[int, int, int]:
+    def _rank_url(url: str) -> tuple[int, int, int, int, int]:
         day = url_path_publication_day(url)
         host = (urlparse(url).hostname or "").lower()
         if search_url_path_date_outside_window(
@@ -723,15 +1067,31 @@ def fetch_curious_prioritized_raw_urls(
             source_rank = 1
         else:
             source_rank = 2
-        return (fresh_rank, source_rank, -(day.toordinal() if day else 0))
+        return curious_raw_url_rank_key(
+            url,
+            fresh_rank=fresh_rank,
+            source_rank=source_rank,
+            day_ordinal=day.toordinal() if day else None,
+        )
 
     def _accept(urls: list[str]) -> None:
         for raw in urls:
             u = str(raw or "").strip()
-            if not u.startswith("http") or not is_curious_policy_source(u, p):
+            if not u.startswith("http"):
+                continue
+            is_aggregator = is_curious_aggregator_source(u, p)
+            if not is_aggregator and not is_curious_policy_source(u, p):
+                continue
+            if search_url_path_date_outside_window(
+                u, earliest=window_earliest, anchor=window_anchor
+            ):
                 continue
             if search_url_raw_reject_reason(
-                u, earliest=window_earliest, anchor=window_anchor
+                u,
+                earliest=window_earliest,
+                anchor=window_anchor,
+                curious_strict=True,
+                is_enabled=lambda fid: fid != "aggregator_source",
             ):
                 continue
             key = u.lower().rstrip("/")
@@ -756,11 +1116,34 @@ def fetch_curious_prioritized_raw_urls(
     for tier_label, hosts in groups:
         if not hosts:
             continue
+        if skip_aggregator_tier and tier_label == "Curious-T2-Aggregators":
+            continue
+        search_hosts = hosts
+        if tier_label in ("Curious-T1", "Curious-T2"):
+            search_hosts = tuple(h for h in hosts if not _host_is_aggregator_marker(h))
+            if not search_hosts:
+                continue
+        host_batch_groups: list[tuple[str, ...]]
+        if tier_label == "Curious-T1":
+            ru_ent_hosts = tuple(h for h in search_hosts if h in p.curious_ru_entertainment_hosts)
+            other_hosts = tuple(h for h in search_hosts if h not in p.curious_ru_entertainment_hosts)
+            host_batch_groups = [
+                *batched_site_host_groups(ru_ent_hosts, batch_size=3),
+                *batched_site_host_groups(other_hosts, batch_size=3),
+            ]
+        else:
+            host_batch_groups = list(batched_site_host_groups(search_hosts, batch_size=3))
         # В curious-поиске нельзя останавливаться на первой группе доменов:
         # иначе cap заполняется старым evergreen-контентом и поиск не доходит до Habr/VC/foreign.
         if len(merged) >= collect_cap:
             break
-        for batch in batched_site_host_groups(hosts, batch_size=3):
+        for batch in host_batch_groups:
+            if (
+                max_search_batches is not None
+                and search_batches_used >= max_search_batches
+                and escalate_shortfall < 5
+            ):
+                break
             if tier_label == "Curious-T2":
                 terms = topic_terms_ru if any(h in batch for h in p.curious_ru_tech_hosts) else topic_terms_foreign
             elif tier_label == "Curious-T1":
@@ -806,7 +1189,14 @@ def fetch_curious_prioritized_raw_urls(
                 allowed_hosts=list(batch),
                 curious_search=True,
             )
+            search_batches_used += 1
             _accept(batch_urls)
+        if (
+            max_search_batches is not None
+            and search_batches_used >= max_search_batches
+            and escalate_shortfall < 5
+        ):
+            break
         if len(merged) >= collect_cap:
             break
     if merged:
@@ -818,7 +1208,7 @@ def fetch_curious_prioritized_raw_urls(
             collect_cap,
             min(len(merged), max(fetch_limit * 2, fetch_limit + 12)),
         )
-    return_cap = max(fetch_limit * 2, fetch_limit + 12, 48)
+    return_cap = max(fetch_limit * 3, fetch_limit + 24, 60)
     return merged[: min(len(merged), return_cap)]
 
 
@@ -837,6 +1227,39 @@ def fetch_article_urls_from_search(
         settings, query, limit=limit, proxy=proxy, search_context_size=search_context_size
     )
     return _filter_search_urls(raw, limit, is_enabled=is_enabled, order=order)
+
+
+def _vetted_model_urls_from_text(text: str, limit: int) -> list[str]:
+    """URL из текста модели: без галлюцинаций и с prefilter — fallback при пустых citations."""
+    raw = (text or "").strip()
+    if not raw:
+        return []
+    stripped = _strip_markdown_fence(raw)
+    raw_urls: list[str] = []
+    try:
+        if stripped.startswith("["):
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                raw_urls = [
+                    u.strip()
+                    for u in parsed
+                    if isinstance(u, str) and u.strip().startswith("http")
+                ]
+    except json.JSONDecodeError:
+        pass
+    if not raw_urls:
+        found = re.findall(r"https?://[^\s\]\)\"'<>]+", raw)
+        raw_urls = [u.rstrip(".,;:)") for u in found if u.startswith("http")]
+    out: list[str] = []
+    for u in raw_urls:
+        if url_suspected_hallucinated(u):
+            continue
+        if search_url_prefilter_reason(u):
+            continue
+        out.append(u.split("#")[0])
+        if len(out) >= limit:
+            break
+    return out
 
 
 def extract_http_urls_from_text(text: str, limit: int = 20) -> list[str]:
@@ -858,28 +1281,166 @@ def extract_http_urls_from_text(text: str, limit: int = 20) -> list[str]:
     return _filter_search_urls(cleaned, limit)
 
 
-def extract_urls_from_responses_payload(response: Any, limit: int = 20) -> list[str]:
-    """Собирает URL из Responses API: output_text, annotations, citations."""
+_CITATION_ANNOTATION_TYPES = frozenset({"url_citation", "citation", "web_search_result"})
+
+
+def _url_from_annotation(ann: Any) -> str | None:
+    if ann is None:
+        return None
+    if isinstance(ann, dict):
+        ann_type = str(ann.get("type") or "").strip().lower()
+        url = ann.get("url")
+    else:
+        ann_type = str(getattr(ann, "type", None) or "").strip().lower()
+        url = getattr(ann, "url", None)
+    if not isinstance(url, str) or not url.startswith("http"):
+        return None
+    if ann_type and ann_type not in _CITATION_ANNOTATION_TYPES:
+        return None
+    return url.split("#")[0]
+
+
+def _citation_urls_from_response_output(response: Any) -> list[str]:
     urls: list[str] = []
-    text_parts: list[str] = []
-
-    output_text = getattr(response, "output_text", None)
-    if isinstance(output_text, str) and output_text.strip():
-        text_parts.append(output_text)
-
     for item in getattr(response, "output", None) or []:
         content = getattr(item, "content", None) or []
         for block in content:
-            block_type = getattr(block, "type", None)
-            if block_type == "output_text":
-                text_parts.append(getattr(block, "text", "") or "")
             for ann in getattr(block, "annotations", None) or []:
-                url = getattr(ann, "url", None)
-                if isinstance(url, str) and url.startswith("http"):
-                    urls.append(url.split("#")[0])
-    for text in text_parts:
-        urls.extend(extract_http_urls_from_text(text, limit))
-    return _uniq_urls(_filter_search_urls(urls, limit))
+                url = _url_from_annotation(ann)
+                if url:
+                    urls.append(url)
+    return urls
+
+
+def _response_text_parts(response: Any) -> list[str]:
+    text_parts: list[str] = []
+    output_text = getattr(response, "output_text", None)
+    if isinstance(output_text, str) and output_text.strip():
+        text_parts.append(output_text)
+    for item in getattr(response, "output", None) or []:
+        content = getattr(item, "content", None) or []
+        for block in content:
+            if getattr(block, "type", None) == "output_text":
+                text_parts.append(getattr(block, "text", "") or "")
+    return text_parts
+
+
+def _finalize_web_search_urls(
+    citation_urls: list[str],
+    text_parts: list[str],
+    limit: int,
+    *,
+    citations_only: bool,
+    log_channel: str,
+) -> list[str]:
+    """Citations в приоритете; при нехватке — проверенные URL из текста модели (без галлюцинаций)."""
+    joined = "\n".join(text_parts)
+    if not citations_only:
+        model_urls: list[str] = []
+        for text in text_parts:
+            model_urls.extend(extract_http_urls_from_text(text, limit))
+        try:
+            from app.services.step1_web_search_stats import record_web_search_citation_urls
+
+            record_web_search_citation_urls(len(citation_urls), model_urls_dropped=0)
+        except ImportError:
+            pass
+        return _uniq_urls(_filter_search_urls([*citation_urls, *model_urls], limit))
+
+    out = _uniq_urls(_filter_search_urls(citation_urls, limit))
+    dropped = len(extract_http_urls_from_text(joined, limit)) if joined.strip() else 0
+    supplemented = 0
+    strict = _step1_strict_citations_active()
+    allow_vetted = len(out) < limit and joined.strip()
+    if strict and len(citation_urls) == 0:
+        allow_vetted = False
+    if allow_vetted:
+        vetted = _vetted_model_urls_from_text(joined, limit)
+        seen = {u.lower().rstrip("/") for u in out}
+        for u in vetted:
+            key = u.lower().rstrip("/")
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(u)
+            supplemented += 1
+            if len(out) >= limit:
+                break
+        if supplemented:
+            if out and len(citation_urls) == 0:
+                logger.info(
+                    "Web search: vetted model URL fallback (%s) | count=%s dropped_raw=%s",
+                    log_channel,
+                    len(out),
+                    dropped,
+                )
+            else:
+                logger.info(
+                    "Web search: vetted supplement (%s) | citations=%s added=%s total=%s",
+                    log_channel,
+                    len(citation_urls),
+                    supplemented,
+                    len(out),
+                )
+        elif dropped and not out:
+            logger.info(
+                "Web search: citations-only — отброшено URL из текста модели | dropped=%s",
+                dropped,
+            )
+    try:
+        from app.services.step1_web_search_stats import record_web_search_citation_urls
+
+        record_web_search_citation_urls(len(citation_urls), model_urls_dropped=max(0, dropped - supplemented))
+    except ImportError:
+        pass
+    return out
+
+
+def extract_urls_from_chat_web_search_response(
+    response: Any,
+    limit: int = 20,
+    *,
+    citations_only: bool = True,
+) -> list[str]:
+    """URL из chat completions + web_search_options: citations в приоритете, vetted-добор при нехватке."""
+    citation_urls: list[str] = []
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return []
+    message = getattr(choices[0], "message", None)
+    if message is None:
+        return []
+    for ann in getattr(message, "annotations", None) or []:
+        url = _url_from_annotation(ann)
+        if url:
+            citation_urls.append(url)
+    text = getattr(message, "content", None) or ""
+    text_parts = [text] if isinstance(text, str) and text.strip() else []
+    return _finalize_web_search_urls(
+        citation_urls,
+        text_parts,
+        limit,
+        citations_only=citations_only,
+        log_channel="chat",
+    )
+
+
+def extract_urls_from_responses_payload(
+    response: Any,
+    limit: int = 20,
+    *,
+    citations_only: bool = True,
+) -> list[str]:
+    """Responses API: citations в приоритете; vetted URL из текста — если citations пусты или их мало."""
+    citation_urls = _citation_urls_from_response_output(response)
+    text_parts = _response_text_parts(response)
+    return _finalize_web_search_urls(
+        citation_urls,
+        text_parts,
+        limit,
+        citations_only=citations_only,
+        log_channel="responses",
+    )
 
 
 def _filter_search_urls(

@@ -343,12 +343,130 @@ class PoolStatsOut(BaseModel):
     forbidden_count: int = 0
 
 
+class Step1ToolUsageOut(BaseModel):
+    id: str
+    label: str
+    color: str = "#94a3b8"
+    time_sec: int = 0
+    time_human: str = "—"
+    cost_rub: float = 0.0
+    time_share: float = 0.0
+    cost_share: float = 0.0
+    calls: int | None = None
+    urls: int | None = None
+    detail: str | None = None
+
+
+class Step1UsageBreakdownOut(BaseModel):
+    total_time_sec: int = 0
+    total_time_human: str = "—"
+    total_cost_rub: float = 0.0
+    cost_source: str = "none"
+    cost_source_note: str = ""
+    tools: list[Step1ToolUsageOut] = Field(default_factory=list)
+    funnel: dict[str, Any] = Field(default_factory=dict)
+    summary: dict[str, Any] = Field(default_factory=dict)
+
+
 class PoolCollectionStatsOut(BaseModel):
     pool: PoolStatsOut
     last_run: Step1RunStatsOut | None = None
     step1_total_rub: float = 0.0
     step1_costs: list[LlmCostRecordOut] = Field(default_factory=list)
+    step1_usage: Step1UsageBreakdownOut | None = None
     history: list[Step1RunStatsOut] = Field(default_factory=list)
+
+
+class Step1StatisticsSummaryOut(BaseModel):
+    total_links: int = 0
+    in_pool: int = 0
+    rejected: int = 0
+    verified_passed: int = 0
+
+
+class Step1DominantRejectOut(BaseModel):
+    code: str
+    label: str = ""
+    count: int = 0
+    share_pct: float = 0.0
+    is_dominant: bool = False
+
+
+class Step1FunnelBottleneckOut(BaseModel):
+    stage: str
+    label: str = ""
+    lost: int = 0
+    detail: str = ""
+
+
+class Step1RecommendationOut(BaseModel):
+    priority: str = "medium"
+    title: str = ""
+    detail: str = ""
+
+
+class Step1StatisticsInsightsOut(BaseModel):
+    headline: str = ""
+    stop_reason: str = ""
+    dominant_rejects: list[Step1DominantRejectOut] = Field(default_factory=list)
+    funnel_bottlenecks: list[Step1FunnelBottleneckOut] = Field(default_factory=list)
+    efficiency_notes: list[str] = Field(default_factory=list)
+    recommendations: list[Step1RecommendationOut] = Field(default_factory=list)
+
+
+class Step1LinkAnalyticsOut(BaseModel):
+    id: int
+    url: str
+    host: str = ""
+    title: str = ""
+    source: str = ""
+    published_at: str = ""
+    source_stage: str = ""
+    outcome: str = "rejected"
+    link_status: bool = False
+    headline_editorial_ok: bool = False
+    page_verification_passed: bool = False
+    in_candidate_pool: bool = False
+    reject_codes: list[str] = Field(default_factory=list)
+    reject_labels: list[str] = Field(default_factory=list)
+    verification_comment: str = ""
+
+
+class Step1StatisticsOut(BaseModel):
+    digest_id: int
+    digest_type: str = "serious"
+    discovery_run_id: int | None = None
+    generated_at: datetime
+    summary: Step1StatisticsSummaryOut
+    step1_collection_meta: dict[str, Any] = Field(default_factory=dict)
+    rejected_reasons_summary: dict[str, int] = Field(default_factory=dict)
+    step1_reject_audit: dict[str, Any] = Field(default_factory=dict)
+    curious_tone_audit: dict[str, Any] = Field(default_factory=dict)
+    pool_collection_stats: PoolCollectionStatsOut
+    registry_buckets: dict[str, int] = Field(default_factory=dict)
+    filter_counters: dict[str, int] = Field(default_factory=dict)
+    links: list[Step1LinkAnalyticsOut] = Field(default_factory=list)
+    insights: Step1StatisticsInsightsOut | None = None
+
+
+class Step1LiveProgressOut(BaseModel):
+    running: bool = False
+    phase: str = ""
+    phase_key: str = ""
+    elapsed_sec: int = 0
+    elapsed_human: str = "—"
+    iteration: int = 0
+    web_search_api_calls: int = 0
+    web_search_citation_urls: int = 0
+    web_search_cost_est_rub: float = 0.0
+    urls_raw: int = 0
+    urls_raw_merged: int = 0
+    urls_prefilter_rejected: int = 0
+    urls_sent_to_http: int = 0
+    verified_pool: int = 0
+    rejected_total: int = 0
+    collection_target: int = 15
+    cancel_requested: bool = False
 
 
 class DigestDetail(BaseModel):

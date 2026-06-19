@@ -72,7 +72,7 @@ The note references model safeguards and incidents in financial systems.
         return _Resp(200, "https://www.reuters.com/technology/example", html_challenge)
 
     def fake_requests_get(url: str, *args, **kwargs):
-        assert "r.jina.ai/http://" in url
+        assert "r.jina.ai/" in url
         return _Resp(200, url, reader_md)
 
     monkeypatch.setattr(ds, "_http_get_html_for_article", fake_http_get)
@@ -220,6 +220,22 @@ def test_verify_rejects_listing_page_url_without_fetch():
     ds.DigestService._verify_llm_candidate_dict(svc, _digest(), item)
     assert "news_listing_page" in str(item.get("verification_comment") or "")
     assert item.get("link_status") is not True
+
+
+def test_sostav_blog_post_not_treated_as_listing_page():
+    """Блоговая вёрстка sostav с заголовком и текстом — не лента."""
+    page_url = "https://www.sostav.ru/blogs/290069/87070"
+    html = "<html><body>" + "<a href='/blogs/1/2'>x</a>" * 35 + "<p>текст</p>" * 2 + "</body></html>"
+    corpus = "x" * 220
+    bundle = {
+        "ok": True,
+        "article_markers": False,
+        "soft_article_signals": False,
+        "headline_strict": True,
+        "headline": "ИИ научился шутить",
+        "topic_corpus": corpus,
+    }
+    assert ds._is_news_listing_page(page_url, html, bundle) is False
 
 
 def test_listing_page_detected_and_extracts_article_links():

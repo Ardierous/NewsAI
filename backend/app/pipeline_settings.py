@@ -21,11 +21,15 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
         "step1": {
             "search_tier1_min_raw_urls": 15,
             "max_cost_rub": 40.0,
+            "max_web_search_api_calls": 0,
+            "web_search_api_bonus_near_target": 10,
             "web_search_context_size": "low",
             "web_search_context_size_supplement": "low",
             "tier_max_web_search_batches": 6,
             "min_urls_before_proxyapi": 5,
             "web_search_prefer_alt_providers": False,
+            "web_search_cache_enabled": True,
+            "web_search_cache_ttl_days": 90,
             "batch_size": 8,
             "search_fetch_limit": 36,
             "urls_checked_per_collect": 24,
@@ -47,6 +51,22 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "telegram_direct_fallback": True,
             "telegram_proxyapi_context_size": "low",
             "seed_urls_max": 35,
+            "curious_yield": {
+                "enabled": True,
+                "min_verified": 10,
+                "target_pool": 12,
+                "soft_time_limit_sec": 480,
+                "hard_time_limit_sec": 600,
+                "max_cost_rub": 50.0,
+                "min_collection_iterations": 2,
+                "supplement_rounds_per_iter": 2,
+                "max_search_batches": 5,
+                "skip_aggregator_search": True,
+                "no_progress_limit": 2,
+                "seed_listing_scan_limit": 4,
+                "entertainment_rescue_queries": 2,
+                "rescue_collect_batch": 8,
+            },
         },
         "step2": {"max_cost_rub": 50.0},
         "workflow": {"auto_run_step3_after_order": True},
@@ -57,6 +77,25 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "file_name": "app.log",
             "max_bytes": 5_000_000,
             "backup_count": 5,
+            "step1": {
+                "filter_stats_every_n": 50,
+                "reject_audit_top_reasons": 5,
+                "reject_samples_per_reason": 8,
+                "curious_tone": {
+                    "enabled": True,
+                    "level": "INFO",
+                    "separate_file": True,
+                    "file_name": "step1-curious-tone.log",
+                    "log_accept": True,
+                    "log_reject": True,
+                    "log_low_tone": True,
+                    "max_events_per_run": 200,
+                    "title_preview_chars": 120,
+                    "corpus_preview_chars": 160,
+                    "include_signals": True,
+                },
+                "logger_levels": {},
+            },
         },
     }
 
@@ -104,6 +143,16 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     step1 = dict(base["step1"])
     step1["search_tier1_min_raw_urls"] = _int(step1_raw, "search_tier1_min_raw_urls", step1["search_tier1_min_raw_urls"], lo=1, hi=100)
     step1["max_cost_rub"] = _float(step1_raw, "max_cost_rub", step1["max_cost_rub"], lo=1.0, hi=10_000.0)
+    step1["max_web_search_api_calls"] = _int(
+        step1_raw, "max_web_search_api_calls", step1.get("max_web_search_api_calls", 0), lo=0, hi=500
+    )
+    step1["web_search_api_bonus_near_target"] = _int(
+        step1_raw,
+        "web_search_api_bonus_near_target",
+        step1.get("web_search_api_bonus_near_target", 10),
+        lo=0,
+        hi=100,
+    )
     ws_ctx = str(step1_raw.get("web_search_context_size") or step1.get("web_search_context_size", "low")).strip().lower()
     step1["web_search_context_size"] = ws_ctx if ws_ctx in ("low", "medium", "high") else "low"
     ws_sup = str(
@@ -119,6 +168,17 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     step1["web_search_prefer_alt_providers"] = _coerce_bool(
         step1_raw.get("web_search_prefer_alt_providers"),
         step1.get("web_search_prefer_alt_providers", True),
+    )
+    step1["web_search_cache_enabled"] = _coerce_bool(
+        step1_raw.get("web_search_cache_enabled"),
+        step1.get("web_search_cache_enabled", True),
+    )
+    step1["web_search_cache_ttl_days"] = _int(
+        step1_raw,
+        "web_search_cache_ttl_days",
+        step1.get("web_search_cache_ttl_days", 90),
+        lo=1,
+        hi=365,
     )
     step1["batch_size"] = _int(step1_raw, "batch_size", step1["batch_size"], lo=1, hi=100)
     step1["search_fetch_limit"] = _int(step1_raw, "search_fetch_limit", step1["search_fetch_limit"], lo=10, hi=500)
@@ -171,6 +231,46 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     step1["telegram_proxyapi_context_size"] = ctx if ctx in ("low", "medium", "high") else "high"
     step1["seed_urls_max"] = _int(step1_raw, "seed_urls_max", step1["seed_urls_max"], lo=1, hi=100)
 
+    yield_raw = step1_raw.get("curious_yield") if isinstance(step1_raw.get("curious_yield"), dict) else {}
+    yield_cfg = dict(step1.get("curious_yield") or _bootstrap_pipeline_config()["step1"]["curious_yield"])
+    yield_cfg["enabled"] = _coerce_bool(yield_raw.get("enabled"), yield_cfg.get("enabled", True))
+    yield_cfg["min_verified"] = _int(yield_raw, "min_verified", yield_cfg.get("min_verified", 10), lo=10, hi=30)
+    yield_cfg["target_pool"] = _int(yield_raw, "target_pool", yield_cfg.get("target_pool", 12), lo=10, hi=30)
+    yield_cfg["soft_time_limit_sec"] = _int(
+        yield_raw, "soft_time_limit_sec", yield_cfg.get("soft_time_limit_sec", 480), lo=60, hi=7200
+    )
+    yield_cfg["hard_time_limit_sec"] = _int(
+        yield_raw, "hard_time_limit_sec", yield_cfg.get("hard_time_limit_sec", 600), lo=120, hi=14_400
+    )
+    if yield_cfg["hard_time_limit_sec"] < yield_cfg["soft_time_limit_sec"]:
+        yield_cfg["hard_time_limit_sec"] = yield_cfg["soft_time_limit_sec"]
+    yield_cfg["max_cost_rub"] = _float(yield_raw, "max_cost_rub", yield_cfg.get("max_cost_rub", 50.0), lo=1.0, hi=500.0)
+    yield_cfg["min_collection_iterations"] = _int(
+        yield_raw, "min_collection_iterations", yield_cfg.get("min_collection_iterations", 2), lo=1, hi=20
+    )
+    yield_cfg["supplement_rounds_per_iter"] = _int(
+        yield_raw, "supplement_rounds_per_iter", yield_cfg.get("supplement_rounds_per_iter", 2), lo=0, hi=10
+    )
+    yield_cfg["max_search_batches"] = _int(
+        yield_raw, "max_search_batches", yield_cfg.get("max_search_batches", 5), lo=1, hi=40
+    )
+    yield_cfg["skip_aggregator_search"] = _coerce_bool(
+        yield_raw.get("skip_aggregator_search"), yield_cfg.get("skip_aggregator_search", True)
+    )
+    yield_cfg["no_progress_limit"] = _int(
+        yield_raw, "no_progress_limit", yield_cfg.get("no_progress_limit", 2), lo=1, hi=20
+    )
+    yield_cfg["seed_listing_scan_limit"] = _int(
+        yield_raw, "seed_listing_scan_limit", yield_cfg.get("seed_listing_scan_limit", 4), lo=0, hi=30
+    )
+    yield_cfg["entertainment_rescue_queries"] = _int(
+        yield_raw, "entertainment_rescue_queries", yield_cfg.get("entertainment_rescue_queries", 2), lo=0, hi=5
+    )
+    yield_cfg["rescue_collect_batch"] = _int(
+        yield_raw, "rescue_collect_batch", yield_cfg.get("rescue_collect_batch", 8), lo=4, hi=30
+    )
+    step1["curious_yield"] = yield_cfg
+
     step2 = dict(base["step2"])
     step2["max_cost_rub"] = _float(step2_raw, "max_cost_rub", step2["max_cost_rub"], lo=1.0, hi=10_000.0)
 
@@ -192,6 +292,48 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     logging_cfg["file_name"] = file_name or "app.log"
     logging_cfg["max_bytes"] = _int(logging_raw, "max_bytes", logging_cfg["max_bytes"], lo=100_000, hi=100_000_000)
     logging_cfg["backup_count"] = _int(logging_raw, "backup_count", logging_cfg["backup_count"], lo=0, hi=50)
+
+    step1_log_raw = logging_raw.get("step1") if isinstance(logging_raw.get("step1"), dict) else {}
+    step1_log = dict(logging_cfg.get("step1") or _bootstrap_pipeline_config()["logging"]["step1"])
+    step1_log["filter_stats_every_n"] = _int(
+        step1_log_raw, "filter_stats_every_n", step1_log["filter_stats_every_n"], lo=1, hi=500
+    )
+    step1_log["reject_audit_top_reasons"] = _int(
+        step1_log_raw, "reject_audit_top_reasons", step1_log["reject_audit_top_reasons"], lo=1, hi=30
+    )
+    step1_log["reject_samples_per_reason"] = _int(
+        step1_log_raw, "reject_samples_per_reason", step1_log["reject_samples_per_reason"], lo=1, hi=30
+    )
+    curious_raw = step1_log_raw.get("curious_tone") if isinstance(step1_log_raw.get("curious_tone"), dict) else {}
+    curious_log = dict(step1_log["curious_tone"])
+    curious_log["enabled"] = _coerce_bool(curious_raw.get("enabled"), curious_log["enabled"])
+    curious_level = str(curious_raw.get("level") or curious_log["level"]).strip().upper()
+    curious_log["level"] = curious_level if curious_level else "INFO"
+    curious_log["separate_file"] = _coerce_bool(curious_raw.get("separate_file"), curious_log["separate_file"])
+    curious_file = str(curious_raw.get("file_name") or curious_log["file_name"]).strip()
+    curious_log["file_name"] = curious_file or "step1-curious-tone.log"
+    curious_log["log_accept"] = _coerce_bool(curious_raw.get("log_accept"), curious_log["log_accept"])
+    curious_log["log_reject"] = _coerce_bool(curious_raw.get("log_reject"), curious_log["log_reject"])
+    curious_log["log_low_tone"] = _coerce_bool(curious_raw.get("log_low_tone"), curious_log["log_low_tone"])
+    curious_log["max_events_per_run"] = _int(
+        curious_raw, "max_events_per_run", curious_log["max_events_per_run"], lo=0, hi=5000
+    )
+    curious_log["title_preview_chars"] = _int(
+        curious_raw, "title_preview_chars", curious_log["title_preview_chars"], lo=40, hi=500
+    )
+    curious_log["corpus_preview_chars"] = _int(
+        curious_raw, "corpus_preview_chars", curious_log["corpus_preview_chars"], lo=0, hi=2000
+    )
+    curious_log["include_signals"] = _coerce_bool(
+        curious_raw.get("include_signals"), curious_log["include_signals"]
+    )
+    step1_log["curious_tone"] = curious_log
+    logger_levels_raw = step1_log_raw.get("logger_levels")
+    if isinstance(logger_levels_raw, dict):
+        step1_log["logger_levels"] = {
+            str(k): str(v).strip().upper() for k, v in logger_levels_raw.items() if str(k).strip()
+        }
+    logging_cfg["step1"] = step1_log
 
     return {
         "version": int(raw.get("version", base["version"]) or 1),
@@ -226,15 +368,22 @@ def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
     wf = cfg["workflow"]
     s4 = cfg["step4"]
     lg = cfg["logging"]
+    step1_log = lg.get("step1") if isinstance(lg.get("step1"), dict) else {}
+    curious_log = step1_log.get("curious_tone") if isinstance(step1_log.get("curious_tone"), dict) else {}
+    curious_yield = s1.get("curious_yield") if isinstance(s1.get("curious_yield"), dict) else {}
     return {
         "enable_web_fetch": web["enable_fetch"],
         "step1_search_tier1_min_raw_urls": s1["search_tier1_min_raw_urls"],
         "step1_max_cost_rub": s1["max_cost_rub"],
+        "step1_max_web_search_api_calls": s1.get("max_web_search_api_calls", 0),
+        "step1_web_search_api_bonus_near_target": s1.get("web_search_api_bonus_near_target", 10),
         "proxyapi_web_search_context_size": s1["web_search_context_size"],
         "proxyapi_web_search_context_size_supplement": s1["web_search_context_size_supplement"],
         "step1_tier_max_web_search_batches": s1["tier_max_web_search_batches"],
         "step1_min_urls_before_proxyapi": s1["min_urls_before_proxyapi"],
         "step1_web_search_prefer_alt_providers": s1["web_search_prefer_alt_providers"],
+        "step1_web_search_cache_enabled": s1["web_search_cache_enabled"],
+        "step1_web_search_cache_ttl_days": s1["web_search_cache_ttl_days"],
         "step1_batch_size": s1["batch_size"],
         "step1_search_fetch_limit": s1["search_fetch_limit"],
         "step1_urls_checked_per_collect": s1["urls_checked_per_collect"],
@@ -264,6 +413,34 @@ def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
         "log_file_name": lg["file_name"],
         "log_max_bytes": lg["max_bytes"],
         "log_backup_count": lg["backup_count"],
+        "step1_log_filter_stats_every_n": step1_log.get("filter_stats_every_n", 50),
+        "step1_log_reject_audit_top_reasons": step1_log.get("reject_audit_top_reasons", 5),
+        "step1_log_reject_samples_per_reason": step1_log.get("reject_samples_per_reason", 8),
+        "step1_curious_tone_log_enabled": curious_log.get("enabled", True),
+        "step1_curious_tone_log_level": curious_log.get("level", "INFO"),
+        "step1_curious_tone_log_separate_file": curious_log.get("separate_file", True),
+        "step1_curious_tone_log_file_name": curious_log.get("file_name", "step1-curious-tone.log"),
+        "step1_curious_tone_log_accept": curious_log.get("log_accept", True),
+        "step1_curious_tone_log_reject": curious_log.get("log_reject", True),
+        "step1_curious_tone_log_low_tone": curious_log.get("log_low_tone", True),
+        "step1_curious_tone_log_max_events": curious_log.get("max_events_per_run", 200),
+        "step1_curious_tone_title_preview_chars": curious_log.get("title_preview_chars", 120),
+        "step1_curious_tone_corpus_preview_chars": curious_log.get("corpus_preview_chars", 160),
+        "step1_curious_tone_include_signals": curious_log.get("include_signals", True),
+        "step1_curious_yield_enabled": curious_yield.get("enabled", True),
+        "step1_curious_yield_min_verified": curious_yield.get("min_verified", 10),
+        "step1_curious_yield_target_pool": curious_yield.get("target_pool", 12),
+        "step1_curious_yield_soft_time_sec": curious_yield.get("soft_time_limit_sec", 480),
+        "step1_curious_yield_hard_time_sec": curious_yield.get("hard_time_limit_sec", 600),
+        "step1_curious_yield_max_cost_rub": curious_yield.get("max_cost_rub", 50.0),
+        "step1_curious_yield_min_iterations": curious_yield.get("min_collection_iterations", 2),
+        "step1_curious_yield_supplement_rounds": curious_yield.get("supplement_rounds_per_iter", 2),
+        "step1_curious_yield_max_search_batches": curious_yield.get("max_search_batches", 5),
+        "step1_curious_yield_skip_aggregator_search": curious_yield.get("skip_aggregator_search", True),
+        "step1_curious_yield_no_progress_limit": curious_yield.get("no_progress_limit", 2),
+        "step1_curious_yield_seed_listing_scan_limit": curious_yield.get("seed_listing_scan_limit", 4),
+        "step1_curious_yield_entertainment_rescue_queries": curious_yield.get("entertainment_rescue_queries", 2),
+        "step1_curious_yield_rescue_collect_batch": curious_yield.get("rescue_collect_batch", 8),
     }
 
 

@@ -26,12 +26,15 @@ def _settings(**overrides: object) -> SimpleNamespace:
 def test_step1_config_economy_defaults():
     """Шаг 1: экономный конфиг в pipeline_settings.json."""
     cfg = read_pipeline_config()["step1"]
-    assert cfg["max_cost_rub"] == 40.0
+    assert cfg["max_cost_rub"] == 50.0
+    assert cfg["crew_fallback_only_if_empty"] is True
     assert cfg["telegram_via_proxyapi"] is False
     assert cfg["telegram_direct_fallback"] is True
     assert cfg["web_search_context_size"] == "low"
-    assert cfg["tier_max_web_search_batches"] == 12
+    assert cfg["tier_max_web_search_batches"] == 6
     assert cfg["web_search_prefer_alt_providers"] is False
+    assert cfg["web_search_cache_enabled"] is True
+    assert cfg["web_search_cache_ttl_days"] == 90
 
 
 def test_fetch_merged_skips_proxyapi_when_serpapi_enough(monkeypatch: pytest.MonkeyPatch):
@@ -59,13 +62,22 @@ def test_fetch_merged_skips_proxyapi_when_serpapi_enough(monkeypatch: pytest.Mon
 
 
 def test_fetch_merged_uses_proxyapi_when_alt_sparse(monkeypatch: pytest.MonkeyPatch):
+    from app.services.step1_web_search_stats import reset_step1_web_search_stats
+
+    reset_step1_web_search_stats()
     monkeypatch.setattr(news_search, "_serpapi_google_news_urls", lambda *_a, **_k: [])
     monkeypatch.setattr(news_search, "_tavily_search_urls", lambda *_a, **_k: [])
 
     proxy = MagicMock()
     proxy.search_news_article_urls.return_value = ["https://tass.ru/a/1"]
 
-    urls = news_search.fetch_article_urls_raw_merged(_settings(), "ИИ", limit=10, proxy=proxy)
+    urls = news_search.fetch_article_urls_raw_merged(
+        _settings(step1_web_search_cache_enabled=False),
+        "ИИ",
+        limit=10,
+        proxy=proxy,
+        proxy_fallback_on_empty=False,
+    )
     assert urls == ["https://tass.ru/a/1"]
     proxy.search_news_article_urls.assert_called_once()
 
@@ -102,6 +114,7 @@ def test_tier_search_respects_max_batches(monkeypatch: pytest.MonkeyPatch):
         fetch_limit=20,
         proxy=MagicMock(),
         policy=policy,
+        current_verified=10,
     )
     assert len(calls) <= 2
 

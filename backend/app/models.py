@@ -230,6 +230,63 @@ class ProxyapiSpendDay(Base):
     last_budget_used: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class Step1UrlRegistry(Base):
+    """Глобальный реестр сырых и проверенных URL шага 1 (разделы raw / verified / reject:*)."""
+
+    __tablename__ = "step1_url_registry"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    url_fingerprint: Mapped[str] = mapped_column(String(512), nullable=False, unique=True, index=True)
+    url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    host: Mapped[str] = mapped_column(String(255), nullable=False, default="", index=True)
+    digest_type: Mapped[str] = mapped_column(String(20), nullable=False, default="serious", index=True)
+    bucket: Mapped[str] = mapped_column(String(80), nullable=False, default="raw", index=True)
+    reject_codes: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    title: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    source_stage: Mapped[str] = mapped_column(String(40), default="search", nullable=False)
+    verification_comment: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_digest_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
+class Step1HostUnreachableStat(Base):
+    """Счётчик http_unreachable по домену за скользящее окно (для автоблока в tiers)."""
+
+    __tablename__ = "step1_host_unreachable_stats"
+
+    host: Mapped[str] = mapped_column(String(255), primary_key=True)
+    failure_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    first_failure_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    last_failure_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    autoblocked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class Step1FilterEnabledSnapshot(Base):
+    """Снимок включённых фильтров шага 1 (для повторной проверки при снятии критерия)."""
+
+    __tablename__ = "step1_filter_enabled_snapshots"
+
+    digest_type: Mapped[str] = mapped_column(String(20), primary_key=True)
+    enabled_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class Step1WebSearchCache(Base):
+    """Кэш ответа batch ProxyAPI web_search (переиспользуется между прогонами шага 1)."""
+
+    __tablename__ = "step1_web_search_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    urls_json: Mapped[str] = mapped_column(Text, nullable=False)
+    query_preview: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    url_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    last_hit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class LlmCostRecord(Base):
     __tablename__ = "llm_cost_records"
 

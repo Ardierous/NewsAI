@@ -47,7 +47,7 @@ NOT_AD_DISCLOSURE_RU = "не реклама"
 MATERIAL_FORM_TITLE_LABELS: dict[str, str] = {
     MATERIAL_FORM_ARTICLE: "статья",
     MATERIAL_FORM_TRAINING: "обучение",
-    MATERIAL_FORM_SERVICE: "услуга",
+    MATERIAL_FORM_SERVICE: "услуга/реклама",
     MATERIAL_FORM_PRESS: "пресс-релиз",
     MATERIAL_FORM_RESEARCH: "исследование",
     MATERIAL_FORM_FINANCE: "финансы",
@@ -57,7 +57,7 @@ MATERIAL_FORM_TITLE_LABELS: dict[str, str] = {
 }
 
 _MATERIAL_FORM_TITLE_SUFFIX_RE = re.compile(
-    r"\s*\((?:статья|обучение|услуга|пресс-релиз|исследование|финансы|"
+    r"\s*\((?:статья|обучение|услуга(?:/реклама)?|пресс-релиз|исследование|финансы|"
     r"военная сфера|прорыв ИИ|законодательство)\)\s*$",
     re.IGNORECASE,
 )
@@ -130,11 +130,31 @@ _PRODUCT_TOOL_URL_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SAAS_PRODUCT_LANDING_PATH_RE = re.compile(
+    r"(?:^|/)(?:c)/(about|pricing|features?|product|demo|trial|connect|landing)(?:/|$)",
+    re.IGNORECASE,
+)
+
+_SAAS_PRODUCT_HOST_MARKERS = (
+    "neurolegal.ya.ru",
+)
+
+_TRAINING_SAAS_HOST_MARKERS = (
+    "ai-trainers.ya.ru",
+)
+
+_TRAINING_SAAS_PATH_RE = re.compile(
+    r"/(?:ai/)?trener[\w_-]*",
+    re.IGNORECASE,
+)
+
 _PRODUCT_TOOL_PROMO_RES = (
     re.compile(
         r"\b(?:попробуйте|попробовать|зарегистрируйтесь|скачайте|бесплатн(?:о|ый|ая)|"
+        r"оставить заявку|оформить подписку|подключить(?:\s+от)?|"
         r"новый инструмент|новая функци[яю]|функционал|возможност(?:ь|и) (?:сервиса|платформы)|"
         r"наш(?:а|и)? (?:сервис|платформа|бот|ассистент|инструмент)|"
+        r"ии[- ]помощник для|тариф(?:ы|а)?(?:\s+подписки)?|"
         r"как пользоваться|инструкция по использованию)\b",
         re.IGNORECASE,
     ),
@@ -173,6 +193,15 @@ _NEWS_EVENT_SIGNAL_RES = (
 )
 
 
+_SUPPORT_DOC_HOST_MARKERS = (
+    "browser.yandex.ru",
+)
+_SUPPORT_DOC_PATH_RE = re.compile(
+    r"(?:^|/)(?:support|help|docs|troubleshooting|faq)(?:/|$|\.html)",
+    re.IGNORECASE,
+)
+
+
 def _text_blob(item: dict[str, Any], extra: str = "") -> str:
     parts = [
         str(item.get("title") or ""),
@@ -180,6 +209,41 @@ def _text_blob(item: dict[str, Any], extra: str = "") -> str:
         str(extra or ""),
     ]
     return " ".join(parts).strip()
+
+
+def is_support_documentation_url(url: str) -> bool:
+    """Справка, help, FAQ, документация — не новостная статья."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    try:
+        parsed = urlparse(u)
+        host = (parsed.hostname or "").lower()
+        path = (parsed.path or "").lower()
+    except Exception:
+        return False
+    if any(marker in host for marker in _SUPPORT_DOC_HOST_MARKERS):
+        return True
+    if host.endswith("yandex.ru") and ("/support/" in path or "/help/" in path):
+        return True
+    if "aistudio.yandex.ru" in host and "/docs" in path:
+        return True
+    if "developers.sber.ru" in host and "/help" in path:
+        return True
+    return bool(_SUPPORT_DOC_PATH_RE.search(path))
+
+
+def is_training_saas_landing_url(url: str) -> bool:
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    if _host_marker_hit(u, _TRAINING_SAAS_HOST_MARKERS):
+        return True
+    try:
+        path = (urlparse(u).path or "").lower()
+    except Exception:
+        return False
+    return bool(_TRAINING_SAAS_PATH_RE.search(path))
 
 
 def is_product_tool_landing_url(url: str) -> bool:
@@ -190,11 +254,53 @@ def is_product_tool_landing_url(url: str) -> bool:
         path = (urlparse(u).path or "").lower().rstrip("/") or "/"
     except Exception:
         return False
+    if _PARTICIPATION_INVITE_URL_PATH_RE.search(path):
+        return True
+    if _SAAS_PRODUCT_LANDING_PATH_RE.search(path):
+        return True
+    if _host_marker_hit(u, _SAAS_PRODUCT_HOST_MARKERS):
+        return True
+    if is_training_saas_landing_url(u):
+        return True
     if _PRODUCT_TOOL_URL_PATH_RE.search(path):
         return True
     if re.search(r"/(?:ai-)?tools?(?:/|$)", path, re.IGNORECASE):
         return True
     return False
+
+
+def should_reject_commercial_non_article(
+    item: dict[str, Any],
+    material_form: MaterialForm,
+    extra: str = "",
+) -> bool:
+    """Вакансии, карьера и рекламные лендинги — не новостная статья для пула."""
+    url = str(item.get("url") or "")
+    if is_participation_invite_candidate(item, extra):
+        return True
+    if material_form == MATERIAL_FORM_SERVICE:
+        return True
+    if material_form == MATERIAL_FORM_TRAINING and is_training_saas_landing_url(url):
+        return True
+    if is_product_tool_landing_url(url) and not has_substantive_news_event_signal(item, extra):
+        return True
+    if looks_like_product_tool_promo(item, extra) and not has_substantive_news_event_signal(item, extra):
+        return True
+    return False
+
+
+def commercial_non_article_reject_reason(
+    item: dict[str, Any],
+    material_form: MaterialForm,
+    extra: str = "",
+) -> str:
+    """Код отбраковки для should_reject_commercial_non_article."""
+    url = str(item.get("url") or "")
+    if is_participation_invite_candidate(item, extra) or (
+        is_product_tool_landing_url(url) and material_form != MATERIAL_FORM_SERVICE
+    ):
+        return "product_tool_page"
+    return "product_tool_promo"
 
 
 def has_substantive_news_event_signal(item: dict[str, Any], extra: str = "") -> bool:
@@ -424,7 +530,8 @@ _PARTICIPATION_INVITE_TEXT_RES = (
 _SERVICE_TEXT_RES = (
     re.compile(
         r"\b(?:услуг[аи]|консалтинг|под ключ|заказать (?:разработку|внедрение)|"
-        r"наши услуги|service package)\b",
+        r"наши услуги|service package|оставить заявку|оформить подписку|"
+        r"подключить(?:\s+от)?|попробовать(?:\s+бесплатно)?|тариф(?:ы|а)?)\b",
         re.IGNORECASE,
     ),
 )
@@ -531,6 +638,8 @@ def is_service_offer_candidate(item: dict[str, Any], extra: str = "") -> bool:
         return True
     url = str(item.get("url") or "")
     text = _text_blob(item, extra)
+    if is_product_tool_landing_url(url) and not has_substantive_news_event_signal(item, extra):
+        return True
     try:
         path = (urlparse(url).path or "").lower()
     except Exception:
@@ -581,10 +690,10 @@ _LEGISLATION_RES = re.compile(
 )
 
 _FINANCE_RES = re.compile(
-    r"\b(?:инвестици|финансирован|financing|funding|raised \$|"
-    r"series [a-d]|IPO|valuation|"
-    r"\d+\s*(?:млн|млрд|million|billion)|"
-    r"выручк|earnings|revenue|акци[ия])\b",
+    r"\b(?:инвестици|привлёк|привлек|финансирован|financing|funding|raised \$|"
+    r"series [a-d]|IPO|valuation|раунд [a-d]|"
+    r"выручк|earnings|revenue|капитализац|"
+    r"акци[ия]\w*(?:\s+(?:на бирже|выросл|упал)))\b",
     re.IGNORECASE,
 )
 
@@ -615,6 +724,21 @@ def is_legislation_candidate(item: dict[str, Any], extra: str = "") -> bool:
 
 def is_finance_candidate(item: dict[str, Any], extra: str = "") -> bool:
     return bool(_FINANCE_RES.search(_text_blob(item, extra)))
+
+
+def manual_url_commercial_reject_reason(
+    stored: str,
+    *,
+    title: str = "",
+    topic_corpus: str = "",
+) -> str | None:
+    """Отбраковка ручной ссылки: вакансия, лендинг услуги, промо-тренажёр."""
+    item = {"url": stored, "title": title, "description": ""}
+    extra = f"{title} {topic_corpus}".strip()
+    form = classify_material_form(item, extra=extra)
+    if should_reject_commercial_non_article(item, form, extra):
+        return commercial_non_article_reject_reason(item, form, extra)
+    return None
 
 
 def is_military_ai_candidate(item: dict[str, Any], extra: str = "") -> bool:
@@ -648,6 +772,9 @@ def classify_material_form(item: dict[str, Any], extra: str = "") -> MaterialFor
     if is_service_offer_candidate(item, extra):
         return MATERIAL_FORM_SERVICE
     if is_substantive_press_for_pool(item, extra):
+        url_low = str(item.get("url") or "").lower()
+        if "/company/news/" in url_low or re.search(r"/news/\d{4}-\d{2}-\d{2}", url_low):
+            return MATERIAL_FORM_ARTICLE
         return MATERIAL_FORM_PRESS
     return MATERIAL_FORM_ARTICLE
 

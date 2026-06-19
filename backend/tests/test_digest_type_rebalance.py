@@ -23,7 +23,11 @@ def test_rebalance_curious_skips_serious_theme_quotas() -> None:
     for i in range(5):
         pool.append(
             {
-                **_item(f"https://publisher{i}.example.com/research/{i}", score=10 - i),
+                **_item(
+                    f"https://publisher{i}.example.com/research/{i}",
+                    score=10 - i,
+                    title=f"Смешной фейл нейросети в эксперименте {i}",
+                ),
                 "material_form": "research",
                 "verification_comment": "MATERIAL_FORM:research",
             }
@@ -36,16 +40,26 @@ def test_rebalance_curious_skips_serious_theme_quotas() -> None:
 
 def test_rebalance_curious_skips_press_quota() -> None:
     pool = [
-        _item("https://ria.ru/a1", press=False, score=9),
-        _item("https://ria.ru/a2", press=False, score=8),
-        _item("https://openai.com/news/pr1", press=True, score=9),
-        _item("https://openai.com/news/pr2", press=True, score=8),
-        _item("https://vc.ru/ai/funny", press=False, score=7),
+        _item("https://ria.ru/a1", press=False, score=9, title="Смешной фейл нейросети в метро"),
+        _item("https://ria.ru/a2", press=False, score=8, title="Абсурдный глюк чат-бота"),
+        _item(
+            "https://openai.com/news/pr1",
+            press=True,
+            score=9,
+            title="OpenAI представила новую модель GPT",
+        ),
+        _item(
+            "https://openai.com/news/pr2",
+            press=True,
+            score=8,
+            title="Google анонсировала релиз Gemini",
+        ),
+        _item("https://vc.ru/ai/funny", press=False, score=7, title="Gemini сломала сайт разработчика"),
     ]
     out = ds._rebalance_verified_pool(pool, target=4, digest_type="curious")
     press_in = sum(1 for x in out if ds._is_substantive_press_for_pool(x))
     assert press_in == 0
-    assert len(out) == 4
+    assert len(out) == 3
 
 
 def test_rebalance_curious_prefers_entertaining_story_over_dry_ai_news() -> None:

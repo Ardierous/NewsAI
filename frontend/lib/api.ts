@@ -145,6 +145,26 @@ export const api = {
       method: "POST",
       body: JSON.stringify({}),
     }),
+  getStep1Progress: (id: number) =>
+    request<{
+      running: boolean;
+      phase: string;
+      phase_key: string;
+      elapsed_sec: number;
+      elapsed_human: string;
+      iteration: number;
+      web_search_api_calls: number;
+      web_search_citation_urls: number;
+      web_search_cost_est_rub: number;
+      urls_raw: number;
+      urls_raw_merged: number;
+      urls_prefilter_rejected: number;
+      urls_sent_to_http: number;
+      verified_pool: number;
+      rejected_total: number;
+      collection_target: number;
+      cancel_requested: boolean;
+    }>(`/digests/${id}/step1/progress`),
   getStep1Filters: (id: number) =>
     request<any>(`/digests/${id}/step1/filters`),
   saveStep1Filters: (
@@ -160,6 +180,8 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(payload),
     }),
+  getStep1Statistics: (id: number, rebuild = false) =>
+    request<any>(`/digests/${id}/step1/statistics${rebuild ? "?rebuild=true" : ""}`),
   saveStep1DiscoveredFeedback: (
     id: number,
     newsId: number,

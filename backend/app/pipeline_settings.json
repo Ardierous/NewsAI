@@ -5,34 +5,54 @@
   },
   "step1": {
     "search_tier1_min_raw_urls": 15,
-    "max_cost_rub": 40,
+    "max_cost_rub": 50,
+    "max_web_search_api_calls": 0,
+    "web_search_api_bonus_near_target": 10,
     "web_search_context_size": "low",
     "web_search_context_size_supplement": "low",
     "tier_max_web_search_batches": 12,
     "min_urls_before_proxyapi": 5,
     "web_search_prefer_alt_providers": false,
+    "web_search_cache_enabled": true,
+    "web_search_cache_ttl_days": 90,
     "batch_size": 14,
     "search_fetch_limit": 64,
     "urls_checked_per_collect": 48,
-    "soft_time_limit_sec": 200,
-    "hard_time_limit_sec": 300,
-    "max_candidates_for_ui": 15,
+    "soft_time_limit_sec": 480,
+    "hard_time_limit_sec": 600,
+    "max_candidates_for_ui": 12,
     "verify_workers": 8,
     "crew_fallback_only_if_empty": false,
     "tier_strict_search": true,
     "curious_use_serious_tiers": false,
     "telegram_monitor_enabled": true,
     "telegram_monitor_channels": "technokratos,AI_UD",
-    "telegram_max_pages": 4,
-    "telegram_max_links": 30,
-    "telegram_max_digest_posts": 8,
+    "telegram_max_pages": 3,
+    "telegram_max_links": 20,
+    "telegram_max_digest_posts": 5,
     "telegram_post_text_filter": "",
-    "telegram_timeout_sec": 20,
+    "telegram_timeout_sec": 15,
     "telegram_via_proxyapi": false,
     "telegram_direct_fallback": true,
     "telegram_proxyapi_context_size": "low",
-    "seed_urls_max": 35,
-    "max_pending_per_host": 4
+    "seed_urls_max": 24,
+    "max_pending_per_host": 4,
+    "curious_yield": {
+      "enabled": true,
+      "min_verified": 10,
+      "target_pool": 12,
+      "soft_time_limit_sec": 480,
+      "hard_time_limit_sec": 600,
+      "max_cost_rub": 50,
+      "min_collection_iterations": 3,
+      "supplement_rounds_per_iter": 3,
+      "max_search_batches": 8,
+      "skip_aggregator_search": false,
+      "no_progress_limit": 4,
+      "seed_listing_scan_limit": 6,
+      "entertainment_rescue_queries": 3,
+      "rescue_collect_batch": 8
+    }
   },
   "step2": {
     "max_cost_rub": 50
@@ -48,6 +68,29 @@
     "enable_file": true,
     "file_name": "app.log",
     "max_bytes": 5000000,
-    "backup_count": 5
+    "backup_count": 5,
+    "step1": {
+      "filter_stats_every_n": 25,
+      "reject_audit_top_reasons": 8,
+      "reject_samples_per_reason": 5,
+      "curious_tone": {
+        "enabled": true,
+        "level": "INFO",
+        "separate_file": true,
+        "file_name": "step1-curious-tone.log",
+        "log_accept": true,
+        "log_reject": true,
+        "log_low_tone": true,
+        "max_events_per_run": 300,
+        "title_preview_chars": 140,
+        "corpus_preview_chars": 200,
+        "include_signals": true
+      },
+      "logger_levels": {
+        "app.step1.curious_tone": "INFO",
+        "app.services.step1_filters": "INFO"
+      }
+    }
   }
 }
+

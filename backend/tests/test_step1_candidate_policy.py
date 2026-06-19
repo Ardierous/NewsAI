@@ -15,11 +15,14 @@ from app.services.step1_candidate_policy import (
     MATERIAL_FORM_LEGISLATION,
     MATERIAL_FORM_MILITARY,
     MATERIAL_FORM_PRESS,
+    MATERIAL_FORM_PRESS,
     MATERIAL_FORM_RESEARCH,
     MATERIAL_FORM_SERVICE,
     MATERIAL_FORM_TRAINING,
     is_participation_invite_candidate,
-    is_research_science_candidate,
+    is_training_saas_landing_url,
+    is_finance_candidate,
+    should_reject_commercial_non_article,
     SERIOUS_POOL_THEME_QUOTAS,
 )
 
@@ -157,7 +160,83 @@ def test_sber_career_team_page_is_service_not_research():
     assert not is_research_science_candidate(item)
     assert classify_material_form(item) == MATERIAL_FORM_SERVICE
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(услуга)")
+    assert item["title"].endswith("(услуга/реклама)")
+
+
+def test_sber_vacancy_url_detected_as_non_article():
+    url = "https://developers.sber.ru/kak-v-sbere/vacancies/data-scientist-lab-ai"
+    assert is_product_tool_landing_url(url)
+    item = {
+        "url": url,
+        "title": "Data Scientist CV+NLP в Лаборатория по искусственному интеллекту",
+        "description": "Вакансия в команде Сбера",
+    }
+    assert is_participation_invite_candidate(item)
+    form = classify_material_form(item)
+    assert form == MATERIAL_FORM_SERVICE
+    assert should_reject_commercial_non_article(item, form)
+
+
+def test_neurolegal_about_is_service_not_article():
+    url = "https://neurolegal.ya.ru/c/about"
+    assert is_product_tool_landing_url(url)
+    item = {
+        "url": url,
+        "title": "ИИ-помощник для юристов",
+        "description": "Сервис Яндекса. Оставить заявку. Подписка и тарифы.",
+    }
+    assert classify_material_form(item) == MATERIAL_FORM_SERVICE
+    apply_material_form_to_candidate(item)
+    assert item["title"].endswith("(услуга/реклама)")
+    assert should_reject_commercial_non_article(item, MATERIAL_FORM_SERVICE)
+
+
+def test_yandex_cybersecurity_report_is_article_not_finance():
+    item = {
+        "url": "https://yandex.ru/company/news/11-06-2026-01",
+        "title": "Яндекс выпустил отчёт, посвящённый ИИ-технологиям в кибербезопасности",
+        "description": (
+            "Защита инфраструктуры и пользователей. Антиробот отразил 866 атак. "
+            "Заблокировано 4,9 млрд вредоносных писем и 11 млн аккаунтов."
+        ),
+    }
+    form = classify_material_form(item)
+    assert form == MATERIAL_FORM_ARTICLE
+    assert not is_finance_candidate(item)
+
+
+def test_ai_trainers_landing_rejected():
+    url = "https://ai-trainers.ya.ru/ai/trener_jurispr"
+    assert is_training_saas_landing_url(url)
+    item = {"url": url, "title": "ИИ-тренажёр для юристов", "description": "Попробовать бесплатно"}
+    form = classify_material_form(item)
+    assert should_reject_commercial_non_article(item, form)
+
+
+def test_manual_url_commercial_reject_for_vacancy_and_neurolegal():
+    from app.services.step1_candidate_policy import manual_url_commercial_reject_reason
+
+    assert manual_url_commercial_reject_reason(
+        "https://developers.sber.ru/kak-v-sbere/vacancies/data-scientist-lab-ai",
+        title="Data Scientist",
+    )
+    assert manual_url_commercial_reject_reason(
+        "https://neurolegal.ya.ru/c/about",
+        title="ИИ-помощник для юристов",
+        topic_corpus="Оставить заявку. Подписка.",
+    )
+    assert manual_url_commercial_reject_reason(
+        "https://ai-trainers.ya.ru/ai/trener_jurispr",
+        title="ИИ-тренажёр",
+    ) is not None
+    assert (
+        manual_url_commercial_reject_reason(
+            "https://yandex.ru/company/news/11-06-2026-01",
+            title="Яндекс выпустил отчёт о кибербезопасности",
+            topic_corpus="отчёт об ИИ в безопасности",
+        )
+        is None
+    )
 
 
 def test_theme_classifiers_and_quotas():

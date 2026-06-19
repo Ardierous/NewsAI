@@ -7,6 +7,14 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
 
+# Ленты/агрегаторы вне [aggregator_hosts] в curious_source_hosts.txt.
+_EXTRA_CURIOUS_AGGREGATOR_HOST_MARKERS: tuple[str, ...] = (
+    "pulse.mail.ru",
+    "tgstat.ru",
+    "telemetr.io",
+    "telemetr.me",
+)
+
 from app.source_tiers_policy import _host_contains_marker, _host_from_url, _parse_host_rules, _tuple_hosts
 
 _HOST_RULES_MARKER = "--- HOST_RULES ---"
@@ -107,7 +115,14 @@ def is_curious_aggregator_source(url: str, policy: CuriousSourcePolicy | None = 
     p = policy or get_curious_source_policy()
     host = _host_from_url(url).lower()
     low_url = url.lower()
+    if any(marker in host or marker in low_url for marker in _EXTRA_CURIOUS_AGGREGATOR_HOST_MARKERS):
+        return True
     return any(marker in host or marker in low_url for marker in p.aggregator_hosts)
+
+
+def curious_aggregator_host_markers(policy: CuriousSourcePolicy | None = None) -> tuple[str, ...]:
+    p = policy or get_curious_source_policy()
+    return tuple(dict.fromkeys((*p.aggregator_hosts, *_EXTRA_CURIOUS_AGGREGATOR_HOST_MARKERS)))
 
 
 def is_curious_blocked_host(url: str, policy: CuriousSourcePolicy | None = None) -> bool:

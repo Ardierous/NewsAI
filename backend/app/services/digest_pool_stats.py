@@ -14,6 +14,7 @@ from app.services.digest_service import (
     _publisher_host_key,
 )
 from app.services.step1_candidate_policy import is_substantive_press_for_pool
+from app.services.step1_usage_breakdown import build_step1_usage_breakdown, resolve_step1_proxyapi_cost_rub
 
 
 def format_duration(seconds: int | None) -> str:
@@ -25,17 +26,55 @@ def format_duration(seconds: int | None) -> str:
     return f"{s} с"
 
 
+def _read_step1_collection_meta(db: Session, digest_id: int) -> dict:
+    from app.models import Asset
+    import json
+
+    row = (
+        db.query(Asset)
+        .filter(Asset.digest_id == digest_id, Asset.type == "step1_collection_meta")
+        .order_by(Asset.id.desc())
+        .first()
+    )
+    if not row or not row.prompt:
+        return {}
+    try:
+        raw = json.loads(row.prompt)
+        return raw if isinstance(raw, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
 def build_pool_collection_stats(db: Session, digest_id: int) -> dict:
     pool = _pool_stats(db, digest_id)
     history = _discovery_run_history(db, digest_id)
     last_run = history[0] if history else None
     step1_costs = _step1_cost_breakdown(db, digest_id)
     step1_total_rub = round(sum(float(r.get("cost_rub") or 0.0) for r in step1_costs), 4)
+    collection_meta = _read_step1_collection_meta(db, digest_id)
+    step1_usage = build_step1_usage_breakdown(
+        collection_meta,
+        step1_costs=step1_costs,
+        step1_total_rub=step1_total_rub,
+        last_run_cost_rub=float(last_run.get("cost_rub") or 0.0) if last_run else None,
+    )
+    if last_run and step1_usage:
+        resolved_cost, _ = resolve_step1_proxyapi_cost_rub(
+            collection_meta,
+            step1_total_rub=step1_total_rub,
+            last_run_cost_rub=float(last_run.get("cost_rub") or 0.0),
+            step1_costs=step1_costs,
+        )
+        if resolved_cost > float(last_run.get("cost_rub") or 0.0):
+            last_run["cost_rub"] = resolved_cost
+    if step1_usage and float(step1_usage.get("total_cost_rub") or 0) > step1_total_rub:
+        step1_total_rub = round(float(step1_usage["total_cost_rub"]), 4)
     return {
         "pool": pool,
         "last_run": last_run,
         "step1_total_rub": step1_total_rub,
         "step1_costs": step1_costs,
+        "step1_usage": step1_usage,
         "history": history,
     }
 

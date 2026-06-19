@@ -5,13 +5,27 @@ from typing import Any
 
 from app.crew.model_policy import PRICING_RUB, ModelPricing
 
-# Модели вне PRICING_RUB (типичные тарифы ProxyAPI, ₽ за 1M токенов, НДС).
+# Модели вне PRICING_RUB (тарифы ProxyAPI pricing/list, ₽ за 1M токенов, НДС).
 _EXTRA_PRICING: dict[str, ModelPricing] = {
-    "gpt-4o-mini": ModelPricing("gpt-4o-mini", 36.0, 144.0, "Веб-поиск и лёгкие задачи."),
+    "gpt-4o-mini": ModelPricing("gpt-4o-mini", 39.0, 155.0, "Responses web_search и лёгкие задачи."),
     "gpt-4o": ModelPricing("gpt-4o", 360.0, 1440.0, "Тяжёлые задачи."),
+    "gpt-4o-mini-search-preview": ModelPricing(
+        "gpt-4o-mini-search-preview",
+        39.0,
+        155.0,
+        "Chat search-preview (доп. фикс. доплата за вызов — см. request fee).",
+    ),
     # Тарифы ProxyAPI для GPT Image (₽ / 1M токенов, ориентир на gpt-image-2).
     "gpt-image-1": ModelPricing("gpt-image-1", 1520.0, 9100.0, "Генерация обложек по токенам."),
     "gpt-image-2": ModelPricing("gpt-image-2", 1520.0, 9100.0, "Генерация обложек по токенам."),
+}
+
+# Фиксированная доплата ProxyAPI за web_search поверх токенов (₽ за запрос, НДС).
+_PROXYAPI_REQUEST_FEE_RUB: dict[str, float] = {
+    "responses.web_search": 1.0,
+    "responses.telegram_search": 1.0,
+    "chat.web_search_preview": 2.69,
+    "chat.telegram_preview": 2.69,
 }
 
 
@@ -22,14 +36,29 @@ def _pricing_for_model(model: str | None) -> ModelPricing | None:
     return PRICING_RUB.get(key) or _EXTRA_PRICING.get(key)
 
 
-def estimate_cost_rub_from_usage(model: str | None, prompt_tokens: int, completion_tokens: int) -> float | None:
+def estimate_proxyapi_request_fee_rub(kind: str | None) -> float:
+    if not kind:
+        return 0.0
+    return _PROXYAPI_REQUEST_FEE_RUB.get(kind.strip(), 0.0)
+
+
+def estimate_cost_rub_from_usage(
+    model: str | None,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    kind: str | None = None,
+) -> float | None:
     pricing = _pricing_for_model(model)
     if pricing is None:
-        return None
+        fee_only = estimate_proxyapi_request_fee_rub(kind)
+        return round(fee_only, 6) if fee_only > 0 else None
     if pricing.input_rub_per_1m <= 0 and pricing.output_rub_per_1m <= 0:
-        return None
+        fee_only = estimate_proxyapi_request_fee_rub(kind)
+        return round(fee_only, 6) if fee_only > 0 else None
     cost = (max(0, prompt_tokens) / 1_000_000.0) * pricing.input_rub_per_1m
     cost += (max(0, completion_tokens) / 1_000_000.0) * pricing.output_rub_per_1m
+    cost += estimate_proxyapi_request_fee_rub(kind)
     return round(cost, 6) if cost > 0 else None
 
 
@@ -53,11 +82,17 @@ def extract_token_usage(obj: Any) -> tuple[int, int] | None:
     return pt, ct
 
 
-def estimate_cost_rub_from_response(model: str | None, response: Any) -> float | None:
+def estimate_cost_rub_from_response(
+    model: str | None,
+    response: Any,
+    *,
+    kind: str | None = None,
+) -> float | None:
     tokens = extract_token_usage(response)
     if tokens is None:
-        return None
-    return estimate_cost_rub_from_usage(model, tokens[0], tokens[1])
+        fee_only = estimate_proxyapi_request_fee_rub(kind)
+        return round(fee_only, 6) if fee_only > 0 else None
+    return estimate_cost_rub_from_usage(model, tokens[0], tokens[1], kind=kind)
 
 
 def estimate_cost_rub_from_crew_usage(model: str | None, usage: Any) -> float | None:

@@ -16,6 +16,7 @@ import {
 } from "./WizardStepStatus";
 import { DigestHintsAccordion } from "./DigestHintsAccordion";
 import { isProxyapiBudgetError, ProxyapiBudgetAlert } from "./ProxyapiBudgetAlert";
+import { Step1LivePanel, type Step1LiveProgress } from "./Step1LivePanel";
 import { api, assetUrl } from "../lib/api";
 
 const PLATFORM_ORDER = ["telegram", "max", "vk", "dzen"] as const;
@@ -122,6 +123,45 @@ type PoolCollectionStatsPayload = {
     started_at?: string | null;
     completed_at?: string | null;
   }>;
+  step1_usage?: Step1UsageBreakdown | null;
+};
+
+type Step1UsageTool = {
+  id: string;
+  label: string;
+  color: string;
+  time_sec: number;
+  time_human: string;
+  cost_rub: number;
+  time_share: number;
+  cost_share: number;
+  calls?: number;
+  urls?: number;
+  detail?: string | null;
+};
+
+type Step1UsageBreakdown = {
+  total_time_sec: number;
+  total_time_human: string;
+  total_cost_rub: number;
+  cost_source?: string;
+  cost_source_note?: string;
+  tools: Step1UsageTool[];
+  funnel: {
+    raw_urls?: number;
+    prefilter_rejected?: number;
+    sent_to_http?: number;
+    verified_total?: number;
+    conversion_e2e_pct?: number | null;
+    conversion_http_pct?: number | null;
+  };
+  summary: {
+    iterations?: number;
+    stop_reason?: string | null;
+    verified_total?: number;
+    batch_size?: number;
+    collection_target?: number;
+  };
 };
 
 function formatStep1StopReason(reason: string | undefined): string {
@@ -140,6 +180,7 @@ function formatStep1StopReason(reason: string | undefined): string {
     no_progress: "нет нового прогресса",
     user_cancelled: "остановлено пользователем",
     proxyapi_budget_exceeded: "исчерпан баланс ProxyAPI",
+    web_search_api_cap: "лимит вызовов web_search (~бюджет шага 1)",
   };
   return map[r] || r;
 }
@@ -154,6 +195,204 @@ function formatRunWhen(iso: string | null | undefined): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function StackedShareBar({
+  segments,
+  ariaLabel,
+}: {
+  segments: Array<{ key: string; share: number; color: string; label: string }>;
+  ariaLabel: string;
+}) {
+  const visible = segments.filter((s) => s.share > 0.001);
+  if (!visible.length) return null;
+  return (
+    <div className="step1-usage-bar" role="img" aria-label={ariaLabel}>
+      {visible.map((s) => (
+        <div
+          key={s.key}
+          className="step1-usage-bar-seg"
+          style={{ width: `${Math.max(2, s.share * 100)}%`, background: s.color }}
+          title={`${s.label}: ${(s.share * 100).toFixed(0)}%`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function Step1UsageStatsPanel({
+  usage,
+  stopReasonLabel,
+  releaseCostRub,
+  releaseCostFinalized,
+  topRejectReasons,
+  rejectSamples,
+}: {
+  usage: Step1UsageBreakdown | null | undefined;
+  stopReasonLabel: string;
+  releaseCostRub?: number | null;
+  releaseCostFinalized?: boolean;
+  topRejectReasons: Array<[string, number]>;
+  rejectSamples: Array<{ code: string; sample: Record<string, unknown> }>;
+}) {
+  if (!usage) return null;
+  const { funnel, summary, tools } = usage;
+  const timeSegments = tools.map((t) => ({
+    key: t.id,
+    share: t.time_share,
+    color: t.color,
+    label: t.label,
+  }));
+  const costSegments = tools.map((t) => ({
+    key: t.id,
+    share: t.cost_share,
+    color: t.color,
+    label: t.label,
+  }));
+
+  return (
+    <div className="step1-usage-panel">
+      <div className="step1-usage-header">
+        <strong>Ресурсы шага 1</strong>
+        <span className="step1-usage-header-meta">
+          итераций {summary.iterations ?? 0} · {stopReasonLabel} · в пуле {summary.verified_total ?? 0}
+        </span>
+      </div>
+
+      <div className="step1-usage-totals">
+        <div className="step1-usage-total-card">
+          <span className="step1-usage-total-label">Время</span>
+          <span className="step1-usage-total-value">{usage.total_time_human || "—"}</span>
+        </div>
+        <div className="step1-usage-total-card">
+          <span className="step1-usage-total-label">ProxyAPI (шаг 1)</span>
+          <span className="step1-usage-total-value">
+            {Number(usage.total_cost_rub ?? 0).toFixed(2)} ₽
+          </span>
+          {usage.cost_source_note ? (
+            <span className="step1-usage-total-sub">{usage.cost_source_note}</span>
+          ) : null}
+          {releaseCostRub != null && Number(releaseCostRub) > Number(usage.total_cost_rub ?? 0) + 0.01 ? (
+            <span className="step1-usage-total-sub">
+              по выпуску (все шаги): {Number(releaseCostRub).toFixed(2)} ₽
+              {releaseCostFinalized ? " · зафикс." : ""}
+            </span>
+          ) : null}
+        </div>
+        <div className="step1-usage-total-card">
+          <span className="step1-usage-total-label">Цель воронки</span>
+          <span className="step1-usage-total-value">{summary.collection_target ?? 15}</span>
+          <span className="step1-usage-total-sub">батч {summary.batch_size ?? 20}</span>
+        </div>
+      </div>
+
+      {Number(usage.total_cost_rub ?? 0) > 10 && (summary.verified_total ?? 0) < 1 ? (
+        <p className="wizard-hint-warn" style={{ marginTop: 0, marginBottom: 12, fontSize: "0.88rem" }}>
+          За шаг 1 списано ≈{Number(usage.total_cost_rub).toFixed(0)} ₽, но в пул не попала ни одна ссылка — в основном
+          это вызовы веб-поиска ProxyAPI (~1 ₽ за responses, ~2,69 ₽ за preview), пока воронка не находит подходящие
+          статьи.
+        </p>
+      ) : null}
+
+      <div className="step1-usage-bars">
+        <div>
+          <div className="step1-usage-bar-title">Время по инструментам</div>
+          <StackedShareBar segments={timeSegments} ariaLabel="Доля времени по инструментам" />
+        </div>
+        {Number(usage.total_cost_rub ?? 0) > 0 ? (
+          <div>
+            <div className="step1-usage-bar-title">Стоимость по инструментам</div>
+            <StackedShareBar segments={costSegments} ariaLabel="Доля стоимости по инструментам" />
+          </div>
+        ) : null}
+      </div>
+
+      <div className="step1-usage-tools">
+        {tools.map((tool) => (
+          <div key={tool.id} className="step1-usage-tool-card">
+            <div className="step1-usage-tool-head">
+              <span className="step1-usage-tool-dot" style={{ background: tool.color }} />
+              <span className="step1-usage-tool-label">{tool.label}</span>
+            </div>
+            <div className="step1-usage-tool-metrics">
+              <span>{tool.time_human || `${tool.time_sec} с`}</span>
+              <span>{Number(tool.cost_rub ?? 0) > 0 ? `${Number(tool.cost_rub).toFixed(2)} ₽` : "0 ₽"}</span>
+            </div>
+            <div className="step1-usage-tool-bar-track">
+              <div
+                className="step1-usage-tool-bar-fill"
+                style={{ width: `${Math.max(4, tool.time_share * 100)}%`, background: tool.color }}
+              />
+            </div>
+            {tool.detail ? <div className="step1-usage-tool-detail">{tool.detail}</div> : null}
+          </div>
+        ))}
+      </div>
+
+      {(funnel.raw_urls ?? 0) > 0 ? (
+        <div className="step1-usage-funnel">
+          <div className="step1-usage-funnel-title">Воронка URL</div>
+          <div className="step1-usage-funnel-flow">
+            <div className="step1-usage-funnel-step">
+              <span className="step1-usage-funnel-num">{funnel.raw_urls}</span>
+              <span className="step1-usage-funnel-cap">сырые</span>
+            </div>
+            <span className="step1-usage-funnel-arrow">→</span>
+            <div className="step1-usage-funnel-step muted">
+              <span className="step1-usage-funnel-num">−{funnel.prefilter_rejected ?? 0}</span>
+              <span className="step1-usage-funnel-cap">до HTTP</span>
+            </div>
+            <span className="step1-usage-funnel-arrow">→</span>
+            <div className="step1-usage-funnel-step">
+              <span className="step1-usage-funnel-num">{funnel.sent_to_http ?? 0}</span>
+              <span className="step1-usage-funnel-cap">на HTTP</span>
+            </div>
+            <span className="step1-usage-funnel-arrow">→</span>
+            <div className="step1-usage-funnel-step accent">
+              <span className="step1-usage-funnel-num">{funnel.verified_total ?? 0}</span>
+              <span className="step1-usage-funnel-cap">в пуле</span>
+            </div>
+          </div>
+          {funnel.conversion_e2e_pct != null ? (
+            <div className="step1-usage-funnel-conv">
+              конверсия в пул <strong>{Number(funnel.conversion_e2e_pct).toFixed(1)}%</strong>
+              {funnel.conversion_http_pct != null ? (
+                <> · HTTP→пул {Number(funnel.conversion_http_pct).toFixed(1)}%</>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {topRejectReasons.length > 0 ? (
+        <div className="step1-usage-rejects">
+          <span className="step1-usage-rejects-label">Топ отбраковки:</span>
+          {topRejectReasons.map(([code, count]) => (
+            <span key={code} className="news-chip warn">
+              {REJECT_REASON_LABELS[code] ?? code} · {count}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      {rejectSamples.length > 0 ? (
+        <details className="step1-usage-samples">
+          <summary>Примеры отсева ({rejectSamples.length})</summary>
+          <ul>
+            {rejectSamples.map(({ code, sample }, idx) => (
+              <li key={`${code}-${idx}`}>
+                <strong>{REJECT_REASON_LABELS[code] ?? code}</strong>
+                {": "}
+                {String(sample.host || "").trim() || hostFromUrl(String(sample.url || "")) || "без домена"}
+                {sample.published_at ? ` · ${String(sample.published_at).slice(0, 10)}` : ""}
+                {sample.title ? ` · ${truncateText(String(sample.title), 90)}` : ""}
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+    </div>
+  );
 }
 
 function PoolCollectionStatsPanel({
@@ -274,7 +513,11 @@ function isManualRequiredCandidate(c: { verification_comment?: string; descripti
   const comment = String(c.verification_comment || "");
   const desc = String(c.description || "");
   if (comment.includes("TELEGRAM_SEED:") || desc.includes("Telegram-монитор")) return false;
-  return desc.includes("поле URL на шаге 1") || desc.includes("поле URL на шаге 2");
+  return (
+    comment.includes("MANUAL_REQUIRED:") ||
+    desc.includes("поле URL на шаге 1") ||
+    desc.includes("поле URL на шаге 2")
+  );
 }
 
 type Step2PickCandidate = {
@@ -306,6 +549,12 @@ function pickTop5ByRating(candidates: Step2PickCandidate[]): number[] {
     chosen = [...chosen, ...rest.slice(0, Math.max(0, 5 - chosen.length))];
   }
   return chosen.map((c) => c.id);
+}
+
+function pickManualRequiredSelectableIds(candidates: Step2PickCandidate[]): number[] {
+  return candidates
+    .filter((c) => candidateSelectableForStep2(c) && isManualRequiredCandidate(c))
+    .map((c) => c.id);
 }
 
 /** Тот же отпечаток, что `article_page_fingerprint` в backend/step1_recent_top5.py */
@@ -353,7 +602,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 const MATERIAL_FORM_CHIP_LABELS: Record<string, string> = {
   article: "Форма: статья",
   training: "Форма: обучение",
-  service: "Форма: услуга",
+  service: "Форма: услуга/реклама",
   press: "Форма: пресс-релиз",
   research: "Форма: исследование",
   finance: "Форма: финансы",
@@ -592,17 +841,24 @@ export function DigestWizard({ digestId }: Props) {
   const step4CardRef = useRef<HTMLDivElement | null>(null);
   const pendingScrollToStep2Ref = useRef(false);
   const pendingPreselectKeptUrlsRef = useRef<string[]>([]);
+  const pendingManualUrlsRef = useRef<string[]>([]);
   const lastSelectedUrlsRef = useRef<string[]>([]);
   const newsWindowHydratedForRef = useRef<number | null>(null);
   const step3ModeRef = useRef<Step3ProgressMode>("analytics");
   const step1AbortRef = useRef<AbortController | null>(null);
   const [step1Stopping, setStep1Stopping] = useState(false);
   const [step1Elapsed, setStep1Elapsed] = useState(0);
+  const [step1Live, setStep1Live] = useState<Step1LiveProgress | null>(null);
   const [step3Elapsed, setStep3Elapsed] = useState(0);
   const [step4Elapsed, setStep4Elapsed] = useState(0);
   const [newsWindowDays, setNewsWindowDays] = useState(3);
   const [newsWindowDayKind, setNewsWindowDayKind] = useState<"calendar" | "working">("working");
   const [showAllFoundNews, setShowAllFoundNews] = useState(false);
+  const [showStep1Statistics, setShowStep1Statistics] = useState(false);
+  const [step1StatsLoading, setStep1StatsLoading] = useState(false);
+  const [step1StatsError, setStep1StatsError] = useState("");
+  const [step1StatsData, setStep1StatsData] = useState<any | null>(null);
+  const [step1StatsReasonFilter, setStep1StatsReasonFilter] = useState<string>("");
   const [step1AuditFilter, setStep1AuditFilter] = useState<"all" | "in_pool" | "rejected">("all");
   const [discoveredDrafts, setDiscoveredDrafts] = useState<Record<number, DiscoveredDraft>>({});
   const [discoveredSaveState, setDiscoveredSaveState] = useState<
@@ -708,9 +964,9 @@ export function DigestWizard({ digestId }: Props) {
           );
           setSelected(sorted.map((s: { candidate_id: number }) => s.candidate_id));
           pendingPreselectKeptUrlsRef.current = [];
-        } else if (!opts?.preserveSelection && pendingPreselectKeptUrlsRef.current.length === 0) {
-          setSelected([]);
+          pendingManualUrlsRef.current = [];
         }
+        // Иначе выбор восстановит useEffect: kept/manual URL или ручные карточки пула.
       } catch (e) {
         setError((e as Error).message);
         throw e;
@@ -772,17 +1028,34 @@ export function DigestWizard({ digestId }: Props) {
       }
     }
 
+    if (pendingManualUrlsRef.current.length > 0) {
+      const urls = pendingManualUrlsRef.current;
+      pendingManualUrlsRef.current = [];
+      const remapped = resolveKeptCandidateIds(list, urls);
+      if (remapped.length) {
+        setSelected(remapped);
+        return;
+      }
+    }
+
     setSelected((prev) => {
       const stillValid = prev.filter((id) => validIds.has(id));
       if (stillValid.length !== prev.length && lastSelectedUrlsRef.current.length) {
         const remapped = resolveKeptCandidateIds(list, lastSelectedUrlsRef.current);
         if (remapped.length) return remapped;
       }
-      return stillValid.filter((id) => {
-        if (pastStep2) return true;
-        const row = list.find((x) => x.id === id);
-        return row ? candidateSelectableForStep2(row) : false;
-      });
+      if (stillValid.length > 0) {
+        return stillValid.filter((id) => {
+          if (pastStep2) return true;
+          const row = list.find((x) => x.id === id);
+          return row ? candidateSelectableForStep2(row) : false;
+        });
+      }
+      if (!pastStep2) {
+        const manualIds = pickManualRequiredSelectableIds(list as Step2PickCandidate[]);
+        if (manualIds.length) return manualIds;
+      }
+      return [];
     });
   }, [digest?.candidates, digest?.digest?.status]);
 
@@ -920,18 +1193,6 @@ export function DigestWizard({ digestId }: Props) {
       })
       .slice(0, 4);
   }, [digest?.step1_reject_audit, rejectReasonSummary.entries]);
-  const step1AuditRows = useMemo(() => {
-    const rows = [...(digest?.discovered_news || [])].sort((a: any, b: any) => {
-      const ap = a.in_candidate_pool ? 0 : 1;
-      const bp = b.in_candidate_pool ? 0 : 1;
-      if (ap !== bp) return ap - bp;
-      return String(b.published_at || "").localeCompare(String(a.published_at || ""));
-    });
-    if (step1AuditFilter === "in_pool") return rows.filter((r: any) => r.in_candidate_pool);
-    if (step1AuditFilter === "rejected") return rows.filter((r: any) => !r.in_candidate_pool);
-    return rows;
-  }, [digest?.discovered_news, step1AuditFilter]);
-
   const step1RejectBreakdown = useMemo(() => {
     const byId = new Map(step1FilterCatalog.map((x) => [x.id, x]));
     return Object.entries(step1FilterCounters)
@@ -957,6 +1218,56 @@ export function DigestWizard({ digestId }: Props) {
       rejected: src.rejected,
     };
   }, [step1JournalTotalsApi, step1AuditCounts]);
+
+  const hasStep1StatisticsData = useMemo(() => {
+    if (step1AuditCounts.total > 0) return true;
+    const pcs = digest?.pool_collection_stats as PoolCollectionStatsPayload | undefined;
+    if (pcs?.last_run || pcs?.pool?.total) return true;
+    const meta = digest?.step1_collection_meta;
+    return Boolean(meta && typeof meta === "object" && Object.keys(meta).length > 0);
+  }, [step1AuditCounts, digest?.pool_collection_stats, digest?.step1_collection_meta]);
+
+  const openStep1Statistics = useCallback(async () => {
+    setShowStep1Statistics(true);
+    setStep1StatsLoading(true);
+    setStep1StatsError("");
+    try {
+      const data = await api.getStep1Statistics(digestId);
+      setStep1StatsData(data);
+    } catch (e) {
+      setStep1StatsData(null);
+      setStep1StatsError(e instanceof Error ? e.message : "Не удалось загрузить статистику");
+    } finally {
+      setStep1StatsLoading(false);
+    }
+  }, [digestId]);
+
+  const step1StatsLinkRows = useMemo(() => {
+    const apiLinks = Array.isArray(step1StatsData?.links) ? step1StatsData.links : null;
+    const rows =
+      apiLinks ??
+      [...(digest?.discovered_news || [])].sort((a: any, b: any) => {
+        const ap = a.in_candidate_pool ? 0 : 1;
+        const bp = b.in_candidate_pool ? 0 : 1;
+        if (ap !== bp) return ap - bp;
+        return String(b.published_at || "").localeCompare(String(a.published_at || ""));
+      });
+    let filtered = rows;
+    if (step1AuditFilter === "in_pool") {
+      filtered = filtered.filter((r: any) => r.in_candidate_pool || r.outcome === "in_pool");
+    } else if (step1AuditFilter === "rejected") {
+      filtered = filtered.filter(
+        (r: any) => !(r.in_candidate_pool || r.outcome === "in_pool") && r.outcome !== "verified_only",
+      );
+    }
+    if (step1StatsReasonFilter) {
+      filtered = filtered.filter((r: any) => {
+        const codes = Array.isArray(r.reject_codes) ? r.reject_codes : rejectReasonCodes(String(r.verification_comment || ""));
+        return codes.includes(step1StatsReasonFilter);
+      });
+    }
+    return filtered;
+  }, [step1StatsData, digest?.discovered_news, step1AuditFilter, step1StatsReasonFilter]);
 
   const step1FiltersOrdered = useMemo(() => {
     const byId = new Map(step1FilterCatalog.map((x) => [x.id, x]));
@@ -1208,6 +1519,7 @@ export function DigestWizard({ digestId }: Props) {
     if (rk !== null) setRunningStepKey(rk);
     if (rk === "1") {
       setStep1Elapsed(0);
+      setStep1Live(null);
       requestAnimationFrame(() => {
         step1CardRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
         step2CardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1324,6 +1636,8 @@ export function DigestWizard({ digestId }: Props) {
       if (keptUrls.length > 0) {
         pendingPreselectKeptUrlsRef.current = keptUrls;
         lastSelectedUrlsRef.current = keptUrls;
+      } else if (manualUrlList.length > 0) {
+        pendingManualUrlsRef.current = [...manualUrlList];
       }
       const ac = new AbortController();
       step1AbortRef.current = ac;
@@ -1508,7 +1822,10 @@ export function DigestWizard({ digestId }: Props) {
   const step4ImagesInProgress = loading && runningStepKey === "4img";
   const step4TextsInProgress = loading && runningStepKey === "4txt";
 
-  const step1PhaseText = step1CollectionInProgress ? getStep1PhaseText(step1Elapsed) : "";
+  const step1DisplayElapsed = step1Live?.elapsed_sec ?? step1Elapsed;
+  const step1PhaseText = step1CollectionInProgress
+    ? step1Live?.phase?.trim() || getStep1PhaseText(step1DisplayElapsed)
+    : "";
 
   useEffect(() => {
     if (!step1CollectionInProgress) {
@@ -1521,6 +1838,62 @@ export function DigestWizard({ digestId }: Props) {
     }, 1000);
     return () => clearInterval(id);
   }, [step1CollectionInProgress]);
+
+  useEffect(() => {
+    if (!step1CollectionInProgress) {
+      let cancelled = false;
+      void (async () => {
+        try {
+          const data = await api.getStep1Progress(digestId);
+          if (!cancelled && (data.urls_raw > 0 || data.verified_pool > 0 || data.web_search_api_calls > 0 || !data.running)) {
+            setStep1Live(data);
+          }
+        } catch {
+          /* нет снимка */
+        }
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const data = await api.getStep1Progress(digestId);
+        if (!cancelled) setStep1Live(data);
+      } catch {
+        /* сервер ещё поднимает прогресс */
+      }
+    };
+    void poll();
+    const id = setInterval(() => void poll(), 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [step1CollectionInProgress, digestId]);
+
+  useEffect(() => {
+    if (step1CollectionInProgress) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const data = await api.getStep1Progress(digestId);
+        if (
+          !cancelled &&
+          !data.running &&
+          (data.urls_raw > 0 || data.verified_pool > 0 || data.web_search_api_calls > 0)
+        ) {
+          setStep1Live(data);
+        }
+      } catch {
+        /* нет сохранённого снимка */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [digestId, step1CollectionInProgress, hasStep1StatisticsData]);
 
   useEffect(() => {
     if (!step3InProgress) {
@@ -1696,12 +2069,23 @@ export function DigestWizard({ digestId }: Props) {
             "—"
           )}
           {" · "}
-          Сегодня ProxyAPI:{" "}
-          {digest?.proxyapi_spent_today_rub != null
-            ? `${Number(digest.proxyapi_spent_today_rub).toFixed(2)} ₽`
-            : digest?.tracked_spend_today_rub != null
-              ? `~${Number(digest.tracked_spend_today_rub).toFixed(2)} ₽ (учёт приложения)`
-              : "—"}
+          Сегодня в приложении:{" "}
+          {digest?.tracked_spend_today_rub != null ? (
+            <strong style={{ color: "#e2e8f0" }}>
+              {Number(digest.tracked_spend_today_rub).toFixed(2)} ₽
+            </strong>
+          ) : (
+            "—"
+          )}
+          {digest?.proxyapi_spent_today_rub != null ? (
+            <>
+              {" · "}
+              Ключ ProxyAPI (все сервисы за день):{" "}
+              <strong style={{ color: "#94a3b8" }}>
+                {Number(digest.proxyapi_spent_today_rub).toFixed(2)} ₽
+              </strong>
+            </>
+          ) : null}
         </div>
         <p className="wizard-hint-do">
           Идите по шагам сверху вниз: <strong>0 → 1</strong> → <strong>2</strong> (сначала выбор пятёрки, затем порядок) →{" "}
@@ -1711,8 +2095,9 @@ export function DigestWizard({ digestId }: Props) {
           <p>
             <strong>Статус</strong> — этап конвейера на сервере. <strong>По выпуску (накопительно)</strong> — все
             списания ProxyAPI с момента шага 0 по этому выпуску до фиксации кнопкой внизу (включая шаг 1: веб-поиск,
-            Telegram). <strong>Сегодня ProxyAPI</strong> — все списания с этим ключом за календарный день (МСК), включая
-            другие инструменты с тем же ключом.
+            Telegram). <strong>Сегодня в приложении</strong> — учтённые запросы только этого мастера дайджеста за
+            календарный день (МСК). <strong>Ключ ProxyAPI</strong> — все списания с API-ключом за день, в том числе
+            Cursor, другие проекты и инструменты с тем же ключом.
           </p>
         </WizardWhy>
         <WizardWhy summary="Панель, ссылка и кнопка «Создать на сегодня» — в чём разница">
@@ -1775,125 +2160,25 @@ export function DigestWizard({ digestId }: Props) {
         </div>
       ) : null}
 
-      {rejectReasonSummary.entries.length > 0 ? (
-        <div className="card wizard-collapsible-card" role="status">
-          <details className="digest-step-details">
-            <summary className="digest-step-summary">
-              Статистика отбраковки ссылок (шаг 1) · {rejectReasonSummary.entries.length} причин · всего{" "}
-              {rejectReasonSummary.total}
-            </summary>
-            <div className="digest-step-details-body">
-              <WizardWhy summary="Как читать эти цифры">
-                <p style={{ color: "#cbd5e1" }}>
-                  Здесь суммы по причинам, по которым ссылка не попала в итоговый пул проверенных кандидатов (поиск дал мусор,
-                  агрегатор, не статья, не тема ИИ и т.д.). Если одна причина доминирует — сузьте ручные URL или проверьте
-                  настройки поиска в «Настройки» / <code style={{ color: "#e2e8f0" }}>pipeline_settings.json</code>.
-                </p>
-              </WizardWhy>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {rejectReasonSummary.entries.map(([code, count]) => (
-                  <span key={code} className="news-chip warn" title="Причина отбраковки">
-                    {REJECT_REASON_LABELS[code] ?? code}: {String(count)}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </details>
-        </div>
-      ) : null}
-
-      {step1AuditCounts.total > 0 ? (
-        <div className="card wizard-collapsible-card">
-          <details className="digest-step-details">
-            <summary className="digest-step-summary digest-step-summary--with-copy">
-              <span className="digest-step-summary-text">
-                Журнал проверки ссылок (шаг 1) · проверено {step1AuditCounts.total} · в списке кандидатов (шаг 2){" "}
-                <span style={{ color: "#4ade80" }}>{step1AuditCounts.inPool}</span> · отбраковано{" "}
-                <span style={{ color: "#fca5a5" }}>{step1AuditCounts.rejected}</span>
-              </span>
-              <button
-                type="button"
-                className="digest-copy-line-btn"
-                title="Скопировать строку статистики"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  void copyStep1JournalSummary();
-                }}
-              >
-                {step1SummaryCopied ? "Скопировано" : "Копировать"}
-              </button>
-            </summary>
-            <div className="digest-step-details-body">
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 12 }}>
-                <button
-                  type="button"
-                  className={step1AuditFilter === "all" ? "news-chip ok" : "news-chip"}
-                  onClick={() => setStep1AuditFilter("all")}
-                >
-                  Все ({step1AuditCounts.total})
-                </button>
-                <button
-                  type="button"
-                  className={step1AuditFilter === "in_pool" ? "news-chip ok" : "news-chip"}
-                  onClick={() => setStep1AuditFilter("in_pool")}
-                >
-                  В списке ({step1AuditCounts.inPool})
-                </button>
-                <button
-                  type="button"
-                  className={step1AuditFilter === "rejected" ? "news-chip warn" : "news-chip"}
-                  onClick={() => setStep1AuditFilter("rejected")}
-                >
-                  Отбраковано ({step1AuditCounts.rejected})
-                </button>
-                <button type="button" onClick={() => setShowAllFoundNews(true)}>
-                  Оценки и комментарии →
-                </button>
-              </div>
-              <div style={{ display: "grid", gap: 8, maxHeight: 420, overflow: "auto" }}>
-                {step1AuditRows.map((row: any) => {
-                  const codes =
-                    Array.isArray(row.reject_codes) && row.reject_codes.length
-                      ? row.reject_codes
-                      : rejectReasonCodes(String(row.verification_comment || ""));
-                  return (
-                    <div
-                      key={row.id}
-                      style={{
-                        border: "1px solid #334155",
-                        borderRadius: 8,
-                        padding: "10px 12px",
-                        background: row.in_candidate_pool ? "rgba(34, 197, 94, 0.08)" : "rgba(248, 113, 113, 0.06)",
-                      }}
-                    >
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
-                        {row.in_candidate_pool ? (
-                          <span className="news-chip ok">В списке кандидатов (шаг 2)</span>
-                        ) : row.page_verification_passed ? (
-                          <span className="news-chip">Проверено, не в списке</span>
-                        ) : (
-                          <span className="news-chip warn">Не прошло проверку</span>
-                        )}
-                        {row.source ? <span className="news-chip">{row.source}</span> : null}
-                        <span className="news-chip">{formatNewsPublishedAt(row.published_at)}</span>
-                      </div>
-                      <div style={{ fontWeight: 600, marginBottom: 4 }}>{row.title}</div>
-                      <a href={row.url} target="_blank" rel="noopener noreferrer" style={{ wordBreak: "break-all", fontSize: "0.88rem" }}>
-                        {row.url}
-                      </a>
-                      {!row.in_candidate_pool && codes.length > 0 ? (
-                        <p style={{ margin: "8px 0 0", fontSize: "0.88rem", color: "#e9d5ff", lineHeight: 1.45 }}>
-                          <strong>Причина:</strong>{" "}
-                          {codes.map((x: string) => REJECT_REASON_LABELS[x] ?? x).join("; ")}
-                        </p>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </details>
+      {hasStep1StatisticsData || step1CollectionInProgress ? (
+        <div className="card" role="status">
+          <p className="wizard-hint-do" style={{ margin: 0, fontSize: "0.95rem" }}>
+            {step1CollectionInProgress && step1Live?.running ? (
+              <>
+                Сбор идёт: запросов web_search <strong>{step1Live.web_search_api_calls}</strong>, сырых URL{" "}
+                <strong>{step1Live.urls_raw}</strong>, на проверке HTTP <strong>{step1Live.urls_sent_to_http}</strong>, в
+                пуле <strong style={{ color: "#4ade80" }}>{step1Live.verified_pool}</strong>, отбраковано{" "}
+                <strong style={{ color: "#fca5a5" }}>{step1Live.rejected_total}</strong>.
+              </>
+            ) : (
+              <>
+                Журнал шага 1: проверено <strong>{step1AuditCounts.total || step1ModalJournal.total}</strong>, в списке
+                кандидатов <strong style={{ color: "#4ade80" }}>{step1AuditCounts.inPool || step1ModalJournal.inPool}</strong>
+                , отбраковано <strong style={{ color: "#fca5a5" }}>{step1AuditCounts.rejected || step1ModalJournal.rejected}</strong>
+                . Подробная аналитика — кнопка <strong>«Статистика»</strong> в блоке шага 1.
+              </>
+            )}
+          </p>
         </div>
       ) : null}
 
@@ -2061,27 +2346,32 @@ export function DigestWizard({ digestId }: Props) {
           </p>
         ) : null}
         {step1CollectionInProgress ? (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
-            <WizardStepStatus
-              headline="Идёт сбор кандидатов"
-              phase={step1PhaseText}
-              elapsedSec={step1Elapsed}
-              hint={
-                step1Stopping
-                  ? "Останавливаем после текущей проверки URL…"
-                  : "Итеративный сбор обычно занимает 3–5 минут. Можно остановить — сохранится частичный результат."
-              }
-            />
-            <button
-              type="button"
-              className="btn-rebuild"
-              disabled={step1Stopping}
-              title="Остановить поиск и проверку; уже найденные кандидаты сохранятся"
-              onClick={() => void cancelStep1Collection()}
-            >
-              {step1Stopping ? "Останавливаем…" : "Остановить сбор"}
-            </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "flex-start" }}>
+              <WizardStepStatus
+                headline="Идёт сбор кандидатов"
+                phase={step1PhaseText}
+                elapsedSec={step1DisplayElapsed}
+                hint={
+                  step1Stopping || step1Live?.cancel_requested
+                    ? "Останавливаем после текущей проверки URL…"
+                    : "Итеративный сбор обычно занимает 3–5 минут. Можно остановить — сохранится частичный результат."
+                }
+              />
+              <button
+                type="button"
+                className="btn-rebuild"
+                disabled={step1Stopping}
+                title="Остановить поиск и проверку; уже найденные кандидаты сохранятся"
+                onClick={() => void cancelStep1Collection()}
+              >
+                {step1Stopping ? "Останавливаем…" : "Остановить сбор"}
+              </button>
+            </div>
+            <Step1LivePanel live={step1Live} />
           </div>
+        ) : step1Live ? (
+          <Step1LivePanel live={step1Live} finished />
         ) : null}
         {proxyapiBudgetText ? <ProxyapiBudgetAlert message={proxyapiBudgetText} compact /> : null}
         <textarea
@@ -2108,6 +2398,14 @@ export function DigestWizard({ digestId }: Props) {
             onClick={() => runStep1(false)}
           >
             Запустить сбор кандидатов → результат в «Шаг 2» ниже
+          </button>
+          <button
+            type="button"
+            disabled={!hasStep1StatisticsData || step1CollectionInProgress}
+            title="Воронка, расходы ProxyAPI, отбраковка и журнал по каждой ссылке"
+            onClick={() => void openStep1Statistics()}
+          >
+            Статистика
           </button>
           <button
             type="button"
@@ -2144,107 +2442,304 @@ export function DigestWizard({ digestId }: Props) {
             <strong>«Пересобрать пул кандидатов»</strong> в шапке шага 2.
           </p>
         ) : null}
-        {!step1CollectionInProgress && (poolCollection?.last_run || poolCollection?.pool?.total) ? (
-          <PoolCollectionStatsPanel stats={poolCollection} showHistory={Boolean((poolCollection?.history?.length ?? 0) > 1)} />
-        ) : null}
-        {!step1CollectionInProgress && step1CollectionMeta ? (
-          <p className="wizard-hint-do" style={{ marginTop: 8, fontSize: "0.9rem" }}>
-            Итераций: <strong>{Number(step1CollectionMeta.iterations ?? 0)}</strong>
-            {Number(step1CollectionMeta.min_collection_iterations ?? 0) > 0 ? (
-              <>
-                {" "}
-                (мин. <strong>{Number(step1CollectionMeta.min_collection_iterations)}</strong>)
-              </>
+      </div>
+
+      {showStep1Statistics ? (
+        <div className="step1-stats-modal-overlay" role="presentation" onClick={() => setShowStep1Statistics(false)}>
+          <div
+            className="step1-stats-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="step1-stats-modal-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="step1-stats-modal-header">
+              <div>
+                <h3 id="step1-stats-modal-title" style={{ margin: 0 }}>
+                  Статистика шага 1
+                </h3>
+                <p className="wizard-hint-do" style={{ margin: "6px 0 0", fontSize: "0.92rem" }}>
+                  Воронка, расходы, отбраковка и журнал по каждой ссылке — для разбора, почему мало кандидатов.
+                </p>
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  disabled={step1StatsLoading}
+                  title="Пересобрать снимок из журнала в базе"
+                  onClick={() => {
+                    setStep1StatsLoading(true);
+                    setStep1StatsError("");
+                    void api
+                      .getStep1Statistics(digestId, true)
+                      .then((data) => setStep1StatsData(data))
+                      .catch((e) =>
+                        setStep1StatsError(e instanceof Error ? e.message : "Не удалось обновить статистику"),
+                      )
+                      .finally(() => setStep1StatsLoading(false));
+                  }}
+                >
+                  {step1StatsLoading ? "Загрузка…" : "Обновить"}
+                </button>
+                <button type="button" onClick={() => setShowStep1Statistics(false)}>
+                  Закрыть
+                </button>
+              </div>
+            </div>
+
+            {step1StatsError ? (
+              <p className="wizard-hint-do" style={{ color: "#fca5a5" }}>
+                {step1StatsError}
+              </p>
             ) : null}
-            {" · "}
-            остановка: <strong>{formatStep1StopReason(step1CollectionMeta.stop_reason)}</strong>
-            {" · "}
-            в пуле: <strong>{Number(step1CollectionMeta.verified_total ?? 0)}</strong>
-            {" · "}
-            время: <strong>{Math.max(0, Number(step1CollectionMeta.elapsed_sec ?? 0))} c</strong>
-            {digest?.release_cost_rub != null && Number(digest.release_cost_rub) > 0 ? (
-              <>
-                {" · "}
-                ProxyAPI (накопительно): <strong>{Number(digest.release_cost_rub).toFixed(2)} ₽</strong>
-                {releaseCostFinalized ? " · зафикс." : ""}
-              </>
+
+            <div className="step1-stats-modal-summary">
+              <span className="news-chip ok">
+                В списке: {step1StatsData?.summary?.in_pool ?? step1AuditCounts.inPool}
+              </span>
+              <span className="news-chip warn">
+                Отбраковано: {step1StatsData?.summary?.rejected ?? step1AuditCounts.rejected}
+              </span>
+              <span className="news-chip">
+                Проверено URL: {step1StatsData?.summary?.total_links ?? step1AuditCounts.total}
+              </span>
+              {step1StatsData?.generated_at ? (
+                <span className="news-chip">Снимок: {formatRunWhen(step1StatsData.generated_at)}</span>
+              ) : null}
+            </div>
+
+            {step1StatsData?.insights ? (
+              <div className="step1-stats-insights" role="status">
+                <div className="step1-stats-section-title" style={{ marginTop: 0 }}>
+                  Разбор и что делать
+                </div>
+                <p className="step1-stats-insights-headline">{step1StatsData.insights.headline}</p>
+                {Array.isArray(step1StatsData.insights.dominant_rejects) &&
+                step1StatsData.insights.dominant_rejects.length > 0 ? (
+                  <div className="step1-stats-dominant-list">
+                    {step1StatsData.insights.dominant_rejects
+                      .filter((d: { is_dominant?: boolean }) => d.is_dominant)
+                      .map((d: { code: string; label: string; count: number; share_pct: number }) => (
+                        <span key={d.code} className="news-chip warn step1-stats-dominant-chip" title={d.label}>
+                          <strong>{d.share_pct}%</strong> · {REJECT_REASON_LABELS[d.code] ?? d.label}: {d.count}
+                        </span>
+                      ))}
+                  </div>
+                ) : null}
+                {Array.isArray(step1StatsData.insights.efficiency_notes) &&
+                step1StatsData.insights.efficiency_notes.length > 0 ? (
+                  <ul style={{ margin: "0 0 12px", paddingLeft: "1.2rem", fontSize: "0.88rem", color: "#94a3b8" }}>
+                    {step1StatsData.insights.efficiency_notes.map((note: string, i: number) => (
+                      <li key={i}>{note}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                {Array.isArray(step1StatsData.insights.recommendations) &&
+                step1StatsData.insights.recommendations.length > 0 ? (
+                  <ul className="step1-stats-rec-list">
+                    {step1StatsData.insights.recommendations.map(
+                      (rec: { priority: string; title: string; detail: string }, i: number) => (
+                        <li
+                          key={`${rec.title}-${i}`}
+                          className={`step1-stats-rec-item priority-${rec.priority || "medium"}`}
+                        >
+                          <div className="step1-stats-rec-title">
+                            {rec.priority === "high" ? "⚠ " : rec.priority === "low" ? "· " : "→ "}
+                            {rec.title}
+                          </div>
+                          <p className="step1-stats-rec-detail">{rec.detail}</p>
+                        </li>
+                      ),
+                    )}
+                  </ul>
+                ) : null}
+              </div>
             ) : null}
-            {" · "}
-            батч: <strong>{Math.max(1, Number(step1CollectionMeta.batch_size ?? 20))}</strong>
-            {" · "}
-            цель воронки:{" "}
-            <strong>
-              {Math.max(
-                10,
-                Number(
-                  step1CollectionMeta.collection_target_pages ??
-                    step1CollectionMeta.target_max_candidates ??
-                    15,
-                ),
-              )}
-            </strong>
-            {Number(step1CollectionMeta.urls_raw_merged ?? 0) > 0 ? (
-              <>
-                {" "}
-                · воронка: сырые URL{" "}
-                <strong>{Number(step1CollectionMeta.urls_raw_unique ?? step1CollectionMeta.urls_raw_merged)}</strong>
-                {Number(step1CollectionMeta.urls_raw_unique ?? 0) > 0 &&
-                Number(step1CollectionMeta.urls_raw_merged ?? 0) !==
-                  Number(step1CollectionMeta.urls_raw_unique ?? 0) ? (
-                  <> (батчей {Number(step1CollectionMeta.urls_raw_merged)})</>
-                ) : null}
-                {", "}на HTTP <strong>{Number(step1CollectionMeta.urls_sent_to_http ?? 0)}</strong>
-                {", "}отсев до HTTP <strong>{Number(step1CollectionMeta.urls_prefilter_rejected ?? 0)}</strong>
-                {step1CollectionMeta.conversion_e2e_pct != null ? (
-                  <>
-                    {" "}
-                    · конверсия в пул{" "}
-                    <strong>{Number(step1CollectionMeta.conversion_e2e_pct).toFixed(1)}%</strong>
-                    {step1CollectionMeta.conversion_http_pct != null ? (
-                      <> (HTTP→пул {Number(step1CollectionMeta.conversion_http_pct).toFixed(1)}%)</>
-                    ) : null}
-                  </>
-                ) : null}
-                {Number(step1CollectionMeta.estimated_raw_for_10 ?? 0) > 0 ? (
-                  <>
-                    {" "}
-                    · план raw для 10: <strong>{Number(step1CollectionMeta.estimated_raw_for_10)}</strong>
-                  </>
-                ) : null}
-              </>
+
+            {(step1StatsData?.pool_collection_stats ?? poolCollection)?.last_run ||
+            (step1StatsData?.pool_collection_stats ?? poolCollection)?.pool?.total ? (
+              <PoolCollectionStatsPanel
+                stats={(step1StatsData?.pool_collection_stats ?? poolCollection) as PoolCollectionStatsPayload}
+                showHistory={Boolean(
+                  ((step1StatsData?.pool_collection_stats ?? poolCollection)?.history?.length ?? 0) > 1,
+                )}
+              />
             ) : null}
+
+            {((step1StatsData?.pool_collection_stats ?? poolCollection)?.step1_usage ||
+              step1StatsData?.step1_collection_meta ||
+              step1CollectionMeta) ? (
+              <Step1UsageStatsPanel
+                usage={
+                  (step1StatsData?.pool_collection_stats ?? poolCollection)?.step1_usage ?? poolCollection?.step1_usage
+                }
+                stopReasonLabel={formatStep1StopReason(
+                  (step1StatsData?.step1_collection_meta ?? step1CollectionMeta)?.stop_reason,
+                )}
+                releaseCostRub={digest?.release_cost_rub}
+                releaseCostFinalized={releaseCostFinalized}
+                topRejectReasons={(
+                  Object.entries(
+                    (step1StatsData?.rejected_reasons_summary ?? digest?.rejected_reasons_summary ?? {}) as Record<
+                      string,
+                      number
+                    >,
+                  ).filter(([, c]) => Number(c) > 0) as [string, number][]
+                ).slice(0, 5)}
+                rejectSamples={rejectAuditSamples}
+              />
+            ) : null}
+
             {rejectReasonSummary.entries.length > 0 ? (
               <>
-                {" · "}
-                топ отбраковки:{" "}
-                {rejectReasonSummary.entries.slice(0, 3).map(([code, count], idx) => (
-                  <span key={code}>
-                    {idx > 0 ? ", " : null}
-                    <strong>
-                      {REJECT_REASON_LABELS[code] ? REJECT_REASON_LABELS[code] : code} ({count})
-                    </strong>
-                  </span>
-                ))}
+                <div className="step1-stats-section-title">Статистика отбраковки по причинам</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {rejectReasonSummary.entries.map(([code, count]) => (
+                    <button
+                      key={code}
+                      type="button"
+                      className={step1StatsReasonFilter === code ? "news-chip warn" : "news-chip"}
+                      title="Фильтр журнала по этой причине"
+                      onClick={() => setStep1StatsReasonFilter((prev) => (prev === code ? "" : code))}
+                    >
+                      {REJECT_REASON_LABELS[code] ?? code}: {String(count)}
+                    </button>
+                  ))}
+                  {step1StatsReasonFilter ? (
+                    <button type="button" className="news-chip" onClick={() => setStep1StatsReasonFilter("")}>
+                      Сбросить фильтр
+                    </button>
+                  ) : null}
+                </div>
               </>
             ) : null}
-            {rejectAuditSamples.length > 0 ? (
+
+            {step1RejectBreakdown.length > 0 ? (
               <>
-                <br />
-                Примеры отсева:{" "}
-                {rejectAuditSamples.map(({ code, sample }, idx) => (
-                  <span key={`${code}-${idx}`}>
-                    {idx > 0 ? "; " : null}
-                    <strong>{REJECT_REASON_LABELS[code] ? REJECT_REASON_LABELS[code] : code}</strong>:{" "}
-                    {String(sample.host || "").trim() || hostFromUrl(String(sample.url || "")) || "без домена"}
-                    {sample.published_at ? ` · ${String(sample.published_at).slice(0, 10)}` : ""}
-                    {sample.title ? ` · ${truncateText(String(sample.title), 90)}` : ""}
-                  </span>
-                ))}
+                <div className="step1-stats-section-title">Счётчики фильтров шага 1</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {step1RejectBreakdown.map((x) => (
+                    <span key={x.id} className="news-chip warn" title={x.label}>
+                      {x.label}: {x.count}
+                    </span>
+                  ))}
+                </div>
               </>
             ) : null}
-          </p>
-        ) : null}
-      </div>
+
+            {step1StatsData?.curious_tone_audit &&
+            Object.keys(step1StatsData.curious_tone_audit as Record<string, unknown>).length > 0 ? (
+              <>
+                <div className="step1-stats-section-title">Доп. аудит фильтров</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {Object.entries(step1StatsData.curious_tone_audit as Record<string, number>)
+                    .filter(([, v]) => Number(v) > 0)
+                    .map(([key, count]) => (
+                      <span key={key} className="news-chip warn">
+                        {key}: {count}
+                      </span>
+                    ))}
+                </div>
+              </>
+            ) : null}
+
+            {step1StatsData?.registry_buckets &&
+            Object.keys(step1StatsData.registry_buckets as Record<string, number>).length > 0 ? (
+              <>
+                <div className="step1-stats-section-title">Реестр URL (общий, 90 дн.)</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {Object.entries(step1StatsData.registry_buckets as Record<string, number>).map(([bucket, count]) => (
+                    <span key={bucket} className="news-chip">
+                      {bucket}: {count}
+                    </span>
+                  ))}
+                </div>
+              </>
+            ) : null}
+
+            <div className="step1-stats-section-title">
+              Журнал по ссылкам · показано {step1StatsLinkRows.length}
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+              <button
+                type="button"
+                className={step1AuditFilter === "all" ? "news-chip ok" : "news-chip"}
+                onClick={() => setStep1AuditFilter("all")}
+              >
+                Все ({step1StatsData?.summary?.total_links ?? step1AuditCounts.total})
+              </button>
+              <button
+                type="button"
+                className={step1AuditFilter === "in_pool" ? "news-chip ok" : "news-chip"}
+                onClick={() => setStep1AuditFilter("in_pool")}
+              >
+                В списке ({step1StatsData?.summary?.in_pool ?? step1AuditCounts.inPool})
+              </button>
+              <button
+                type="button"
+                className={step1AuditFilter === "rejected" ? "news-chip warn" : "news-chip"}
+                onClick={() => setStep1AuditFilter("rejected")}
+              >
+                Отбраковано ({step1StatsData?.summary?.rejected ?? step1AuditCounts.rejected})
+              </button>
+              <button type="button" className="news-chip" onClick={() => void copyStep1JournalSummary()}>
+                {step1SummaryCopied ? "Скопировано" : "Копировать сводку"}
+              </button>
+            </div>
+            <div className="step1-stats-links">
+              {step1StatsLinkRows.map((row: any) => {
+                const codes =
+                  Array.isArray(row.reject_codes) && row.reject_codes.length
+                    ? row.reject_codes
+                    : rejectReasonCodes(String(row.verification_comment || ""));
+                const labels =
+                  Array.isArray(row.reject_labels) && row.reject_labels.length
+                    ? row.reject_labels
+                    : codes.map((x: string) => REJECT_REASON_LABELS[x] ?? x);
+                const inPool = Boolean(row.in_candidate_pool || row.outcome === "in_pool");
+                const verifiedOnly = row.outcome === "verified_only" || (row.page_verification_passed && !inPool);
+                const rowClass = inPool ? "in-pool" : verifiedOnly ? "verified-only" : "rejected";
+                return (
+                  <div key={row.id ?? row.url} className={`step1-stats-link-row ${rowClass}`}>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+                      {inPool ? (
+                        <span className="news-chip ok">В списке кандидатов</span>
+                      ) : verifiedOnly ? (
+                        <span className="news-chip">Проверено, не в списке</span>
+                      ) : (
+                        <span className="news-chip warn">Не прошло проверку</span>
+                      )}
+                      {row.source_stage ? <span className="news-chip">{row.source_stage}</span> : null}
+                      {row.source ? <span className="news-chip">{row.source}</span> : null}
+                      <span className="news-chip">{formatNewsPublishedAt(row.published_at)}</span>
+                    </div>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>{row.title || "—"}</div>
+                    <a
+                      href={row.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={{ wordBreak: "break-all", fontSize: "0.88rem" }}
+                    >
+                      {row.url}
+                    </a>
+                    {!inPool && labels.length > 0 ? (
+                      <p style={{ margin: "8px 0 0", fontSize: "0.88rem", color: "#e9d5ff", lineHeight: 1.45 }}>
+                        <strong>Причина:</strong> {labels.join("; ")}
+                      </p>
+                    ) : null}
+                    {row.verification_comment ? (
+                      <details style={{ marginTop: 8, fontSize: "0.82rem", color: "#94a3b8" }}>
+                        <summary>Технический комментарий</summary>
+                        <pre style={{ whiteSpace: "pre-wrap", margin: "6px 0 0" }}>{row.verification_comment}</pre>
+                      </details>
+                    ) : null}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {showAllFoundNews ? (
         <div
@@ -2853,7 +3348,7 @@ export function DigestWizard({ digestId }: Props) {
             </div>
           ) : null}
           <div className="news-pick-list">
-            {candidatesSorted.map((c) => {
+            {candidatesSorted.map((c, listIndex) => {
               const checked = selected.includes(c.id);
               const atMax = selected.length >= 5;
               const selectable = candidateSelectableForStep2(c);
@@ -2873,7 +3368,7 @@ export function DigestWizard({ digestId }: Props) {
                     onChange={() => toggleSelected(c.id)}
                   />
                   <div className="news-pick-main">
-                    <div className="news-pick-eyebrow">Кандидат №{c.original_number}</div>
+                    <div className="news-pick-eyebrow">Кандидат №{listIndex + 1}</div>
                     <label htmlFor={inputId} className="news-pick-title-label">
                       <span className="news-pick-title">{c.title}</span>
                     </label>
@@ -2972,6 +3467,25 @@ export function DigestWizard({ digestId }: Props) {
               );
             })}
           </div>
+          {showRebuildPoolButton ? (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14, marginTop: 4 }}>
+              <button
+                type="button"
+                className="btn-rebuild"
+                disabled={loading}
+                title={
+                  selected.length > 0
+                    ? `Оставить ${selected.length} отмеченных новостей, остальные слоты пула (до 15) пересобрать`
+                    : pastStep2ForRebuild
+                      ? "Новый поиск и проверка; сброс выбора, порядка, аналитики и финала"
+                      : "Заново собрать список кандидатов (поиск, проверка ссылок, скоринг)"
+                }
+                onClick={() => runStep1(true)}
+              >
+                Пересобрать пул кандидатов
+              </button>
+            </div>
+          ) : null}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"

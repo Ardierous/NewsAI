@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.proxyapi_client import ProxyApiClient, set_proxyapi_log_context
+from app.proxyapi_client import ProxyApiClient, build_web_search_user_prompt, set_proxyapi_log_context
 
 
 def _settings(**kwargs):
@@ -18,6 +18,7 @@ def _settings(**kwargs):
         "proxyapi_web_search_model": "gpt-4o-mini",
         "proxyapi_web_search_preview_model": "gpt-4o-mini-search-preview",
         "proxyapi_web_search_context_size": "medium",
+        "source_tiers_path": MagicMock(),
     }
     base.update(kwargs)
     return SimpleNamespace(**base)
@@ -102,3 +103,33 @@ def test_search_passes_proxyapi_log_headers(monkeypatch: pytest.MonkeyPatch):
     assert headers["X-Log-DigestType"] == "curious"
     assert headers["X-Log-Source"] == "step1_web_search"
     set_proxyapi_log_context()
+
+
+def test_build_web_search_user_prompt_includes_query_and_hosts():
+    query = "after:2026-06-01 before:2026-06-16 ИИ (site:habr.com OR site:vc.ru)"
+    prompt = build_web_search_user_prompt(
+        query,
+        12,
+        curious_search=True,
+        allowed_hosts=["habr.com", "vc.ru"],
+        source_tiers_path=MagicMock(),
+    )
+    assert query in prompt
+    assert "Поисковый запрос" in prompt
+    assert "habr.com, vc.ru" in prompt
+    assert "курьёзного дайджеста" in prompt
+    assert "Тема выпуска" in prompt
+    assert "LLM" in prompt
+
+
+def test_build_web_search_user_prompt_serious_topic_anchor():
+    prompt = build_web_search_user_prompt(
+        "after:2026-06-01 AI",
+        10,
+        curious_search=False,
+        allowed_hosts=["ria.ru", "tass.ru"],
+    )
+    assert "Найди до 10 СВЕЖИХ новостей про ИИ, нейросети, LLM" in prompt
+    assert "Тема выпуска: новости про искусственный интеллект" in prompt
+    assert "Гигачат" in prompt
+    assert "Искать ТОЛЬКО на доменах из политики источников: ria.ru, tass.ru" in prompt

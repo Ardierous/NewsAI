@@ -2,10 +2,46 @@
 
 from __future__ import annotations
 
+import logging
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.services.digest_type_policy import is_curious_digest, normalize_digest_type
+
+logger = logging.getLogger(__name__)
+
+FILTER_STATS: dict[str, int] = defaultdict(int)
+
+# Fail-fast порядок pre-HTTP для курьёза (частые → редкие); serious — из step1_filter_settings.json.
+CURIOUS_PREFILTER_DEFAULT_ORDER: tuple[str, ...] = (
+    "non_policy_source",
+    "news_listing_page",
+    "support_documentation_page",
+    "published_before_window",
+    "forbidden_media_source",
+    "llm_hallucinated_url",
+    "invalid_url",
+    "product_tool_page",
+    "duplicate_url_skip",
+    "recent_top5_repeat",
+)
+
+
+def reset_step1_filter_stats() -> None:
+    FILTER_STATS.clear()
+
+
+def record_step1_filter_reject(reason: str) -> None:
+    code = str(reason or "").strip()
+    if not code:
+        return
+    FILTER_STATS[code] += 1
+    total = sum(FILTER_STATS.values())
+    from app.services.step1_filter_audit import filter_stats_log_interval
+
+    if total % filter_stats_log_interval() == 0:
+        logger.info("[FILTER_STATS] %s", dict(FILTER_STATS))
 
 DigestFilterScope = Literal["shared", "serious", "curious"]
 
@@ -53,6 +89,12 @@ STEP1_FILTER_CATALOG: tuple[Step1FilterDef, ...] = (
         "pre_http",
     ),
     Step1FilterDef("news_listing_page", "Лента/рубрика", "Отсекает страницы-списки, разделы, теги и поисковые выдачи.", "pre_http"),
+    Step1FilterDef(
+        "support_documentation_page",
+        "Справка и документация",
+        "Отсекает help/support/docs/FAQ — не новостные статьи.",
+        "pre_http",
+    ),
     Step1FilterDef(
         "llm_hallucinated_url",
         "Подозрительный URL",

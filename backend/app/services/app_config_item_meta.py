@@ -49,8 +49,8 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
         alternatives="другой base URL только если провайдер явно указал иной адрес.",
     ),
     "proxyapi_model": ConfigItemMeta(
-        why="gpt-4.1 — основная модель Crew/аналитики: баланс качества и стоимости для русскоязычного дайджеста.",
-        alternatives="openai/gpt-4.1-mini (дешевле), openai/gpt-4o (дороже); префикс openai/ обязателен для LiteLLM.",
+        why="gpt-4.1-mini — основная модель Crew/аналитики: баланс качества и стоимости для русскоязычного дайджеста.",
+        alternatives="openai/gpt-4.1 (дороже, максимум качества), openai/gpt-4.1-nano (дешевле); префикс openai/ обязателен для LiteLLM.",
     ),
     "proxyapi_image_model": ConfigItemMeta(
         why="gpt-image-1 — модель обложек шага 4; шаг 4 по умолчанию выключен.",

@@ -46,12 +46,69 @@ def test_hallucinated_urls_rejected():
     )
 
 
+def test_digest35_hallucinated_techcrunch_slug_only_rejected():
+    """URL из прогона digest #35 — шаблонные slug-only пути TechCrunch."""
+    fake_urls = (
+        "https://techcrunch.com/2026/06/15/ai-company-announces-partnership-with-major-retailer/",
+        "https://techcrunch.com/2026/06/16/ai-startup-launches-new-product-for-automating-marketing-campaigns/",
+        "https://www.wired.com/2026/06/14/ai-ethics-debate-continues/",
+    )
+    for u in fake_urls:
+        assert news_search.url_suspected_hallucinated(u), u
+        assert news_search.search_url_prefilter_reason(u) == "llm_hallucinated_url", u
+    real = "https://techcrunch.com/2026/06/08/following-anthropic-openai-files-confidentially-for-ipo/"
+    assert not news_search.url_suspected_hallucinated(real)
+
+
+def test_support_documentation_prefilter():
+    from app.services.step1_candidate_policy import is_support_documentation_url
+
+    assert is_support_documentation_url("https://browser.yandex.ru/help/en/security/virus-protection")
+    assert is_support_documentation_url(
+        "https://m.yandex.ru/support/yandex-360/business/purchase/en/troubleshooting/faq-plans-changes"
+    )
+    assert news_search.search_url_prefilter_reason(
+        "https://browser.yandex.ru/help/en/security/virus-protection"
+    ) == "support_documentation_page"
+    assert not is_support_documentation_url("https://habr.com/ru/news/996360/")
+
+
 def test_parse_search_window_dates():
     earliest, anchor = news_search.parse_search_window_dates(
         "after:2026-06-01 before:2026-06-08 нейросети "
     )
     assert earliest == date(2026, 6, 1)
     assert anchor == date(2026, 6, 8)
+
+
+def test_url_path_publication_day_formats():
+    assert news_search.url_path_publication_day(
+        "https://techcrunch.com/2026/06/08/following-anthropic-openai-files-confidentially-for-ipo/"
+    ) == date(2026, 6, 8)
+    assert news_search.url_path_publication_day(
+        "https://ria.ru/20260519/ii-2093333250.html"
+    ) == date(2026, 5, 19)
+    assert news_search.url_path_publication_day(
+        "https://www.vedomosti.ru/technologies/articles/2023/05/31/977936-test"
+    ) == date(2023, 5, 31)
+    assert news_search.url_path_publication_day(
+        "https://example.com/news/31.05.2026/story"
+    ) == date(2026, 5, 31)
+    assert news_search.url_path_publication_day(
+        "https://example.com/archive/31/05/2026/story"
+    ) == date(2026, 5, 31)
+    assert news_search.url_path_publication_day(
+        "https://example.com/us/06/08/2026/story"
+    ) == date(2026, 8, 6)
+    assert news_search.url_path_publication_day(
+        "https://example.com/articles/2026-06-08-openai-ipo.html"
+    ) == date(2026, 6, 8)
+
+
+def test_publication_day_from_url_candidates_prefers_seed():
+    seed = "https://techcrunch.com/2026/06/08/following-anthropic-openai-files-confidentially-for-ipo/"
+    stored = "https://techcrunch.com/following-anthropic-openai-files-confidentially-for-ipo/"
+    assert news_search.publication_day_from_url_candidates(seed, stored) == date(2026, 6, 8)
 
 
 def test_search_url_path_date_outside_window():
@@ -128,6 +185,8 @@ def test_listing_page_urls_rejected():
     assert news_search.is_listing_page_url("https://arxiv.org/list/cs.CL/2024-03") is True
     assert news_search.is_listing_page_url("https://www.aiweekly.co/ai-news-today") is True
     assert news_search.is_listing_page_url("https://vc.ru/ai") is True
+    assert news_search.is_listing_page_url("https://www.ferra.ru/life/humor/") is True
+    assert news_search.is_listing_page_url("https://dtf.ru/id193446") is True
     assert news_search._is_bad_search_url("https://shtruzel.ru/news") is True
     assert news_search._is_bad_search_url("https://arxiv.org/list/cs.CL/2024-03") is True
     assert news_search.is_listing_page_url("https://www.1tv.ru/news/2026-04-26/540448") is False
@@ -140,6 +199,23 @@ def test_listing_page_urls_rejected():
         is True
     )
     assert news_search._is_bad_search_url("https://www.networkworld.com/artificial-intelligence/") is True
+
+
+def test_step1_listing_seed_url_covers_section_paths():
+    assert news_search.is_step1_listing_seed_url(
+        "https://www.content-review.com/articles/artificial_intelligence/"
+    ) is True
+    assert news_search.is_step1_listing_seed_url("https://vc.ru/ai") is True
+    assert news_search.is_step1_listing_seed_url(
+        "https://www.1tv.ru/news/2026-04-26/540448"
+    ) is False
+
+
+def test_editorial_listing_titles():
+    assert news_search.is_editorial_listing_title("Юмор — все статьи и новости — Ferra.ru") is True
+    assert news_search.is_editorial_listing_title("Новости , 14 июня") is True
+    assert news_search.is_editorial_listing_title("Иван (id193446)") is True
+    assert news_search.is_editorial_listing_title("Google Gemini удалил 30 000 строк кода") is False
 
 
 def test_topic_pool_urls_rejected():
@@ -398,7 +474,8 @@ def test_fetch_curious_prioritized_reaches_tech_hosts_with_small_cap(monkeypatch
     assert calls
     assert any("habr.com" in hosts or "vc.ru" in hosts for hosts in calls)
     assert any("reddit.com" in hosts for hosts in calls)
-    assert urls[0].startswith("https://www.popmech.ru/")
+    # После sort: оба T1 без даты в path; reddit slug «funny_ai_fail» выше по keyword score.
+    assert urls[0] == "https://www.reddit.com/r/ChatGPT/comments/funny_ai_fail/"
     assert any("habr.com" in u or "vc.ru" in u for u in urls)
     assert any("reddit.com" in hosts for hosts in calls)
 

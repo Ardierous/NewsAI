@@ -38,6 +38,12 @@ def request_cancel(digest_id: int) -> bool:
         if did not in _running:
             return False
         _cancelled.add(did)
+        try:
+            from app.services.step1_live_progress import mark_live_cancel_requested
+
+            mark_live_cancel_requested(did)
+        except ImportError:
+            pass
         return True
 
 

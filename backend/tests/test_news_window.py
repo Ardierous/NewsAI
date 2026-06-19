@@ -86,6 +86,32 @@ def test_undefined_date_reject_code():
     )
 
 
+def test_techcrunch_date_from_seed_url_when_stored_lacks_path():
+    d = _digest("2026-06-16", days=10, kind="calendar")
+    seed = "https://techcrunch.com/2026/06/08/following-anthropic-openai-files-confidentially-for-ipo/"
+    stored = "https://techcrunch.com/following-anthropic-openai-files-confidentially-for-ipo/"
+    with patch.object(ds, "digest_news_anchor_date", return_value=date(2026, 6, 16)):
+        with patch.object(ds, "digest_earliest_news_date", return_value=date(2026, 6, 6)):
+            assert (
+                ds._published_at_window_reject_code(
+                    d, ds.PUBLISHED_AT_UNDEFINED, stored, seed_url=seed
+                )
+                is None
+            )
+
+
+def test_apply_bundle_techcrunch_prefers_seed_path_date():
+    item: dict = {}
+    bundle = {
+        "published_at": None,
+        "final_url": "https://techcrunch.com/following-anthropic-openai-files-confidentially-for-ipo/",
+        "display_url": "https://techcrunch.com/following-anthropic-openai-files-confidentially-for-ipo/",
+    }
+    seed = "https://techcrunch.com/2026/06/08/following-anthropic-openai-files-confidentially-for-ipo/"
+    ds._apply_bundle_published_at(item, bundle, seed_url=seed)
+    assert "2026-06-08" in str(item.get("published_at") or "")
+
+
 def test_verify_rejects_vedomosti_2023_in_default_window(monkeypatch):
     """Регрессия: статья 2023 в URL не должна проходить при выпуске 2026-05-15 и окне 3 дня."""
     url = (

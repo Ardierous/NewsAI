@@ -16,6 +16,7 @@ from app.services.digest_service import (
     STATUS_SELECTED,
     STATUS_STEP0,
     STATUS_STEP1,
+    _rebalance_verified_pool,
 )
 from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 
@@ -149,7 +150,8 @@ def test_step1_raises_402_when_proxyapi_zero_balance(monkeypatch: pytest.MonkeyP
     assert service.digest_proxyapi_budget_exceeded(digest.id)
 
 
-def test_manual_listing_url_is_not_accepted_as_verified_candidate(monkeypatch: pytest.MonkeyPatch):
+def test_manual_listing_url_rejected_not_expanded(monkeypatch: pytest.MonkeyPatch):
+    """Ручное поле: лента vc.ru не разворачивается — нужна прямая ссылка на статью."""
     service, digest = _make_service(monkeypatch)
 
     monkeypatch.setattr(
@@ -170,8 +172,72 @@ def test_manual_listing_url_is_not_accepted_as_verified_candidate(monkeypatch: p
     assert len(rows) == 1
     row = rows[0]
     assert row["page_verified"] is False
-    assert row["headline_editorial_ok"] is False
-    assert "REJECT_REASON:news_listing_page" in str(row.get("verification_comment") or "")
+    assert "news_listing_page" in str(row.get("verification_comment") or "")
+
+
+def test_manual_vc_profile_rejected(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    monkeypatch.setattr(
+        ds,
+        "_fetch_article_page_bundle",
+        lambda _url: {
+            "ok": True,
+            "final_url": "https://vc.ru/id5731761",
+            "display_url": "https://vc.ru/id5731761",
+            "headline": "Артур Мартыгин (id5731761)",
+            "topic_corpus": "профиль " * 30,
+            "is_listing_page": False,
+            "headline_strict": True,
+            "article_markers": True,
+        },
+    )
+    rows = service._build_manual_candidates(
+        digest, ["https://vc.ru/id5731761"], "2026-06-01T12:00:00+03:00", mandatory=True
+    )
+    assert len(rows) == 1
+    assert rows[0]["page_verified"] is False
+
+
+def test_rebalance_keeps_manual_required_in_pool():
+    manual = {
+        "url": "https://manual.example.com/ai-story",
+        "verification_comment": "MANUAL_REQUIRED: добавлено пользователем",
+        "description": "Вставлено в поле URL на шаге 1",
+        "total_score": 3,
+        "tier": "Tier-3",
+        "link_status": True,
+        "headline_editorial_ok": True,
+        "title": "Ручная новость",
+    }
+    filler = [
+        {
+            "url": f"https://filler{i}.example.com/news/{i}",
+            "verification_comment": "",
+            "description": "search",
+            "total_score": 30 - i,
+            "tier": "Tier-1",
+            "link_status": True,
+            "headline_editorial_ok": True,
+            "title": f"Filler {i}",
+        }
+        for i in range(12)
+    ]
+    pool = filler + [manual]
+    chosen = _rebalance_verified_pool(pool, target=5, digest_type="serious")
+    urls = {str(x.get("url") or "") for x in chosen}
+    assert manual["url"] in urls
+
+
+def test_manual_unreachable_url_rejected(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    monkeypatch.setattr(ds, "_fetch_article_page_bundle", lambda _url: {"ok": False})
+    rows = service._build_manual_candidates(
+        digest, ["https://example.com/broken"], "2026-06-01T12:00:00+03:00", mandatory=True
+    )
+    assert len(rows) == 1
+    assert rows[0]["page_verified"] is False
+    assert rows[0]["link_status"] is False
+    assert "seed_unverified" in str(rows[0].get("verification_comment") or "")
 
 
 def test_manual_ai_section_path_is_rejected_even_without_listing_flag(monkeypatch: pytest.MonkeyPatch):

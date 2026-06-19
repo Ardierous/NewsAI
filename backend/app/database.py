@@ -1,16 +1,61 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import get_settings
 
 settings = get_settings()
 
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+_is_sqlite = settings.database_url.startswith("sqlite")
+connect_args = {"check_same_thread": False, "timeout": 30} if _is_sqlite else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
+
+
+@event.listens_for(engine, "connect")
+def _sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+    if not _is_sqlite:
+        return
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.close()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+
+def _normalize_step1_url_registry_unified_keys(conn) -> None:
+    """Снять префиксы serious:/curious: — единый ключ URL в реестре."""
+    try:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, url_fingerprint FROM step1_url_registry
+                WHERE url_fingerprint LIKE 'serious:%' OR url_fingerprint LIKE 'curious:%'
+                """
+            )
+        ).fetchall()
+        for row_id, fp in rows:
+            bare = str(fp).split(":", 1)[1] if ":" in str(fp) else str(fp)
+            dup = conn.execute(
+                text(
+                    "SELECT id FROM step1_url_registry WHERE url_fingerprint = :bare AND id != :row_id LIMIT 1"
+                ),
+                {"bare": bare, "row_id": row_id},
+            ).fetchone()
+            if dup:
+                conn.execute(text("DELETE FROM step1_url_registry WHERE id = :row_id"), {"row_id": row_id})
+            else:
+                conn.execute(
+                    text("UPDATE step1_url_registry SET url_fingerprint = :bare WHERE id = :row_id"),
+                    {"bare": bare, "row_id": row_id},
+                )
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 def ensure_digest_schema_migrations() -> None:
@@ -209,6 +254,90 @@ def ensure_digest_schema_migrations() -> None:
                     )
                 )
                 conn.commit()
+            if "step1_web_search_cache" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE step1_web_search_cache (
+                            cache_key VARCHAR(64) PRIMARY KEY,
+                            urls_json TEXT NOT NULL,
+                            query_preview VARCHAR(500) NOT NULL DEFAULT '',
+                            url_count INTEGER NOT NULL DEFAULT 0,
+                            hit_count INTEGER NOT NULL DEFAULT 0,
+                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                            last_hit_at DATETIME
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text("CREATE INDEX IF NOT EXISTS ix_step1_web_search_cache_created_at ON step1_web_search_cache (created_at)")
+                )
+                conn.commit()
+            if "step1_url_registry" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE step1_url_registry (
+                            id INTEGER PRIMARY KEY,
+                            url_fingerprint VARCHAR(512) NOT NULL UNIQUE,
+                            url VARCHAR(1000) NOT NULL,
+                            host VARCHAR(255) NOT NULL DEFAULT '',
+                            digest_type VARCHAR(20) NOT NULL DEFAULT 'serious',
+                            bucket VARCHAR(80) NOT NULL DEFAULT 'raw',
+                            reject_codes TEXT NOT NULL DEFAULT '',
+                            title VARCHAR(500) NOT NULL DEFAULT '',
+                            source_stage VARCHAR(40) NOT NULL DEFAULT 'search',
+                            verification_comment TEXT NOT NULL DEFAULT '',
+                            last_digest_id INTEGER,
+                            first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            expires_at DATETIME NOT NULL
+                        )
+                        """
+                    )
+                )
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_step1_url_registry_bucket ON step1_url_registry (bucket)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_step1_url_registry_host ON step1_url_registry (host)"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_step1_url_registry_expires ON step1_url_registry (expires_at)"))
+                conn.commit()
+            _normalize_step1_url_registry_unified_keys(conn)
+            if "step1_host_unreachable_stats" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE step1_host_unreachable_stats (
+                            host VARCHAR(255) PRIMARY KEY,
+                            failure_count INTEGER NOT NULL DEFAULT 0,
+                            first_failure_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            last_failure_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            autoblocked_at DATETIME
+                        )
+                        """
+                    )
+                )
+                conn.commit()
+            if "step1_filter_enabled_snapshots" not in {
+                r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+            }:
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE step1_filter_enabled_snapshots (
+                            digest_type VARCHAR(20) PRIMARY KEY,
+                            enabled_json TEXT NOT NULL DEFAULT '{}',
+                            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        )
+                        """
+                    )
+                )
+                conn.commit()
         return
     from sqlalchemy import inspect
 
@@ -397,6 +526,84 @@ def ensure_digest_schema_migrations() -> None:
                         manual_reason VARCHAR(64),
                         manual_reason_other TEXT,
                         rated_at TIMESTAMP NOT NULL DEFAULT NOW()
+                    )
+                    """
+                )
+            )
+    if not insp.has_table("step1_web_search_cache"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE step1_web_search_cache (
+                        cache_key VARCHAR(64) PRIMARY KEY,
+                        urls_json TEXT NOT NULL,
+                        query_preview VARCHAR(500) NOT NULL DEFAULT '',
+                        url_count INTEGER NOT NULL DEFAULT 0,
+                        hit_count INTEGER NOT NULL DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        last_hit_at TIMESTAMP
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_step1_web_search_cache_created_at ON step1_web_search_cache (created_at)")
+            )
+    if not insp.has_table("step1_url_registry"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE step1_url_registry (
+                        id SERIAL PRIMARY KEY,
+                        url_fingerprint VARCHAR(512) NOT NULL UNIQUE,
+                        url VARCHAR(1000) NOT NULL,
+                        host VARCHAR(255) NOT NULL DEFAULT '',
+                        digest_type VARCHAR(20) NOT NULL DEFAULT 'serious',
+                        bucket VARCHAR(80) NOT NULL DEFAULT 'raw',
+                        reject_codes TEXT NOT NULL DEFAULT '',
+                        title VARCHAR(500) NOT NULL DEFAULT '',
+                        source_stage VARCHAR(40) NOT NULL DEFAULT 'search',
+                        verification_comment TEXT NOT NULL DEFAULT '',
+                        last_digest_id INTEGER,
+                        first_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        last_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        expires_at TIMESTAMP NOT NULL
+                    )
+                    """
+                )
+            )
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_step1_url_registry_bucket ON step1_url_registry (bucket)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_step1_url_registry_host ON step1_url_registry (host)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_step1_url_registry_expires ON step1_url_registry (expires_at)"))
+    if insp.has_table("step1_url_registry"):
+        with engine.begin() as conn:
+            _normalize_step1_url_registry_unified_keys(conn)
+    if not insp.has_table("step1_host_unreachable_stats"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE step1_host_unreachable_stats (
+                        host VARCHAR(255) PRIMARY KEY,
+                        failure_count INTEGER NOT NULL DEFAULT 0,
+                        first_failure_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        last_failure_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        autoblocked_at TIMESTAMP
+                    )
+                    """
+                )
+            )
+    if not insp.has_table("step1_filter_enabled_snapshots"):
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE step1_filter_enabled_snapshots (
+                        digest_type VARCHAR(20) PRIMARY KEY,
+                        enabled_json TEXT NOT NULL DEFAULT '{}',
+                        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
                     )
                     """
                 )

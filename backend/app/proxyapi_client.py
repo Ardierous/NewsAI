@@ -13,12 +13,98 @@ from openai import OpenAI
 from app.config import get_settings
 from app.crew.model_policy import STEP2_AI_ORDER_MODEL, proxyapi_chat_model
 from app.source_tiers_policy import get_source_tiers_policy
-from app.services.news_search import extract_http_urls_from_text, extract_urls_from_responses_payload
-from app.services.usage_cost import estimate_cost_rub_from_usage
+from app.services.news_search import (
+    extract_http_urls_from_text,
+    extract_urls_from_chat_web_search_response,
+    extract_urls_from_responses_payload,
+)
+from app.services.step1_web_search_stats import (
+    consume_web_search_api_call,
+    mark_step1_web_search_api_cap_hit,
+    record_empty_citation_web_search,
+    refund_web_search_api_call,
+    reset_empty_citation_streak,
+)
+from app.services.usage_cost import estimate_cost_rub_from_usage, estimate_proxyapi_request_fee_rub, extract_token_usage
 
 logger = logging.getLogger("app.proxyapi")
+
+
+def build_web_search_user_prompt(
+    query: str,
+    limit: int,
+    *,
+    curious_search: bool = False,
+    allowed_hosts: list[str] | None = None,
+    source_tiers_path: Any = None,
+) -> str:
+    """Текст user-сообщения, которое уходит в ProxyAPI responses.create(input=…)."""
+    if curious_search:
+        user_prompt = (
+            f"Найди до {limit} СВЕЖИХ новостей (часовой пояс Europe/Moscow, строго после даты в after: из запроса). "
+            "ОБЯЗАТЕЛЬНО: игнорируй все старые/архивные/evergreen статьи даже если они идеально релевантны по ключам — бери ТОЛЬКО опубликованные после указанной даты (after:). "
+            "Если инструмент поиска возвращает старые URL — отбрасывай их и продолжай поиск свежих. "
+            "Приоритет: публикации за последние 1-7 дней в пределах окна. "
+            "Тема выпуска: свежие курьёзы, фейлы и забавные истории про ИИ, нейросети, LLM и чат-ботов — не сухие tech-новости. "
+            "Режим курьёзного дайджеста: ищи ТОЛЬКО забавные, смешные, вирусные, абсурдные и неожиданные истории про ИИ "
+            "(фейлы, глюки, жалобы пользователей, мемы, дипфейки, странные кейсы, кринж, пранки). "
+            "НЕ возвращай обычные tech/product-новости, обзоры моделей, регуляторику, инвестиции, конференции и пресс-релизы. "
+            "Если материал звучит как деловая или нейтральная AI-новость без юмора/фейла — пропускай. "
+        )
+    else:
+        user_prompt = (
+            f"Найди до {limit} СВЕЖИХ новостей про ИИ, нейросети, LLM (часовой пояс Europe/Moscow, строго после даты в after: из запроса). "
+            "ОБЯЗАТЕЛЬНО: игнорируй все старые/архивные/evergreen статьи даже если они идеально релевантны по ключам — бери ТОЛЬКО опубликованные после указанной даты (after:). "
+            "Если инструмент поиска возвращает старые URL — отбрасывай их и продолжай поиск свежих. "
+            "Приоритет: публикации за последние 1-7 дней в пределах окна. "
+            "Тема выпуска: новости про искусственный интеллект, нейросети, LLM и крупные языковые модели "
+            "(GPT, Gemini, Claude, Яндекс, Гигачат, Qwen, DeepSeek и т.п.), машинное обучение. "
+        )
+    if allowed_hosts:
+        clean_hosts = [str(h).strip() for h in allowed_hosts if str(h).strip()]
+        hosts_csv = ", ".join(clean_hosts)
+        if curious_search:
+            user_prompt += (
+                f"Искать ТОЛЬКО на доменах курьёзных источников: {hosts_csv}. "
+                "Не возвращай URL с других сайтов. "
+            )
+        else:
+            policy = get_source_tiers_policy(source_tiers_path)
+            has_aggregator_scope = any(
+                any(marker in host.lower() for marker in policy.aggregator_hosts) for host in clean_hosts
+            )
+            if has_aggregator_scope:
+                user_prompt += (
+                    f"Опорные домены для поиска сюжета: {hosts_csv}. "
+                    "Можно использовать их как агрегаторы-навигацию, но в ответе верни прямые URL первоисточников "
+                    "на сайтах из policy tier-1..tier-4. "
+                )
+            else:
+                user_prompt += (
+                    f"Искать ТОЛЬКО на доменах из политики источников: {hosts_csv}. "
+                    "Не возвращай URL с других сайтов. "
+                )
+    else:
+        user_prompt += (
+            "Можно использовать агрегаторы и дайджесты для поиска сюжета, но итоговые ссылки должны вести на первоисточник. "
+        )
+    clean_query = (query or "").strip()
+    if clean_query:
+        user_prompt += (
+            f"\n\nПоисковый запрос (используй его при вызове web_search, включая after:/before: и site:):\n"
+            f"{clean_query}\n"
+        )
+    user_prompt += (
+        "\nНужны прямые URL отдельных HTML-статей (не рубрики, не ленты, не разделы вроде /neiroseti или /articles/artificial_intelligence/, "
+        "не агрегаторы, не Google News, не Reddit, не главные страницы, не поиск). "
+        "КРИТИЧНО: не выдумывай и не конструируй URL по шаблону — копируй только точные ссылки из результатов поиска (snippets). "
+        "Не подставляй даты или numeric id «на глаз» (типичные 404 на technologyreview.com, wired.com и т.п.). "
+        f"Ответ: строго JSON-массив из не более {limit} строк — каждая строка один полный URL, без markdown и без пояснений."
+    )
+    return user_prompt
 _EST_COST_TOTAL_RUB = 0.0
 _LOG_CONTEXT: ContextVar[dict[str, str]] = ContextVar("proxyapi_log_context", default={})
+_BILLABLE_WEB_SEARCH_KINDS = frozenset({"responses.web_search", "chat.web_search_preview"})
 
 
 def _safe_header_value(value: Any) -> str:
@@ -80,32 +166,67 @@ def _extract_cached_tokens(usage: Any) -> int | None:
 def _log_proxyapi_usage(response: Any, *, kind: str, model: str) -> None:
     global _EST_COST_TOTAL_RUB
     request_id = _proxyapi_request_id(response)
+    tokens = extract_token_usage(response)
+    service_fee = estimate_proxyapi_request_fee_rub(kind) if kind in _BILLABLE_WEB_SEARCH_KINDS else 0.0
+    prompt = completion = cached = None
+    token_cost_rub = 0.0
+    est_cost_rub: float | None = None
+
+    if tokens is not None:
+        prompt, completion = tokens
+        est_cost_rub = estimate_cost_rub_from_usage(
+            model,
+            int(prompt or 0),
+            int(completion or 0),
+            kind=kind,
+        )
+        if est_cost_rub is not None and service_fee > 0:
+            token_cost_rub = max(0.0, float(est_cost_rub) - service_fee)
+    elif kind in _BILLABLE_WEB_SEARCH_KINDS and service_fee > 0:
+        est_cost_rub = round(service_fee, 6)
+
+    if kind in _BILLABLE_WEB_SEARCH_KINDS and est_cost_rub is not None:
+        try:
+            from app.services.step1_web_search_stats import record_web_search_est_cost
+
+            record_web_search_est_cost(service_rub=service_fee, token_rub=token_cost_rub)
+        except ImportError:
+            pass
+
     usage = getattr(response, "usage", None)
-    if usage is None:
-        if request_id:
-            logger.info("ProxyAPI request | kind=%s model=%s request_id=%s usage=-", kind, model, request_id)
-        return
-    prompt = getattr(usage, "prompt_tokens", None) or (usage.get("prompt_tokens") if isinstance(usage, dict) else None)
-    completion = getattr(usage, "completion_tokens", None) or (
-        usage.get("completion_tokens") if isinstance(usage, dict) else None
-    )
-    cached = _extract_cached_tokens(usage)
-    if prompt is None and completion is None and cached is None:
-        return
-    est_cost_rub = estimate_cost_rub_from_usage(model, int(prompt or 0), int(completion or 0))
+    if usage is not None:
+        cached = _extract_cached_tokens(usage)
+        if prompt is None:
+            prompt = getattr(usage, "prompt_tokens", None) or (
+                usage.get("prompt_tokens") if isinstance(usage, dict) else None
+            )
+        if completion is None:
+            completion = getattr(usage, "completion_tokens", None) or (
+                usage.get("completion_tokens") if isinstance(usage, dict) else None
+            )
+
     if est_cost_rub is not None:
         _EST_COST_TOTAL_RUB += est_cost_rub
-    logger.info(
-        "ProxyAPI usage | kind=%s model=%s request_id=%s prompt_tokens=%s completion_tokens=%s cached_tokens=%s est_cost_rub=%s est_total_rub=%s",
-        kind,
-        model,
-        request_id or "-",
-        prompt,
-        completion,
-        cached,
-        f"{est_cost_rub:.6f}" if est_cost_rub is not None else "-",
-        f"{_EST_COST_TOTAL_RUB:.6f}",
-    )
+
+    if kind in _BILLABLE_WEB_SEARCH_KINDS or tokens is not None or est_cost_rub is not None:
+        logger.info(
+            "ProxyAPI usage | kind=%s model=%s request_id=%s prompt_tokens=%s completion_tokens=%s "
+            "cached_tokens=%s service_fee_rub=%s token_cost_rub=%s est_cost_rub=%s est_total_rub=%s",
+            kind,
+            model,
+            request_id or "-",
+            prompt if prompt is not None else "-",
+            completion if completion is not None else "-",
+            cached if cached is not None else "-",
+            f"{service_fee:.6f}" if service_fee > 0 else "-",
+            f"{token_cost_rub:.6f}" if token_cost_rub > 0 else "-",
+            f"{est_cost_rub:.6f}" if est_cost_rub is not None else "-",
+            f"{_EST_COST_TOTAL_RUB:.6f}",
+        )
+        return
+
+    if request_id:
+        logger.info("ProxyAPI request | kind=%s model=%s request_id=%s usage=-", kind, model, request_id)
 
 
 def _proxyapi_request_id(response: Any) -> str | None:
@@ -253,61 +374,28 @@ class ProxyApiClient:
         """
         if not self.settings.proxyapi_web_search_enabled:
             return []
+        if not consume_web_search_api_call(kind="responses"):
+            logger.warning("ProxyAPI web_search: лимит API-вызовов шага 1 исчерпан | query=%s", query[:120])
+            self.last_error_kind = "api_cap"
+            return []
         ctx_size = (search_context_size or self.settings.proxyapi_web_search_context_size).strip().lower()
         if ctx_size not in ("low", "medium", "high"):
             ctx_size = "medium"
-        user_prompt = (
-            f"Найди до {limit} СВЕЖИХ новостей (часовой пояс Europe/Moscow, строго после даты в after: из запроса). "
-            "ОБЯЗАТЕЛЬНО: игнорируй все старые/архивные/evergreen статьи даже если они идеально релевантны по ключам — бери ТОЛЬКО опубликованные после указанной даты (after:). "
-            "Если инструмент поиска возвращает старые URL — отбрасывай их и продолжай поиск свежих. "
-            "Приоритет: публикации за последние 1-7 дней в пределах окна. "
+        user_prompt = build_web_search_user_prompt(
+            query,
+            limit,
+            curious_search=curious_search,
+            allowed_hosts=allowed_hosts,
+            source_tiers_path=self.settings.source_tiers_path,
         )
-        if curious_search:
-            user_prompt += (
-                "Режим курьёзного дайджеста: ищи ТОЛЬКО забавные, смешные, вирусные, абсурдные и неожиданные истории про ИИ "
-                "(фейлы, глюки, жалобы пользователей, мемы, дипфейки, странные кейсы, кринж, пранки). "
-                "НЕ возвращай обычные tech/product-новости, обзоры моделей, регуляторику, инвестиции, конференции и пресс-релизы. "
-                "Если материал звучит как деловая или нейтральная AI-новость без юмора/фейла — пропускай. "
-            )
-        else:
-            user_prompt += (
-                "Только материалы про искусственный интеллект, нейросети, машинное обучение или крупные модели (GPT, Gemini, Claude и т.п.). "
-            )
-        if allowed_hosts:
-            clean_hosts = [str(h).strip() for h in allowed_hosts if str(h).strip()]
-            hosts_csv = ", ".join(clean_hosts)
-            if curious_search:
-                user_prompt += (
-                    f"Искать ТОЛЬКО на доменах курьёзных источников: {hosts_csv}. "
-                    "Не возвращай URL с других сайтов. "
-                )
-            else:
-                policy = get_source_tiers_policy(self.settings.source_tiers_path)
-                has_aggregator_scope = any(
-                    any(marker in host.lower() for marker in policy.aggregator_hosts) for host in clean_hosts
-                )
-                if has_aggregator_scope:
-                    user_prompt += (
-                        f"Опорные домены для поиска сюжета: {hosts_csv}. "
-                        "Можно использовать их как агрегаторы-навигацию, но в ответе верни прямые URL первоисточников "
-                        "на сайтах из policy tier-1..tier-4. "
-                    )
-                else:
-                    user_prompt += (
-                        f"Искать ТОЛЬКО на доменах из политики источников: {hosts_csv}. "
-                        "Не возвращай URL с других сайтов. "
-                    )
-        else:
-            user_prompt += (
-                "Можно использовать агрегаторы и дайджесты для поиска сюжета, но итоговые ссылки должны вести на первоисточник. "
-            )
-        user_prompt += (
-            "Нужны прямые URL отдельных HTML-статей (не рубрики, не ленты, не разделы вроде /neiroseti или /articles/artificial_intelligence/, "
-            "не агрегаторы, не Google News, не Reddit, не главные страницы, не поиск). "
-            "КРИТИЧНО: не выдумывай и не конструируй URL по шаблону — копируй только точные ссылки из результатов поиска (snippets). "
-            "Не подставляй даты или numeric id «на глаз» (типичные 404 на technologyreview.com, wired.com и т.п.). "
-            f"Ответ: строго JSON-массив из не более {limit} строк — каждая строка один полный URL, без markdown и без пояснений."
+        logger.info(
+            "ProxyAPI web_search prompt | context=%s curious=%s hosts=%s prompt_len=%s",
+            ctx_size,
+            curious_search,
+            len(allowed_hosts or []),
+            len(user_prompt),
         )
+        logger.debug("ProxyAPI web_search user_prompt:\n%s", user_prompt)
         location = {
             "type": "approximate",
             "country": "RU",
@@ -333,17 +421,20 @@ class ProxyApiClient:
             )
             self._last_api_response = response
             _log_proxyapi_usage(response, kind="responses.web_search", model=model)
-            urls = extract_urls_from_responses_payload(response, limit=limit)
+            urls = extract_urls_from_responses_payload(response, limit=limit, citations_only=True)
             if urls:
+                reset_empty_citation_streak()
                 logger.info(
-                    "ProxyAPI web_search (responses) | model=%s count=%s context=%s",
+                    "ProxyAPI web_search (responses) | model=%s count=%s context=%s citations_only=true",
                     model,
                     len(urls),
                     ctx_size,
                 )
                 return urls
+            refund_web_search_api_call(kind="responses")
+            record_empty_citation_web_search()
             logger.warning(
-                "ProxyAPI web_search (responses): пустой список URL, без повторного search-preview | model=%s",
+                "ProxyAPI web_search (responses): нет citation URL, без search-preview | model=%s",
                 model,
             )
             if fallback_on_empty:
@@ -354,7 +445,7 @@ class ProxyApiClient:
                 )
                 if preview_urls:
                     logger.info(
-                        "ProxyAPI web_search: fallback chat-preview после empty responses | model=%s count=%s context=%s",
+                        "ProxyAPI web_search: fallback chat-preview (citations) | model=%s count=%s context=%s",
                         self.settings.proxyapi_web_search_preview_model,
                         len(preview_urls),
                         ctx_size,
@@ -377,6 +468,9 @@ class ProxyApiClient:
     ) -> list[str]:
         preview_model = self.settings.proxyapi_web_search_preview_model
         ctx_size = search_context_size if search_context_size in ("low", "medium", "high") else "medium"
+        if not consume_web_search_api_call(kind="preview"):
+            mark_step1_web_search_api_cap_hit()
+            return []
         try:
             response = self.client.chat.completions.create(
                 model=preview_model,
@@ -397,16 +491,19 @@ class ProxyApiClient:
             )
             self._last_api_response = response
             _log_proxyapi_usage(response, kind="chat.web_search_preview", model=preview_model)
-            text = response.choices[0].message.content or ""
-            urls = extract_http_urls_from_text(text, limit=limit)
+            urls = extract_urls_from_chat_web_search_response(response, limit=limit, citations_only=True)
             if urls:
+                reset_empty_citation_streak()
                 logger.info(
-                    "ProxyAPI web_search (chat preview) | model=%s count=%s context=%s",
+                    "ProxyAPI web_search (chat preview) | model=%s count=%s context=%s citations_only=true",
                     preview_model,
                     len(urls),
                     ctx_size,
                 )
-            return urls
+                return urls
+            refund_web_search_api_call(kind="preview")
+            record_empty_citation_web_search()
+            return []
         except Exception as exc:
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
@@ -487,7 +584,7 @@ class ProxyApiClient:
             )
             self._last_api_response = response
             _log_proxyapi_usage(response, kind="responses.telegram_search", model=model)
-            urls = extract_urls_from_responses_payload(response, limit=max_links)
+            urls = extract_urls_from_responses_payload(response, limit=max_links, citations_only=True)
             html_pages = self._extract_tme_html_snippets(response)
             if urls:
                 logger.info(

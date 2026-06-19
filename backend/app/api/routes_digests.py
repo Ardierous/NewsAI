@@ -35,6 +35,8 @@ from app.schemas import (
     Step1RunRequest,
     Step1FilterConfig,
     Step1FiltersResponse,
+    Step1LiveProgressOut,
+    Step1StatisticsOut,
     Step4GenerateImagesRequest,
     Step4GenerateTextsRequest,
     Step4SelectImageRequest,
@@ -350,6 +352,12 @@ def cancel_step1(digest_id: int, db: Session = Depends(get_db)) -> dict[str, obj
     return service.cancel_step1_run(digest_id)
 
 
+@router.get("/{digest_id}/step1/progress", response_model=Step1LiveProgressOut)
+def get_step1_progress(digest_id: int, db: Session = Depends(get_db)) -> Step1LiveProgressOut:
+    service = DigestService(db)
+    return Step1LiveProgressOut.model_validate(service.get_step1_live_progress(digest_id))
+
+
 @router.get("/{digest_id}/step1/filters", response_model=Step1FiltersResponse)
 def get_step1_filters(digest_id: int, db: Session = Depends(get_db)) -> Step1FiltersResponse:
     service = DigestService(db)
@@ -362,6 +370,23 @@ def save_step1_filters(digest_id: int, payload: Step1FilterConfig, db: Session =
     service = DigestService(db)
     data = service.save_step1_filters_payload(digest_id, payload.model_dump())
     return Step1FiltersResponse.model_validate(data)
+
+
+@router.get("/{digest_id}/step1/statistics", response_model=Step1StatisticsOut)
+def get_step1_statistics(
+    digest_id: int,
+    db: Session = Depends(get_db),
+    rebuild: bool = Query(False, description="Пересобрать снимок из журнала, не читать Asset"),
+) -> Step1StatisticsOut:
+    service = DigestService(db)
+    digest = service.get_digest(digest_id)
+    from app.services.step1_statistics import build_step1_statistics, load_step1_statistics_snapshot
+
+    if not rebuild:
+        snap = load_step1_statistics_snapshot(db, digest_id)
+        if snap is not None:
+            return snap
+    return build_step1_statistics(db, digest_id)
 
 
 @router.post("/{digest_id}/step1/discovered/{news_id}/feedback")
