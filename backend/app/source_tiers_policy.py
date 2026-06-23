@@ -139,6 +139,18 @@ def tier2_search_host_markers(policy: SourceTiersPolicy | None = None) -> tuple[
     return tuple(dict.fromkeys((*p.tier2_hosts, *p.aggregator_hosts)))
 
 
+def count_urls_on_host_markers(urls: list[str], host_markers: tuple[str, ...]) -> int:
+    """Сколько URL из списка относятся к заданным маркерам хостов."""
+    if not urls or not host_markers:
+        return 0
+    count = 0
+    for raw in urls:
+        host = _host_from_url(str(raw or "")).lower()
+        if host and _host_contains_marker(host, host_markers):
+            count += 1
+    return count
+
+
 def is_policy_tier_source(url: str, policy: SourceTiersPolicy | None = None) -> bool:
     """URL с хоста tier-1…tier-4 или агрегатора (Tier-2) из политики; не tier-5/blocked."""
     p = policy or get_source_tiers_policy()

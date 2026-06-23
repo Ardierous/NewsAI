@@ -317,6 +317,100 @@ def test_verify_resets_skeleton_link_status_before_checks(monkeypatch):
     assert item["headline_editorial_ok"] is True
 
 
+def test_listing_seed_section_expands_not_single_candidate(monkeypatch):
+    """URL рубрики /articles/… — seed для разворота, не кандидат сам по себе."""
+    import app.services.news_search as news_search
+
+    listing_url = "https://www.content-review.com/articles/artificial_intelligence/"
+    assert news_search.is_step1_listing_seed_url(listing_url)
+    assert not news_search.is_listing_page_url(listing_url)
+
+    child = "https://www.content-review.com/articles/ai-samsung-gemini.html"
+    listing_bundle = {
+        "ok": True,
+        "is_listing_page": True,
+        "listing_article_urls": [child],
+        "final_url": listing_url,
+        "display_url": listing_url,
+    }
+    child_bundle = {
+        "ok": True,
+        "is_listing_page": False,
+        "final_url": child,
+        "display_url": child,
+        "headline": "Samsung и Gemini",
+        "topic_corpus": "нейросеть искусственный интеллект " * 20,
+        "article_markers": True,
+    }
+
+    def fake_fetch(url):
+        u = str(url).rstrip("/")
+        if u.endswith("/articles/artificial_intelligence"):
+            return listing_bundle
+        return child_bundle
+
+    monkeypatch.setattr(ds, "_fetch_article_page_bundle", fake_fetch)
+    pairs = ds._expand_listing_url_candidates(listing_url, max_children=3)
+    assert pairs
+    assert all("artificial_intelligence" not in p[0] for p in pairs)
+
+
+def test_verify_rejects_listing_seed_section_without_expansion(monkeypatch):
+    listing_url = "https://www.content-review.com/articles/artificial_intelligence/"
+
+    def fake_get(url, *args, **kwargs):
+        html = """
+        <html><head><meta property="og:type" content="website"></head>
+        <body><h1>Искусственный интеллект</h1>
+        <h2><a href="https://www.content-review.com/articles/ai-one.html">One</a></h2>
+        </body></html>
+        """
+        return _Resp(200, listing_url, html)
+
+    monkeypatch.setattr(ds.requests, "get", fake_get)
+    svc = ds.DigestService.__new__(ds.DigestService)
+    svc._ensure_russian_candidate_title = lambda _d, _u, h: h
+    svc._is_step1_filter_enabled = lambda _fid: True
+    svc._active_recent_top5_fps = set()
+    svc._step1_curious_mode = False
+    svc.settings = type("S", (), {"step1_curious_use_serious_tiers": False})()
+    item = ds.DigestService._skeleton_dict_from_search_url(svc, listing_url, "2026-06-15", 1)
+    ds.DigestService._verify_llm_candidate_dict(svc, _digest(), item)
+    assert item["link_status"] is False
+    assert "news_listing_page" in str(item.get("verification_comment") or "")
+
+
+def test_ria_product_listing_expands_to_articles(monkeypatch):
+    listing_url = "https://ria.ru/product_iskusstvennyy-intellekt/"
+    child = "https://ria.ru/20260618/robot-mfpt-1998765432.html"
+    listing_html = f"""
+    <html><body>
+    <h1>Искусственный интеллект (ИИ)</h1>
+    <a href="{child}">Гуманоидный робот</a>
+    <a href="https://ria.ru/20260617/medvedev-ii-1998765431.html">Медведев</a>
+    <a href="https://ria.ru/20260616/stroitelstvo-ii-1998765430.html">Строительство</a>
+    </body></html>
+    """
+    article_html = """
+    <html><head><meta property="og:type" content="article">
+    <meta property="og:title" content="Гуманоидный робот в МФТИ"></head>
+    <body><h1>Гуманоидный робот в МФТИ</h1>
+    <p>Искусственный интеллект и нейросети в образовании.</p></body></html>
+    """
+
+    def fake_get(url, *args, **kwargs):
+        u = str(url).rstrip("/")
+        if u.endswith("/product_iskusstvennyy-intellekt"):
+            return _Resp(200, listing_url, listing_html)
+        return _Resp(200, u, article_html)
+
+    monkeypatch.setattr(ds.requests, "get", fake_get)
+    pairs = ds._expand_listing_url_candidates(listing_url, max_children=3)
+    assert pairs
+    assert listing_url.rstrip("/") not in {p[0].rstrip("/") for p in pairs}
+    assert any("20260618" in p[0] for p in pairs)
+
+
 def test_expand_listing_fallback_treats_article_when_no_children(monkeypatch):
     article_html = """
     <html><head>

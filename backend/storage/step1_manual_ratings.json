@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-06-19 18:37:35 МСК",
+  "updated_at": "2026-06-23 09:51:17 МСК",
   "pool_dates": [
     {
       "pool_date": "2026-05-16",
@@ -2159,6 +2159,266 @@
           "digest_id": 35,
           "discovery_run_id": 141,
           "news_in_pool": 6,
+          "ratings_count": 0,
+          "ratings": []
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-06-20",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-06-20 00:24:14 МСК",
+          "pool_formed_at": "2026-06-20 00:40:13 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 142,
+          "news_in_pool": 52,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 2,
+          "run_started_at": "2026-06-20 10:41:47 МСК",
+          "pool_formed_at": "2026-06-20 10:52:07 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 143,
+          "news_in_pool": 11,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 3,
+          "run_started_at": "2026-06-20 16:07:39 МСК",
+          "pool_formed_at": "2026-06-20 16:14:39 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 144,
+          "news_in_pool": 2,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 4,
+          "run_started_at": "2026-06-20 16:25:41 МСК",
+          "pool_formed_at": "2026-06-20 16:25:55 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 145,
+          "news_in_pool": 3,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 5,
+          "run_started_at": "2026-06-20 16:26:11 МСК",
+          "pool_formed_at": "2026-06-20 16:26:23 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 146,
+          "news_in_pool": 3,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 6,
+          "run_started_at": "2026-06-20 16:45:03 МСК",
+          "pool_formed_at": "2026-06-20 16:46:45 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 147,
+          "news_in_pool": 3,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 7,
+          "run_started_at": "2026-06-20 17:01:41 МСК",
+          "pool_formed_at": "2026-06-20 17:04:41 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 148,
+          "news_in_pool": 4,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 8,
+          "run_started_at": "2026-06-20 17:07:03 МСК",
+          "pool_formed_at": "2026-06-20 17:18:01 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 149,
+          "news_in_pool": 19,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 9,
+          "run_started_at": "2026-06-20 17:18:01 МСК",
+          "pool_formed_at": "2026-06-20 17:21:58 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 150,
+          "news_in_pool": 4,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 10,
+          "run_started_at": "2026-06-20 17:26:04 МСК",
+          "pool_formed_at": "2026-06-20 17:32:00 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 151,
+          "news_in_pool": 62,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 11,
+          "run_started_at": "2026-06-20 17:34:22 МСК",
+          "pool_formed_at": "2026-06-20 17:40:32 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 152,
+          "news_in_pool": 40,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 12,
+          "run_started_at": "2026-06-20 20:11:45 МСК",
+          "pool_formed_at": "2026-06-20 20:17:46 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 153,
+          "news_in_pool": 55,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 13,
+          "run_started_at": "2026-06-20 21:14:15 МСК",
+          "pool_formed_at": "2026-06-20 21:17:36 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 154,
+          "news_in_pool": 25,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 14,
+          "run_started_at": "2026-06-20 21:32:09 МСК",
+          "pool_formed_at": "2026-06-20 21:37:13 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 155,
+          "news_in_pool": 35,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 15,
+          "run_started_at": "2026-06-20 22:23:21 МСК",
+          "pool_formed_at": "2026-06-20 22:29:51 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 156,
+          "news_in_pool": 46,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 16,
+          "run_started_at": "2026-06-20 22:58:07 МСК",
+          "pool_formed_at": "2026-06-20 23:02:18 МСК",
+          "digest_id": 36,
+          "discovery_run_id": 157,
+          "news_in_pool": 26,
+          "ratings_count": 0,
+          "ratings": []
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-06-21",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-06-21 00:08:23 МСК",
+          "pool_formed_at": "2026-06-21 00:21:07 МСК",
+          "digest_id": 37,
+          "discovery_run_id": 158,
+          "news_in_pool": 8,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 2,
+          "run_started_at": "2026-06-21 10:02:52 МСК",
+          "pool_formed_at": "2026-06-21 10:15:17 МСК",
+          "digest_id": 37,
+          "discovery_run_id": 159,
+          "news_in_pool": 63,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 3,
+          "run_started_at": "2026-06-21 11:14:02 МСК",
+          "pool_formed_at": "2026-06-21 11:26:34 МСК",
+          "digest_id": 37,
+          "discovery_run_id": 160,
+          "news_in_pool": 95,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 4,
+          "run_started_at": "2026-06-21 20:05:08 МСК",
+          "pool_formed_at": "2026-06-21 20:17:50 МСК",
+          "digest_id": 37,
+          "discovery_run_id": 161,
+          "news_in_pool": 70,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 5,
+          "run_started_at": "2026-06-21 22:26:09 МСК",
+          "pool_formed_at": "2026-06-21 22:29:48 МСК",
+          "digest_id": 37,
+          "discovery_run_id": 162,
+          "news_in_pool": 78,
+          "ratings_count": 0,
+          "ratings": []
+        },
+        {
+          "run_number": 6,
+          "run_started_at": "2026-06-21 23:19:58 МСК",
+          "pool_formed_at": "2026-06-21 23:31:28 МСК",
+          "digest_id": 37,
+          "discovery_run_id": 163,
+          "news_in_pool": 79,
+          "ratings_count": 0,
+          "ratings": []
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-06-22",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-06-22 10:24:12 МСК",
+          "pool_formed_at": "2026-06-22 10:26:22 МСК",
+          "digest_id": 38,
+          "discovery_run_id": 164,
+          "news_in_pool": 47,
+          "ratings_count": 0,
+          "ratings": []
+        }
+      ]
+    },
+    {
+      "pool_date": "2026-06-23",
+      "runs": [
+        {
+          "run_number": 1,
+          "run_started_at": "2026-06-23 09:37:20 МСК",
+          "pool_formed_at": "2026-06-23 09:51:17 МСК",
+          "digest_id": 39,
+          "discovery_run_id": 165,
+          "news_in_pool": 35,
           "ratings_count": 0,
           "ratings": []
         }

@@ -37,8 +37,25 @@ def test_cap_grows_with_bonus_near_target():
     svc._step1_curious_yield = None
     base = svc._effective_step1_web_search_api_cap(0)
     near = svc._effective_step1_web_search_api_cap(8)
-    assert base == 43
-    assert near == base + 10
+    assert base == 73
+    assert near == 49
+
+
+def test_api_cap_should_not_stop_until_min_verified():
+    from app.services.step1_web_search_stats import (
+        reset_step1_web_search_stats,
+        set_step1_web_search_api_cap,
+        step1_web_search_api_cap_should_stop,
+    )
+
+    reset_step1_web_search_stats()
+    set_step1_web_search_api_cap(5)
+    for _ in range(5):
+        from app.services.step1_web_search_stats import consume_web_search_api_call
+
+        consume_web_search_api_call(kind="responses")
+    assert step1_web_search_api_cap_should_stop(verified_count=4, pool_shortfall=6) is False
+    assert step1_web_search_api_cap_should_stop(verified_count=10, pool_shortfall=0) is True
 
 
 def test_explicit_cap_overrides_cost_formula():
@@ -49,4 +66,4 @@ def test_explicit_cap_overrides_cost_formula():
     svc.settings = Settings(step1_max_web_search_api_calls=60, step1_web_search_api_bonus_near_target=5)
     svc._step1_curious_yield = None
     assert svc._effective_step1_web_search_api_cap(0) == 60
-    assert svc._effective_step1_web_search_api_cap(8) == 65
+    assert svc._effective_step1_web_search_api_cap(8) == 60

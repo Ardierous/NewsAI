@@ -1,5 +1,6 @@
 from datetime import date, datetime, timedelta
 
+import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -195,4 +196,88 @@ def test_recent_top5_repeat_reason_on_service():
 
 def test_filter_in_catalog():
     assert "recent_top5_repeat" in STEP1_FILTER_DEF_BY_ID
-    assert STEP1_FILTER_DEF_BY_ID["recent_top5_repeat"].stage == "pre_http"
+    assert STEP1_FILTER_DEF_BY_ID["recent_top5_repeat"].stage == "step2"
+
+
+def _add_pool_candidate(db, digest: Digest, *, url: str, number: int) -> NewsCandidate:
+    candidate = NewsCandidate(
+        digest_id=digest.id,
+        original_number=number,
+        title=f"Новость {number}",
+        url=url,
+        source="example.com",
+        tier="Tier-2",
+        published_at="2026-05-01",
+        category="technology",
+        description="Описание",
+        significance_score=2,
+        novelty_score=2,
+        impact_score=2,
+        total_score=number,
+        reliability_status="✅",
+        link_status=True,
+        headline_editorial_ok=True,
+        page_verified=True,
+    )
+    db.add(candidate)
+    db.commit()
+    db.refresh(candidate)
+    return candidate
+
+
+def test_select_news_rejects_recent_top5_repeat():
+    db = _make_db()
+    repeat_url = "https://news.example.com/page/repeat-me"
+    _add_digest_with_top5(db, date(2026, 5, 18), repeat_url)
+    current = Digest(
+        date=date(2026, 5, 20),
+        status="step_1_candidates",
+        current_step="step_1",
+        digest_type="serious",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(current)
+    db.commit()
+    db.refresh(current)
+
+    repeat_candidate = _add_pool_candidate(db, current, url=repeat_url, number=1)
+    others = [
+        _add_pool_candidate(db, current, url=f"https://fresh.example.com/{i}", number=i + 1)
+        for i in range(1, 6)
+    ]
+
+    service = DigestService(db)
+    with pytest.raises(Exception) as exc:
+        service.select_news(current.id, [repeat_candidate.id] + [c.id for c in others[:4]], top5=False)
+    assert "последних выпусков" in str(exc.value.detail)
+
+
+def test_select_news_allows_repeat_in_pool_but_not_in_top5_auto():
+    db = _make_db()
+    repeat_url = "https://news.example.com/page/repeat-me"
+    _add_digest_with_top5(db, date(2026, 5, 18), repeat_url)
+    current = Digest(
+        date=date(2026, 5, 20),
+        status="step_1_candidates",
+        current_step="step_1",
+        digest_type="serious",
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(current)
+    db.commit()
+    db.refresh(current)
+
+    _add_pool_candidate(db, current, url=repeat_url, number=10)
+    for i in range(5):
+        _add_pool_candidate(db, current, url=f"https://fresh.example.com/{i}", number=i + 1)
+
+    service = DigestService(db)
+    picked = service.select_news(current.id, [], top5=True)
+    assert len(picked) == 5
+    picked_urls = {
+        article_page_fingerprint(str(c.url or ""))
+        for c in db.query(NewsCandidate).filter(NewsCandidate.id.in_([p.candidate_id for p in picked])).all()
+    }
+    assert article_page_fingerprint(repeat_url) not in picked_urls

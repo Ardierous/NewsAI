@@ -434,10 +434,20 @@ class ProxyApiClient:
             refund_web_search_api_call(kind="responses")
             record_empty_citation_web_search()
             logger.warning(
-                "ProxyAPI web_search (responses): нет citation URL, без search-preview | model=%s",
+                "ProxyAPI web_search (responses): нет citation URL | model=%s preview=%s",
                 model,
+                fallback_on_empty,
             )
-            if fallback_on_empty:
+            from app.services.step1_web_search_stats import (
+                step1_strict_web_search_economy,
+                step1_web_search_api_cap_reached,
+            )
+
+            allow_preview = fallback_on_empty and (
+                not step1_strict_web_search_economy(self.settings)
+                or not step1_web_search_api_cap_reached()
+            )
+            if allow_preview:
                 preview_urls = self._search_news_urls_chat_preview(
                     user_prompt,
                     limit,
@@ -457,6 +467,15 @@ class ProxyApiClient:
                 self.last_error_kind = "budget_exceeded"
             _log_proxyapi_exception(exc, kind="responses.web_search", model=model)
             logger.warning("ProxyAPI responses web_search failed, fallback to search-preview", exc_info=True)
+        from app.services.step1_web_search_stats import (
+            step1_strict_web_search_economy,
+            step1_web_search_api_cap_reached,
+        )
+
+        if step1_strict_web_search_economy(self.settings) and step1_web_search_api_cap_reached():
+            return []
+        if step1_strict_web_search_economy(self.settings) and not fallback_on_empty:
+            return []
         return self._search_news_urls_chat_preview(user_prompt, limit, search_context_size=ctx_size)
 
     def _search_news_urls_chat_preview(

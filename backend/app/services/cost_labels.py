@@ -26,6 +26,7 @@ OPERATION_TITLE_RU: dict[str, str] = {
     "run_candidates_research": "Поиск кандидатов (CrewAI)",
     "run_candidates_verify": "Проверка ссылок кандидатов",
     "run_candidates_score": "Скоринг кандидатов",
+    "run_verified_pool_score_enrichment": "Оценка проверенного пула (CrewAI)",
     "run_candidates_refill": "Добор кандидатов",
     "run_ordering": "Порядок выпуска (CrewAI)",
     "suggest_news_order_ai_optimal": "Порядок через ProxyAPI",

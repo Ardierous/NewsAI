@@ -17,6 +17,7 @@ import {
 import { DigestHintsAccordion } from "./DigestHintsAccordion";
 import { isProxyapiBudgetError, ProxyapiBudgetAlert } from "./ProxyapiBudgetAlert";
 import { Step1LivePanel, type Step1LiveProgress } from "./Step1LivePanel";
+import { SourceTiersModal } from "./SourceTiersModal";
 import { api, assetUrl } from "../lib/api";
 
 const PLATFORM_ORDER = ["telegram", "max", "vk", "dzen"] as const;
@@ -169,7 +170,7 @@ function formatStep1StopReason(reason: string | undefined): string {
   if (!r) return "—";
   const map: Record<string, string> = {
     target_reached: "цель набрана",
-    target_min_met: "минимум 10 набран, ранний стоп",
+    target_min_met: "минимум 20 набран, ранний стоп",
     soft_timeout_target_met: "soft-лимит, минимум набран",
     soft_timeout_after_collect: "soft-лимит после батча",
     hard_timeout_after_collect: "hard-лимит после батча",
@@ -599,6 +600,21 @@ const CATEGORY_LABELS: Record<string, string> = {
   analytics: "LLM-добор",
 };
 
+const EDITORIAL_ANGLE_CHIP_LABELS: Record<string, string> = {
+  serious: "Серьёз",
+  curious: "Курьёз",
+};
+
+function editorialAngleChipClass(angle: string | undefined | null): string {
+  const key = String(angle || "serious").toLowerCase();
+  return key === "curious" ? "news-chip angle-curious" : "news-chip angle-serious";
+}
+
+function editorialAngleLabel(angle: string | undefined | null): string {
+  const key = String(angle || "serious").toLowerCase();
+  return EDITORIAL_ANGLE_CHIP_LABELS[key] || EDITORIAL_ANGLE_CHIP_LABELS.serious;
+}
+
 const MATERIAL_FORM_CHIP_LABELS: Record<string, string> = {
   article: "Форма: статья",
   training: "Форма: обучение",
@@ -610,6 +626,15 @@ const MATERIAL_FORM_CHIP_LABELS: Record<string, string> = {
   breakthrough: "Форма: прорыв ИИ",
   legislation: "Форма: законодательство",
 };
+
+const MATERIAL_FORM_TITLE_SUFFIX_RE =
+  /\s*\((?:статья|обучение|услуга(?:\/реклама)?|пресс-релиз|исследование|финансы|военная сфера|прорыв ИИ|законодательство)\)\s*$/i;
+
+function displayCandidateTitle(title: string | undefined | null): string {
+  return String(title || "")
+    .replace(MATERIAL_FORM_TITLE_SUFFIX_RE, "")
+    .trim();
+}
 
 function resolveOriginCategory(c: {
   category?: string;
@@ -884,6 +909,7 @@ export function DigestWizard({ digestId }: Props) {
   const [step1FilterError, setStep1FilterError] = useState("");
   const [draggedFilterId, setDraggedFilterId] = useState<string | null>(null);
   const [showAppConfigModal, setShowAppConfigModal] = useState(false);
+  const [showSourceTiersModal, setShowSourceTiersModal] = useState(false);
   const [appConfigLoading, setAppConfigLoading] = useState(false);
   const [appConfigError, setAppConfigError] = useState("");
   const [appConfig, setAppConfig] = useState<{
@@ -1602,10 +1628,13 @@ export function DigestWizard({ digestId }: Props) {
   const runStep1 = (rebuild: boolean) => {
     const keepIds = rebuild && selected.length > 0 ? [...selected] : [];
     const partialKeep = keepIds.length > 0;
+    const supplementAll = rebuild && keepIds.length === 0;
     const label = rebuild
       ? partialKeep
         ? `Шаг 1: пересборка пула (сохранить ${keepIds.length}, добрать остальные; подождите)…`
-        : "Шаг 1: полная пересборка пула (поиск, проверка, оценка; подождите)…"
+        : supplementAll
+          ? "Шаг 1: дополнение пула (сохранить текущие, искать новые; подождите)…"
+          : "Шаг 1: полная пересборка пула (поиск, проверка, оценка; подождите)…"
       : "Шаг 1: поиск новостей, проверка источников и оценка кандидатов (обычно 3–5 мин)…";
     if (rebuild) {
       const ok = window.confirm(
@@ -1618,14 +1647,23 @@ export function DigestWizard({ digestId }: Props) {
             : `Пересобрать пул, оставив ${keepIds.length} отмеченных новостей?\n\n` +
                 "Остальные позиции в списке кандидатов будут заменены: веб-поиск, проверка страниц, скоринг.\n" +
                 "Отмеченные галочки сохранятся. Тип дайджеста (шаг 0) сохранится. Продолжить?"
-          : pastStep2ForRebuild
-            ? "Пересобрать пул кандидатов с нуля?\n\n" +
-                "Будет заново: веб-поиск, проверка страниц, скоринг.\n" +
-                "Сотрутся: выбранные 5 новостей, порядок, аналитика (шаг 3) и финальная сборка (шаг 4).\n\n" +
-                "Тип дайджеста (шаг 0) сохранится. Продолжить?"
-            : "Пересобрать пул кандидатов с нуля?\n\n" +
-                "Текущий список в шаге 2 будет заменён: снова веб-поиск, проверка страниц и скоринг.\n" +
-                "Отмеченные галочки сбросятся. Тип дайджеста (шаг 0) сохранится. Продолжить?",
+          : supplementAll
+            ? pastStep2ForRebuild
+              ? "Дополнить пул новыми кандидатами?\n\n" +
+                  "Текущие карточки в пуле сохранятся; система добавит новые ссылки поверх.\n" +
+                  "Подтверждённая пятёрка, порядок, аналитика и финал сбросятся — их нужно пройти заново.\n\n" +
+                  "Тип дайджеста (шаг 0) сохранится. Продолжить?"
+              : "Дополнить пул новыми кандидатами?\n\n" +
+                  "Текущие карточки в пуле сохранятся; система добавит новые ссылки поверх.\n" +
+                  "Отмеченные галочки сохранятся. Тип дайджеста (шаг 0) сохранится. Продолжить?"
+            : pastStep2ForRebuild
+              ? "Пересобрать пул кандидатов с нуля?\n\n" +
+                  "Будет заново: веб-поиск, проверка страниц, скоринг.\n" +
+                  "Сотрутся: выбранные 5 новостей, порядок, аналитика (шаг 3) и финальная сборка (шаг 4).\n\n" +
+                  "Тип дайджеста (шаг 0) сохранится. Продолжить?"
+              : "Пересобрать пул кандидатов с нуля?\n\n" +
+                  "Текущий список в шаге 2 будет заменён: снова веб-поиск, проверка страниц и скоринг.\n" +
+                  "Отмеченные галочки сбросятся. Тип дайджеста (шаг 0) сохранится. Продолжить?",
       );
       if (!ok) return;
     }
@@ -2020,6 +2058,11 @@ export function DigestWizard({ digestId }: Props) {
     return null;
   }, [digest?.digest]);
 
+  const sourceTiersDigestType = useMemo((): "serious" | "curious" | null => {
+    const t = digest?.digest?.digest_type;
+    return t === "serious" || t === "curious" ? t : null;
+  }, [digest?.digest?.digest_type]);
+
   const step0BtnStyle = (key: "serious" | "curious" | "default"): CSSProperties => {
     const on = step0Active === key;
     return {
@@ -2187,9 +2230,23 @@ export function DigestWizard({ digestId }: Props) {
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <h3 style={{ margin: 0 }}>Шаг 0 — тип дайджеста и окно новостей</h3>
-          <button type="button" disabled={loading} onClick={() => void openAppConfigModal()}>
-            Настройки
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              disabled={loading || !sourceTiersDigestType}
+              title={
+                sourceTiersDigestType
+                  ? "Домены источников и счётчики за 30 дней"
+                  : "Сначала выберите тип дайджеста (серьёзный или курьёзный)"
+              }
+              onClick={() => setShowSourceTiersModal(true)}
+            >
+              Источники
+            </button>
+            <button type="button" disabled={loading} onClick={() => void openAppConfigModal()}>
+              Настройки
+            </button>
+          </div>
         </div>
         <StepProgressBar active={runningStepKey === "0" || runningStepKey === "init"} />
         <p className="wizard-hint-do">
@@ -2892,6 +2949,14 @@ export function DigestWizard({ digestId }: Props) {
         </div>
       ) : null}
 
+      {sourceTiersDigestType ? (
+        <SourceTiersModal
+          digestType={sourceTiersDigestType}
+          open={showSourceTiersModal}
+          onClose={() => setShowSourceTiersModal(false)}
+        />
+      ) : null}
+
       {showAppConfigModal ? (
         <div
           role="dialog"
@@ -3370,7 +3435,7 @@ export function DigestWizard({ digestId }: Props) {
                   <div className="news-pick-main">
                     <div className="news-pick-eyebrow">Кандидат №{listIndex + 1}</div>
                     <label htmlFor={inputId} className="news-pick-title-label">
-                      <span className="news-pick-title">{c.title}</span>
+                      <span className="news-pick-title">{displayCandidateTitle(c.title)}</span>
                     </label>
                     {c.url ? (
                       <div
@@ -3390,6 +3455,12 @@ export function DigestWizard({ digestId }: Props) {
                       </div>
                     ) : null}
                     <div className="news-pick-meta">
+                      <span
+                        className={editorialAngleChipClass(c.editorial_angle)}
+                        title="Редакционный угол: деловой или курьёзный"
+                      >
+                        {editorialAngleLabel(c.editorial_angle)}
+                      </span>
                       {c.source ? <span className="news-chip">{c.source}</span> : null}
                       {c.category || c.verification_comment || c.description ? (
                         <span className="news-chip" title="Как материал попал в пул">
@@ -3575,7 +3646,7 @@ export function DigestWizard({ digestId }: Props) {
                 background: draggedId === s.candidate_id ? "#1e293b" : "transparent",
               }}
             >
-              <strong>{s.output_position}.</strong> {s.title}
+              <strong>{s.output_position}.</strong> {displayCandidateTitle(s.title)}
               {s.ordering_reason ? (
                 <div style={{ marginTop: 4, fontSize: "0.88rem", color: "#94a3b8", lineHeight: 1.4 }}>
                   {s.ordering_reason}

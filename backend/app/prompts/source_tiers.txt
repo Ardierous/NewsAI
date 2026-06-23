@@ -101,6 +101,11 @@ Tier-5 (запрещённые источники и недопустимые UR
 Важно: источники-иноагенты не запрещаются автоматически только по этому признаку; они должны быть явно промаркированы в карточке (foreign_agent_hosts в HOST_RULES).
 
 --- HOST_RULES ---
+
+
+
+
+
 # Правила для кода (шаг 1, поиск). Один хост/маркер на строку; подстрока в hostname.
 # Секции: aggregator_hosts (поиск Tier-2, не blacklist), tier1_hosts, tier2_hosts, tier3_hosts, tier4_hosts,
 # banned_media_hosts, foreign_agent_hosts, russian_host_markers, blocked_search_hosts, search_seed_urls.
@@ -123,17 +128,14 @@ t.me/s/ai_ud
 telegram.me
 therundown.ai
 tldr.tech
-
 [tier1_hosts]
 particle.news
 thenextweb.com
-deeplearning.ai
 analyticsinsight.net
 ai-manual.ru
 ria.ru
 interfax.ru
 vedomosti.ru
-
 [tier2_hosts]
 technologyreview.com
 spectrum.ieee.org
@@ -148,7 +150,6 @@ habr.com
 vc.ru
 blogs.nvidia.com
 shvedkov.pro
-
 [tier3_hosts]
 digital.gov.ru
 sk.ru
@@ -158,7 +159,6 @@ coursera.org
 stepik.org
 netology.ru
 aiindex.stanford.edu
-
 [tier4_hosts]
 yandex.ru
 ya.ru
@@ -177,7 +177,6 @@ ibm.com
 nvidia.com
 openai.com
 anthropic.com
-
 [banned_media_hosts]
 meduza.io
 novayagazeta.eu
@@ -188,7 +187,6 @@ agentura.ru
 activatica.org
 currenttime.tv
 svoboda.org
-
 [foreign_agent_hosts]
 meduza.io
 tvrain.
@@ -219,15 +217,13 @@ cognitive.ru
 [blocked_search_hosts]
 arxiv.org
 wikipedia.org
-
 [search_seed_urls]
 https://news.google.com/search?q=artificial%20intelligence
-https://particle.news/
 https://thenextweb.com/artificial-intelligence
-https://www.deeplearning.ai/the-batch/
 https://www.analyticsinsight.net/artificial-intelligence/
 https://ai-manual.ru/
-https://t.me/s/AI_UD
+https://t.me/s/ai_ud
+https://t.me/s/technokratos
 https://ria.ru/product_iskusstvennyy-intellekt/
 https://www.interfax.ru/digital/
 https://www.vedomosti.ru/technologies/
@@ -235,15 +231,17 @@ https://www.technologyreview.com/topic/artificial-intelligence/
 https://spectrum.ieee.org/topic/artificial-intelligence/
 https://www.wired.com/tag/artificial-intelligence/
 https://techcrunch.com/category/artificial-intelligence/
-https://www.therundown.ai/
 https://tldr.tech/api/latest/ai
 https://www.sciencedaily.com/news/computers_math/artificial_intelligence/
 https://techxplore.com/machine-learning-ai-news/
 https://www.zdnet.com/topic/artificial-intelligence/
 https://aimagazine.com/
-https://www.tadviser.ru/index.php/Новости
-https://www.tadviser.ru/index.php/Статья:Искусственный_интеллект
+https://www.tadviser.ru/index.php/новости
+https://www.tadviser.ru/index.php/статья:искусственный_интеллект
 https://habr.com/ru/hubs/artificial_intelligence/
 https://vc.ru/ai
 https://blogs.nvidia.com/blog/tag/artificial-intelligence/
 https://shvedkov.pro/
+https://ru.investing.com/news/stock-market-news
+https://ru.investing.com/analysis/stock-markets
+https://ru.investing.com/analysis/bonds

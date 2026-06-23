@@ -42,7 +42,15 @@ THEMED_POOL_FORMS = frozenset(SERIOUS_POOL_THEME_QUOTAS.keys())
 
 MATERIAL_FORM_MARKER_PREFIX = "MATERIAL_FORM:"
 NOT_AD_MARKER_PREFIX = "NOT_AD:"
+EDITORIAL_ANGLE_MARKER_PREFIX = "EDITORIAL_ANGLE:"
 NOT_AD_DISCLOSURE_RU = "не реклама"
+
+EditorialAngle = Literal["serious", "curious"]
+
+EDITORIAL_ANGLE_LABELS: dict[str, str] = {
+    "serious": "серьёз",
+    "curious": "курьёз",
+}
 
 MATERIAL_FORM_TITLE_LABELS: dict[str, str] = {
     MATERIAL_FORM_ARTICLE: "статья",
@@ -791,6 +799,55 @@ def decorate_title_with_material_form(title: str, form: MaterialForm) -> str:
     return f"{base} ({label})"
 
 
+def parse_editorial_angle_from_comment(comment: str | None) -> EditorialAngle:
+    text = str(comment or "")
+    if f"{EDITORIAL_ANGLE_MARKER_PREFIX}curious" in text:
+        return "curious"
+    if f"{EDITORIAL_ANGLE_MARKER_PREFIX}serious" in text:
+        return "serious"
+    return "serious"
+
+
+def classify_editorial_angle(
+    item: dict[str, Any],
+    *,
+    digest_type: str | None = None,
+    extra: str = "",
+) -> EditorialAngle:
+    """Угол материала для плашки «курьёз / серьёз» в пуле кандидатов."""
+    from app.curious_source_policy import is_curious_policy_source
+    from app.services.digest_type_policy import is_curious_digest
+    from app.source_tiers_policy import is_policy_tier_source
+
+    if is_curious_digest(digest_type):
+        return "curious"
+
+    url = str(item.get("url") or "")
+    title = str(item.get("title") or "")
+    corpus = _text_blob(item, extra)
+    curious_src = is_curious_policy_source(url)
+    tier_src = is_policy_tier_source(url)
+
+    if curious_src and not tier_src:
+        return "curious"
+    if tier_src and not curious_src:
+        return "serious"
+
+    from app.services.curious_tone import (
+        curious_tone_score,
+        has_curious_positive_signal,
+        has_curious_serious_blockers,
+        passes_curious_tone_gate,
+    )
+
+    tone = int(item.get("curious_tone_score", 0) or 0) or curious_tone_score(title, corpus)
+    if passes_curious_tone_gate(title, corpus, url=url) or tone >= 4:
+        return "curious"
+    if has_curious_positive_signal(title, corpus) and not has_curious_serious_blockers(title, corpus):
+        return "curious"
+    return "serious"
+
+
 def parse_material_form_from_comment(comment: str | None) -> MaterialForm:
     text = str(comment or "")
     for form in (
@@ -813,26 +870,35 @@ def has_not_ad_disclosure(comment: str | None) -> bool:
     return NOT_AD_MARKER_PREFIX in str(comment or "")
 
 
-def _strip_material_form_markers(comment: str) -> str:
+def _strip_policy_markers(comment: str) -> str:
     tokens = []
     for token in str(comment or "").split():
         if token.startswith(MATERIAL_FORM_MARKER_PREFIX):
             continue
         if token.startswith(NOT_AD_MARKER_PREFIX):
             continue
+        if token.startswith(EDITORIAL_ANGLE_MARKER_PREFIX):
+            continue
         tokens.append(token)
     return " ".join(tokens).strip()
 
 
-def apply_material_form_to_candidate(item: dict[str, Any], *, extra: str = "") -> MaterialForm:
-    """Классифицирует форму материала, дописывает метку в заголовок и verification_comment."""
+def apply_material_form_to_candidate(
+    item: dict[str, Any],
+    *,
+    extra: str = "",
+    digest_type: str | None = None,
+) -> MaterialForm:
+    """Классифицирует форму материала и пишет её в material_form / verification_comment (без метки в заголовке)."""
     form = classify_material_form(item, extra=extra)
+    angle = classify_editorial_angle(item, digest_type=digest_type, extra=extra)
     item["material_form"] = form
+    item["editorial_angle"] = angle
     title = str(item.get("title") or "").strip()
     if title:
-        item["title"] = decorate_title_with_material_form(title, form)[:500]
-    comment = _strip_material_form_markers(str(item.get("verification_comment") or ""))
-    comment = f"{comment} {MATERIAL_FORM_MARKER_PREFIX}{form}".strip()
+        item["title"] = strip_material_form_title_suffix(title)[:500]
+    comment = _strip_policy_markers(str(item.get("verification_comment") or ""))
+    comment = f"{comment} {MATERIAL_FORM_MARKER_PREFIX}{form} {EDITORIAL_ANGLE_MARKER_PREFIX}{angle}".strip()
     if form in (MATERIAL_FORM_TRAINING, MATERIAL_FORM_SERVICE):
         comment = f"{comment} {NOT_AD_MARKER_PREFIX}{NOT_AD_DISCLOSURE_RU}".strip()
     item["verification_comment"] = comment

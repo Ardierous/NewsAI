@@ -73,6 +73,40 @@ def test_collect_respects_earliest_date(sample_html: str):
     assert not any("ria.ru" in u for u in urls)
 
 
+def test_collect_skips_old_posts_without_blocking_newer_digest_links():
+    """t.me/s/ отдаёт посты от старых к новым — нельзя break на первом посте вне окна."""
+    from datetime import datetime, timezone
+
+    posts = [
+        tcm.TelegramPostLinks(
+            channel="technokratos",
+            post_id=1,
+            published_at=datetime(2026, 6, 5, 10, 0, tzinfo=timezone.utc),
+            text_html="<b>Утро-Дайджест</b> старый",
+            urls=("https://old.example.com/a",),
+        ),
+        tcm.TelegramPostLinks(
+            channel="technokratos",
+            post_id=2,
+            published_at=datetime(2026, 6, 19, 10, 0, tzinfo=timezone.utc),
+            text_html="<b>Утро-Дайджест</b> свежий",
+            urls=(
+                "https://habr.com/ru/news/1049262/",
+                "https://vc.ru/ai/2984485-anthropic-uluchshila-claude-design-obnovlenie-dlya-polzovateley",
+            ),
+        ),
+    ]
+    urls = tcm.collect_urls_from_digest_posts(
+        posts,
+        earliest_date=date(2026, 6, 14),
+        max_digest_posts=2,
+        post_text_filter="Дайджест",
+    )
+    assert "https://habr.com/ru/news/1049262/" in urls
+    assert any("2984485" in u for u in urls)
+    assert not any("old.example.com" in u for u in urls)
+
+
 def test_collect_telegram_seed_prefers_proxyapi(monkeypatch: pytest.MonkeyPatch, sample_html: str):
     from types import SimpleNamespace
 

@@ -21,6 +21,17 @@ def test_refund_restores_cap_slot():
     assert step1_web_search_api_cap_reached() is False
 
 
+def test_refund_skipped_when_strict_api_cap():
+    stats = reset_step1_web_search_stats()
+    stats.api_cap = 1
+    stats.strict_api_cap = True
+    assert consume_web_search_api_call() is True
+    assert stats.api_calls == 1
+    refund_web_search_api_call()
+    assert stats.api_calls == 1
+    assert step1_web_search_api_cap_reached() is True
+
+
 def test_empty_citation_streak_threshold():
     stats = reset_step1_web_search_stats()
     stats.api_cap = 50

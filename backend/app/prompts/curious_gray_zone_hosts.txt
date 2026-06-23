@@ -1,0 +1,23 @@
+# Серая зона курьёзного выпуска: домены вне Curious-T1/T2, но допустимы на prefilter.
+# Post-HTTP: строже off_topic_not_curious и curious_tone (без low_tone в пул).
+
+lenta.ru
+gazeta.ru
+fontanka.ru
+snob.ru
+sostav.ru
+chip.ru
+overclockers.ru
+wonderzine.com
+rb.ru
+cybersport.ru
+igromania.ru
+knife.media
+championat.com
+daily.afisha.ru
+mel.fm
+rg.ru
+mk.ru
+aif.ru
+woman.ru
+starhit.ru

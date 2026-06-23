@@ -27,14 +27,18 @@ def test_step1_config_economy_defaults():
     """Шаг 1: экономный конфиг в pipeline_settings.json."""
     cfg = read_pipeline_config()["step1"]
     assert cfg["max_cost_rub"] == 50.0
+    assert cfg["max_web_search_api_calls"] == 0
     assert cfg["crew_fallback_only_if_empty"] is True
+    assert cfg["crew_enrich_verified_scores"] is True
     assert cfg["telegram_via_proxyapi"] is False
     assert cfg["telegram_direct_fallback"] is True
     assert cfg["web_search_context_size"] == "low"
-    assert cfg["tier_max_web_search_batches"] == 6
+    assert cfg["tier_max_web_search_batches"] == 8
     assert cfg["web_search_prefer_alt_providers"] is False
     assert cfg["web_search_cache_enabled"] is True
     assert cfg["web_search_cache_ttl_days"] == 90
+    assert cfg["max_candidates_for_ui"] == 20
+    assert cfg["serious_use_curious_tiers"] is True
 
 
 def test_fetch_merged_skips_proxyapi_when_serpapi_enough(monkeypatch: pytest.MonkeyPatch):

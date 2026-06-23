@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -16,9 +16,10 @@ from app.services.step1_filters import CURIOUS_PREFILTER_DEFAULT_ORDER
 
 
 def _digest() -> SimpleNamespace:
+    today = date.today()
     return SimpleNamespace(
         id=1,
-        date=date(2026, 6, 7),
+        date=today,
         digest_type="curious",
         news_window_days=7,
         news_window_day_kind="calendar",
@@ -30,11 +31,14 @@ def _curious_svc(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     svc.settings = SimpleNamespace(step1_curious_use_serious_tiers=False)
     svc._ensure_russian_candidate_title = lambda _d, _u, h: h
     svc._step1_log_curious_tone = lambda **_kwargs: None
+    svc._active_recent_top5_fps = set()
     monkeypatch.setattr(ds, "_step1_curious_mode", True, raising=False)
     return svc
 
 
-def test_aggregator_in_raw_pool_but_not_in_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+def _recent_published_at() -> str:
+    day = date.today() - timedelta(days=1)
+    return f"{day.isoformat()}T12:00:00+03:00"
     agg_url = "https://news.google.com/rss/articles/CBMiabc"
     source_url = "https://vc.ru/id123456/funny-ai-fail"
 
@@ -65,6 +69,7 @@ def test_aggregator_url_rejected_at_final_stage(monkeypatch: pytest.MonkeyPatch)
         "final_url": page_url,
         "display_url": page_url,
         "is_listing_page": False,
+        "published_at": _recent_published_at(),
     }
     svc = _curious_svc(monkeypatch)
     item = {
@@ -92,7 +97,7 @@ def test_first_source_link_from_aggregator_passes(monkeypatch: pytest.MonkeyPatc
         ),
         "final_url": page_url,
         "display_url": page_url,
-        "published_at": "2026-06-10T12:00:00+03:00",
+        "published_at": _recent_published_at(),
         "is_listing_page": False,
         "article_markers": True,
     }
@@ -136,6 +141,7 @@ def test_off_topic_not_curious_check_first_post_http(monkeypatch: pytest.MonkeyP
         "final_url": page_url,
         "display_url": page_url,
         "is_listing_page": False,
+        "published_at": _recent_published_at(),
     }
     svc = _curious_svc(monkeypatch)
     item = {
@@ -218,6 +224,7 @@ def test_telemetr_listing_rejected_at_final_stage(monkeypatch: pytest.MonkeyPatc
         "final_url": page_url,
         "display_url": page_url,
         "is_listing_page": False,
+        "published_at": _recent_published_at(),
     }
     svc = _curious_svc(monkeypatch)
     item = {

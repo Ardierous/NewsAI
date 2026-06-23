@@ -21,6 +21,7 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
         "step1": {
             "search_tier1_min_raw_urls": 15,
             "max_cost_rub": 40.0,
+            "hard_stop_cost_rub": 100.0,
             "max_web_search_api_calls": 0,
             "web_search_api_bonus_near_target": 10,
             "web_search_context_size": "low",
@@ -38,8 +39,13 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "max_candidates_for_ui": 15,
             "verify_workers": 6,
             "crew_fallback_only_if_empty": True,
+            "crew_enrich_verified_scores": False,
+            "crew_enrich_min_verified": 1,
+            "crew_enrich_max_items": 12,
             "tier_strict_search": True,
             "curious_use_serious_tiers": False,
+            "serious_use_curious_tiers": True,
+            "serious_curious_search_batches": 4,
             "telegram_monitor_enabled": True,
             "telegram_monitor_channels": "technokratos",
             "telegram_max_pages": 2,
@@ -51,6 +57,7 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "telegram_direct_fallback": True,
             "telegram_proxyapi_context_size": "low",
             "seed_urls_max": 35,
+            "cheap_sources_first": True,
             "curious_yield": {
                 "enabled": True,
                 "min_verified": 10,
@@ -143,6 +150,9 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     step1 = dict(base["step1"])
     step1["search_tier1_min_raw_urls"] = _int(step1_raw, "search_tier1_min_raw_urls", step1["search_tier1_min_raw_urls"], lo=1, hi=100)
     step1["max_cost_rub"] = _float(step1_raw, "max_cost_rub", step1["max_cost_rub"], lo=1.0, hi=10_000.0)
+    step1["hard_stop_cost_rub"] = _float(
+        step1_raw, "hard_stop_cost_rub", step1["hard_stop_cost_rub"], lo=1.0, hi=10_000.0
+    )
     step1["max_web_search_api_calls"] = _int(
         step1_raw, "max_web_search_api_calls", step1.get("max_web_search_api_calls", 0), lo=0, hi=500
     )
@@ -192,10 +202,30 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     step1["crew_fallback_only_if_empty"] = _coerce_bool(
         step1_raw.get("crew_fallback_only_if_empty"), step1["crew_fallback_only_if_empty"]
     )
+    step1["crew_enrich_verified_scores"] = _coerce_bool(
+        step1_raw.get("crew_enrich_verified_scores"), step1["crew_enrich_verified_scores"]
+    )
+    step1["crew_enrich_min_verified"] = _int(
+        step1_raw, "crew_enrich_min_verified", step1["crew_enrich_min_verified"], lo=1, hi=30
+    )
+    step1["crew_enrich_max_items"] = _int(
+        step1_raw, "crew_enrich_max_items", step1["crew_enrich_max_items"], lo=1, hi=30
+    )
     step1["tier_strict_search"] = _coerce_bool(step1_raw.get("tier_strict_search"), step1["tier_strict_search"])
     step1["curious_use_serious_tiers"] = _coerce_bool(
         step1_raw.get("curious_use_serious_tiers"),
         step1.get("curious_use_serious_tiers", False),
+    )
+    step1["serious_use_curious_tiers"] = _coerce_bool(
+        step1_raw.get("serious_use_curious_tiers"),
+        step1.get("serious_use_curious_tiers", True),
+    )
+    step1["serious_curious_search_batches"] = _int(
+        step1_raw,
+        "serious_curious_search_batches",
+        step1.get("serious_curious_search_batches", 4),
+        lo=1,
+        hi=12,
     )
     step1["telegram_monitor_enabled"] = _coerce_bool(
         step1_raw.get("telegram_monitor_enabled"), step1["telegram_monitor_enabled"]
@@ -230,6 +260,9 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     ctx = str(step1_raw.get("telegram_proxyapi_context_size") or step1["telegram_proxyapi_context_size"]).strip().lower()
     step1["telegram_proxyapi_context_size"] = ctx if ctx in ("low", "medium", "high") else "high"
     step1["seed_urls_max"] = _int(step1_raw, "seed_urls_max", step1["seed_urls_max"], lo=1, hi=100)
+    step1["cheap_sources_first"] = _coerce_bool(
+        step1_raw.get("cheap_sources_first"), step1["cheap_sources_first"]
+    )
 
     yield_raw = step1_raw.get("curious_yield") if isinstance(step1_raw.get("curious_yield"), dict) else {}
     yield_cfg = dict(step1.get("curious_yield") or _bootstrap_pipeline_config()["step1"]["curious_yield"])
@@ -375,6 +408,7 @@ def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
         "enable_web_fetch": web["enable_fetch"],
         "step1_search_tier1_min_raw_urls": s1["search_tier1_min_raw_urls"],
         "step1_max_cost_rub": s1["max_cost_rub"],
+        "step1_hard_stop_cost_rub": s1["hard_stop_cost_rub"],
         "step1_max_web_search_api_calls": s1.get("max_web_search_api_calls", 0),
         "step1_web_search_api_bonus_near_target": s1.get("web_search_api_bonus_near_target", 10),
         "proxyapi_web_search_context_size": s1["web_search_context_size"],
@@ -392,8 +426,13 @@ def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
         "step1_max_candidates_for_ui": s1["max_candidates_for_ui"],
         "step1_verify_workers": s1["verify_workers"],
         "step1_crew_fallback_only_if_empty": s1["crew_fallback_only_if_empty"],
+        "step1_crew_enrich_verified_scores": s1["crew_enrich_verified_scores"],
+        "step1_crew_enrich_min_verified": s1["crew_enrich_min_verified"],
+        "step1_crew_enrich_max_items": s1["crew_enrich_max_items"],
         "step1_tier_strict_search": s1["tier_strict_search"],
         "step1_curious_use_serious_tiers": s1["curious_use_serious_tiers"],
+        "step1_serious_use_curious_tiers": s1["serious_use_curious_tiers"],
+        "step1_serious_curious_search_batches": s1["serious_curious_search_batches"],
         "step1_telegram_monitor_enabled": s1["telegram_monitor_enabled"],
         "step1_telegram_monitor_channels": s1["telegram_monitor_channels"],
         "step1_telegram_max_pages": s1["telegram_max_pages"],
@@ -405,6 +444,7 @@ def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
         "step1_telegram_direct_fallback": s1["telegram_direct_fallback"],
         "step1_telegram_proxyapi_context_size": s1["telegram_proxyapi_context_size"],
         "step1_seed_urls_max": s1["seed_urls_max"],
+        "step1_cheap_sources_first": s1["cheap_sources_first"],
         "step2_max_cost_rub": s2["max_cost_rub"],
         "auto_run_step3_after_order": wf["auto_run_step3_after_order"],
         "enable_step4_image_generation": s4["enable_image_generation"],

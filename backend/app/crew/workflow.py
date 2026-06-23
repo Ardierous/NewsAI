@@ -355,6 +355,42 @@ class CrewWorkflow:
             return parsed[:10]
         return self._fallback_candidates(now_msk)
 
+    def run_verified_pool_score_enrichment(
+        self,
+        verified_rows: list[dict[str, Any]],
+        now_msk: str,
+        *,
+        digest_type: str = "serious",
+    ) -> list[dict[str, Any]]:
+        """Вариант B: один LLM-проход только по уже HTTP-проверенным кандидатам (без поиска URL)."""
+        if not verified_rows:
+            return []
+        dtype = normalize_digest_type(digest_type)
+        n = len(verified_rows)
+        prompt = (
+            f"Ниже {n} кандидатов, уже проверенных по HTTP: url и title достоверны, link_status=true. "
+            "Твоя задача — только редакционная оценка для сортировки в пуле дайджеста. "
+            "Не ищи новые URL и не меняй поля идентичности: original_number, url, title, source, published_at, "
+            "link_status, headline_editorial_ok, tier, is_aggregator, is_foreign_agent. "
+            "Можно менять только: significance_score (1-3), novelty_score (1-3), impact_score (1-3), "
+            "total_score (3-9), description (1-2 предложения на русском — суть материала для редактора), category. "
+            f"{step1_scoring_editorial_block(dtype)} "
+            f"Верни JSON-массив ровно из {n} объектов с теми же original_number и url. "
+            "Ответ — только один JSON-массив без markdown и без текста до/после JSON. "
+            f"now_msk={now_msk}. Кандидаты: {json.dumps(verified_rows, ensure_ascii=False)}"
+        )
+        score_task = Task(
+            description=self._with_contract(prompt),
+            expected_output=f"JSON массив из {n} объектов с оценками",
+            agent=self.agents.scoring,
+        )
+        score_crew = Crew(agents=[self.agents.scoring], tasks=[score_task], process=Process.sequential, verbose=False)
+        output = self._kickoff(score_crew)
+        parsed = _extract_candidate_list(output)
+        if len(parsed) >= max(1, min(n, 3)):
+            return parsed[:n]
+        return list(verified_rows)
+
     def get_agent_models(self) -> dict[str, str]:
         return AGENT_MODEL_RECOMMENDATIONS.copy()
 

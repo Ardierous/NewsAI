@@ -42,7 +42,7 @@ def test_extract_responses_vetted_model_fallback_when_no_citations():
 
 
 def test_extract_responses_strict_skips_vetted_when_no_citations():
-    """Serious: без citations не добираем URL из текста модели."""
+    """Serious с полным пулом: без citations не добираем URL из текста модели."""
     good = "https://habr.com/ru/articles/1042282/"
     block = SimpleNamespace(
         type="output_text",
@@ -57,6 +57,21 @@ def test_extract_responses_strict_skips_vetted_when_no_citations():
         assert urls == []
     finally:
         news_search.set_step1_strict_web_search_citations(False)
+
+
+def test_extract_responses_allows_vetted_while_building_pool():
+    """Пока пул не добран — vetted URL из текста модели допустимы даже для serious."""
+    good = "https://habr.com/ru/articles/1042282/"
+    block = SimpleNamespace(
+        type="output_text",
+        text=f'["{good}"]',
+        annotations=[],
+    )
+    item = SimpleNamespace(content=[block])
+    resp = SimpleNamespace(output_text=f'["{good}"]', output=[item])
+    news_search.set_step1_strict_web_search_citations(False)
+    urls = news_search.extract_urls_from_responses_payload(resp, limit=10, citations_only=True)
+    assert urls == [good]
 
 
 def test_extract_responses_citations_only_ignores_model_json():

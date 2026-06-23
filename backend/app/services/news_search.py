@@ -22,6 +22,7 @@ from app.curious_source_policy import (
     curious_host_search_groups,
     get_curious_source_policy,
     is_curious_aggregator_source,
+    is_curious_allowed_source,
     is_curious_blocked_host,
     is_curious_policy_source,
 )
@@ -86,6 +87,36 @@ _SECTION_LISTING_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _DTF_USER_PROFILE_RE = re.compile(r"^/id\d+/?$", re.IGNORECASE)
+_RIA_PRODUCT_LISTING_RE = re.compile(r"^/product_[\w-]+$", re.IGNORECASE)
+
+_LISTING_EXCEPTION_KEYWORDS: tuple[str, ...] = (
+    "top",
+    "best",
+    "roundup",
+    "round-up",
+    "funny",
+    "fail",
+    "fails",
+    "crazy",
+    "absurd",
+    "weird",
+    "viral",
+    "meme",
+    "memes",
+    "list",
+    "lists",
+    "compilation",
+    "roundups",
+    "fails-of",
+    "wtf",
+)
+
+_LISTING_EXCEPTION_PATH_RE = re.compile(
+    r"(?:^|/|-)(?:"
+    + "|".join(re.escape(k) for k in _LISTING_EXCEPTION_KEYWORDS)
+    + r")(?:/|$|-)",
+    re.IGNORECASE,
+)
 
 
 _SUSPICIOUS_DATE_SEGMENT = re.compile(r"/(\d{8})(?:/|$)")
@@ -227,7 +258,7 @@ _STRICT_CITATIONS_ONLY: ContextVar[bool] = ContextVar("step1_strict_web_search_c
 
 
 def set_step1_strict_web_search_citations(strict: bool) -> None:
-    """Serious/tier_strict: не добирать URL из текста модели при нуле citations."""
+    """Опционально отключить vetted URL из текста модели при нуле citations (по умолчанию выкл.)."""
     _STRICT_CITATIONS_ONLY.set(bool(strict))
 
 
@@ -436,10 +467,28 @@ def url_suspected_hallucinated(url: str) -> bool:
     return False
 
 
+def is_curated_list_url(url: str) -> bool:
+    """Редакционная подборка (top-10, funny fails) — разворачивать, не отбраковывать на prefilter."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    if is_topic_pool_page_url(u):
+        return False
+    try:
+        path = (urlparse(u).path or "").lower().rstrip("/") or "/"
+    except Exception:
+        return False
+    if path in ("", "/"):
+        return False
+    return bool(_LISTING_EXCEPTION_PATH_RE.search(path))
+
+
 def is_listing_page_url(url: str) -> bool:
     """URL ведёт на ленту/рубрику/индекс, а не на одну статью (эвристика по path)."""
     u = (url or "").strip()
     if not u.startswith("http"):
+        return False
+    if is_curated_list_url(u):
         return False
     if is_topic_pool_page_url(u):
         return True
@@ -476,6 +525,8 @@ def is_listing_page_url(url: str) -> bool:
         return True
     if "dtf.ru" in host and _DTF_USER_PROFILE_RE.match(path):
         return True
+    if _RIA_PRODUCT_LISTING_RE.match(path):
+        return True
     return False
 
 
@@ -493,6 +544,8 @@ def is_editorial_listing_title(title: str) -> bool:
         return True
     if "все статьи и новости" in low or "все материалы по теме" in low:
         return True
+    if "последние новости сегодня" in low:
+        return True
     if re.match(r"^.{1,120}\(id\d+\)\s*$", t):
         return True
     return False
@@ -505,6 +558,7 @@ def search_url_prefilter_reason(
     *,
     tier_strict: bool = False,
     curious_strict: bool = False,
+    allow_curious_tiers_in_serious: bool = False,
     earliest: date | None = None,
     anchor: date | None = None,
 ) -> str | None:
@@ -522,9 +576,16 @@ def search_url_prefilter_reason(
         return "invalid_url" if enabled("invalid_url") else None
     checks: dict[str, bool] = {
         "non_policy_source": (
-            curious_strict and not is_curious_policy_source(u)
+            curious_strict
+            and not is_curious_allowed_source(u)
+            and not is_curious_blocked_host(u)
         )
-        or (tier_strict and not curious_strict and not is_policy_tier_source(u)),
+        or (
+            tier_strict
+            and not curious_strict
+            and not is_policy_tier_source(u)
+            and not (allow_curious_tiers_in_serious and is_curious_policy_source(u))
+        ),
         "aggregator_source": (
             is_curious_aggregator_source(u) if curious_strict else is_aggregator_source(u)
         ),
@@ -532,16 +593,20 @@ def search_url_prefilter_reason(
             is_curious_blocked_host(u) if curious_strict else is_blocked_search_host(u)
         ),
         "news_listing_page": (
-            path in ("", "/")
-            or any(x in path for x in ("/search", "/tag/", "/tags/", "/category/", "/topics/"))
-            or path.endswith("/neiroseti")
-            or path.endswith("/artificial_intelligence")
-            or path.endswith("/artificial-intelligence")
-            or path in ("/artificial-intelligence", "/ai", "/topic/artificial-intelligence")
-            or bool(re.search(r"^/articles/[\w_-]+$", path))
-            or is_search_noise_url(u)
-            or is_listing_page_url(u)
-            or is_topic_pool_page_url(u)
+            not is_curated_list_url(u)
+            and (
+                path in ("", "/")
+                or any(x in path for x in ("/search", "/tag/", "/tags/", "/category/", "/topics/"))
+                or path.endswith("/neiroseti")
+                or path.endswith("/artificial_intelligence")
+                or path.endswith("/artificial-intelligence")
+                or path in ("/artificial-intelligence", "/ai", "/topic/artificial-intelligence")
+                or bool(re.search(r"^/articles/[\w_-]+$", path))
+                or bool(_RIA_PRODUCT_LISTING_RE.match(path))
+                or is_search_noise_url(u)
+                or is_listing_page_url(u)
+                or is_topic_pool_page_url(u)
+            )
         ),
         "support_documentation_page": is_support_documentation_url(u),
         "llm_hallucinated_url": url_suspected_hallucinated(u),
@@ -622,6 +687,8 @@ def is_step1_listing_seed_url(url: str) -> bool:
     u = (url or "").strip()
     if not u.startswith("http"):
         return False
+    if is_curated_list_url(u):
+        return True
     if is_listing_page_url(u) or is_topic_pool_page_url(u):
         return True
     if is_curious_aggregator_source(u) or is_aggregator_source(u):
@@ -642,6 +709,8 @@ def is_step1_listing_seed_url(url: str) -> bool:
         return True
     if re.search(r"^/articles/[\w_-]+$", path):
         return True
+    if _RIA_PRODUCT_LISTING_RE.match(path):
+        return True
     if is_search_noise_url(u):
         return True
     return False
@@ -659,6 +728,8 @@ def fetch_article_urls_raw_merged(
     force_proxyapi: bool = False,
     proxy_fallback_on_empty: bool = True,
     curious_search: bool = False,
+    current_verified: int = 0,
+    pool_shortfall: int = 0,
 ) -> list[str]:
     """
     Сырые уникальные URL (до _filter_search_urls).
@@ -666,6 +737,8 @@ def fetch_article_urls_raw_merged(
     """
     fetch_cap = max(limit, 15)
     prefer_alt = bool(getattr(settings, "step1_web_search_prefer_alt_providers", False))
+    if int(pool_shortfall or 0) > 0 and getattr(settings, "serpapi_api_key", None):
+        prefer_alt = True
     min_before_proxy = max(0, int(getattr(settings, "step1_min_urls_before_proxyapi", 5) or 5))
     merged: list[str] = []
 
@@ -685,26 +758,56 @@ def fetch_article_urls_raw_merged(
             )
     merged = _uniq_urls(merged)
 
-    need_proxy = force_proxyapi or not prefer_alt or len(merged) < min_before_proxy
-    if need_proxy and settings.enable_web_fetch and settings.proxyapi_web_search_enabled and proxy is not None:
-        from app.services.step1_web_search_stats import (
-            current_step1_web_search_stats,
-            record_empty_citation_web_search,
-            step1_web_search_api_cap_reached,
-        )
+    from app.services.step1_web_search_stats import (
+        current_step1_web_search_stats,
+        record_empty_citation_web_search,
+        step1_web_search_api_cap_reached,
+        step1_web_search_api_cap_should_stop,
+        step1_web_search_cost_budget_exceeded,
+        step1_web_search_cost_budget_should_stop,
+        step1_strict_web_search_economy,
+    )
 
+    cost_budget_blocks = step1_web_search_cost_budget_should_stop(
+        verified_count=int(current_verified or 0),
+        pool_shortfall=int(pool_shortfall or 0),
+    )
+    api_cap_blocks = step1_web_search_api_cap_should_stop(
+        verified_count=int(current_verified or 0),
+        pool_shortfall=int(pool_shortfall or 0),
+    )
+
+    need_proxy = force_proxyapi or not prefer_alt or len(merged) < min_before_proxy
+    if step1_strict_web_search_economy(settings):
+        # cap=1 — только responses; cap>=2 — второй слот под preview при пустых citations.
+        proxy_fallback_on_empty = int(getattr(settings, "step1_max_web_search_api_calls", 0) or 0) >= 2
+    if need_proxy and settings.enable_web_fetch and settings.proxyapi_web_search_enabled and proxy is not None:
         ws = current_step1_web_search_stats()
+        streak = int(getattr(ws, "empty_citation_streak", 0) or 0) if ws else 0
         empty_streak_skip = (
             ws is not None
-            and int(getattr(ws, "empty_citation_streak", 0) or 0) >= 4
+            and streak >= 4
             and not force_proxyapi
+            and (
+                api_cap_blocks
+                or cost_budget_blocks
+            )
         )
         if (
-            current_step1_web_search_stats() is not None
-            and current_step1_web_search_stats().api_cap is not None
-            and step1_web_search_api_cap_reached()
-        ) or empty_streak_skip:
-            if empty_streak_skip:
+            cost_budget_blocks
+            or (
+                current_step1_web_search_stats() is not None
+                and current_step1_web_search_stats().api_cap is not None
+                and api_cap_blocks
+            )
+            or empty_streak_skip
+        ):
+            if cost_budget_blocks:
+                logger.warning(
+                    "Веб-поиск: ProxyAPI пропущен — лимит ₽ web_search шага 1 | query=%s",
+                    query[:120],
+                )
+            elif empty_streak_skip:
                 logger.warning(
                     "Веб-поиск: ProxyAPI пропущен — серия пустых citation URL (%s) | query=%s",
                     getattr(ws, "empty_citation_streak", 0),
@@ -715,6 +818,28 @@ def fetch_article_urls_raw_merged(
                     "Веб-поиск: ProxyAPI пропущен — лимит web_search API шага 1 | query=%s",
                     query[:120],
                 )
+            # #region agent log
+            try:
+                from app.services.agent_debug_log import agent_debug_log
+                from app.services.step1_web_search_stats import current_step1_web_search_stats
+
+                _ws = current_step1_web_search_stats()
+                agent_debug_log(
+                    "H3",
+                    "news_search.fetch_article_urls_raw_merged:proxy_skipped",
+                    "proxyapi_not_called",
+                    {
+                        "query_head": query[:80],
+                        "cost_budget": cost_budget_blocks,
+                        "api_cap_reached": step1_web_search_api_cap_reached(),
+                        "empty_streak_skip": empty_streak_skip,
+                        "api_calls": getattr(_ws, "api_calls", None) if _ws else None,
+                        "api_cap": getattr(_ws, "api_cap", None) if _ws else None,
+                    },
+                )
+            except Exception:
+                pass
+            # #endregion
         else:
             with step1_phase("web_search"):
                 proxy_urls: list[str] | None = None
@@ -795,6 +920,8 @@ def fetch_tier_prioritized_raw_urls(
     current_verified: int = 0,
     pool_shortfall: int = 0,
     deadline_monotonic: float | None = None,
+    digest_id: int | None = None,
+    proxyapi_spent_rub: float = 0.0,
 ) -> list[str]:
     """
     Поиск строго по tier-1 → tier-4 из source_tiers.txt: батчи site: запросов по хостам политики.
@@ -802,6 +929,27 @@ def fetch_tier_prioritized_raw_urls(
     """
     p = policy or get_source_tiers_policy()
     seeds = tuple(seed_urls or p.search_seed_urls)
+    from app.services.step1_web_search_stats import (
+        step1_hard_cost_limit_exceeded,
+        step1_strict_web_search_economy,
+        step1_web_search_api_cap_should_stop,
+        step1_web_search_cost_budget_should_stop,
+    )
+
+    hard_limit_rub = float(getattr(settings, "step1_hard_stop_cost_rub", 100) or 100)
+
+    def _abort_search() -> bool:
+        if digest_id is not None:
+            from app.services.step1_cancellation import is_cancelled
+
+            if is_cancelled(digest_id):
+                return True
+        return step1_hard_cost_limit_exceeded(
+            proxyapi_spent_rub=proxyapi_spent_rub,
+            hard_limit_rub=hard_limit_rub,
+        )
+
+    economy = step1_strict_web_search_economy(settings)
     short_pool = max(0, int(current_verified or 0)) < 10 or max(0, int(pool_shortfall or 0)) > 0
     if short_pool:
         # Как в курьёзной ветке: больше URL на батч и не останавливаться на первой «достаточной» выдаче.
@@ -818,25 +966,26 @@ def fetch_tier_prioritized_raw_urls(
     seen: set[str] = set()
     host_counts: dict[str, int] = {}
     max_batches = max(1, int(getattr(settings, "step1_tier_max_web_search_batches", 6) or 6))
-    if short_pool:
+    if short_pool and not economy:
         max_batches = max(max_batches, 10)
         if pool_shortfall >= 5:
             max_batches = max(max_batches, 14)
     batches_used = 0
     medium_escalations_used = 0
     preview_fallbacks_used = 0
-    max_medium_escalations = 3
-    max_preview_fallbacks = 1
+    max_medium_escalations = 0 if economy else 3
+    max_preview_fallbacks = 0 if economy else 1
     window_earliest, window_anchor = parse_search_window_dates(window_prefix)
     ru_hosts_seen = 0
-    tier_ctx = (
-        "medium"
-        if short_pool
-        else str(search_context_size or "low").strip().lower() or "low"
-    )
+    tier_ctx = str(search_context_size or "low").strip().lower() or "low"
+    if short_pool and not economy and tier_ctx not in ("medium", "high"):
+        tier_ctx = "low"
     tier_phase_started = time.monotonic()
-    tier_phase_wall_sec = 150 if short_pool and pool_shortfall >= 5 else (90 if short_pool else None)
+    tier_phase_wall_sec = (
+        150 if short_pool and not economy and pool_shortfall >= 5 else (90 if short_pool and not economy else None)
+    )
     empty_batch_streak = 0
+    tier_api_cap_hit = False
 
     def _enough_coverage() -> bool:
         if short_pool and pool_shortfall >= 5:
@@ -867,6 +1016,8 @@ def fetch_tier_prioritized_raw_urls(
                 host_counts[host] = host_counts.get(host, 0) + 1
 
     for tier_label, hosts in policy_tier_host_groups_ru_first(p):
+        if tier_api_cap_hit or _abort_search():
+            break
         if tier_phase_wall_sec is not None and (time.monotonic() - tier_phase_started) >= tier_phase_wall_sec:
             logger.warning(
                 "Tier-поиск: остановка по лимиту фазы | merged=%s batches=%s wall_sec=%s",
@@ -892,6 +1043,30 @@ def fetch_tier_prioritized_raw_urls(
         if _enough_coverage():
             break
         for batch in batched_site_host_groups(hosts, batch_size=3):
+            if _abort_search():
+                logger.warning(
+                    "Tier-поиск: остановка — отмена или жёсткий лимит ₽ | batches=%s merged=%s",
+                    batches_used,
+                    len(merged),
+                )
+                tier_api_cap_hit = True
+                break
+            if step1_web_search_api_cap_should_stop(
+                verified_count=int(current_verified or 0),
+                pool_shortfall=int(pool_shortfall or 0),
+            ) or step1_web_search_cost_budget_should_stop(
+                verified_count=int(current_verified or 0),
+                pool_shortfall=int(pool_shortfall or 0),
+                proxyapi_spent_rub=proxyapi_spent_rub,
+                hard_limit_rub=hard_limit_rub,
+            ):
+                logger.warning(
+                    "Tier-поиск: остановка — лимит web_search API/₽ | batches=%s merged=%s",
+                    batches_used,
+                    len(merged),
+                )
+                tier_api_cap_hit = True
+                break
             if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
                 logger.warning("Tier-поиск: остановка по лимиту времени в батче | tier=%s", tier_label)
                 break
@@ -950,17 +1125,24 @@ def fetch_tier_prioritized_raw_urls(
                 search_context_size=tier_ctx,
                 include_domains=include_domains,
                 allowed_hosts=allowed_hosts,
-                force_proxyapi=short_pool,
-                proxy_fallback_on_empty=short_pool,
+                force_proxyapi=short_pool and not economy,
+                proxy_fallback_on_empty=(short_pool and not economy) or economy,
+                current_verified=current_verified,
+                pool_shortfall=pool_shortfall,
             )
             if (
                 not batch_urls
+                and not economy
                 and tier_ctx == "low"
                 and (tier_label in ("Tier-1", "Tier-2") or has_aggregator_hosts or short_pool)
                 and medium_escalations_used < max_medium_escalations
             ):
                 medium_escalations_used += 1
-                use_preview_fallback = has_aggregator_hosts and preview_fallbacks_used < max_preview_fallbacks
+                use_preview_fallback = (
+                    not economy
+                    and has_aggregator_hosts
+                    and preview_fallbacks_used < max_preview_fallbacks
+                )
                 if use_preview_fallback:
                     preview_fallbacks_used += 1
                 logger.info(
@@ -979,8 +1161,10 @@ def fetch_tier_prioritized_raw_urls(
                     search_context_size="medium",
                     include_domains=include_domains,
                     allowed_hosts=allowed_hosts,
-                    proxy_fallback_on_empty=use_preview_fallback or short_pool,
-                    force_proxyapi=short_pool,
+                    proxy_fallback_on_empty=use_preview_fallback or (short_pool and not economy),
+                    force_proxyapi=short_pool and not economy,
+                    current_verified=current_verified,
+                    pool_shortfall=pool_shortfall,
                 )
             batches_used += 1
             if not batch_urls:
@@ -1080,7 +1264,7 @@ def fetch_curious_prioritized_raw_urls(
             if not u.startswith("http"):
                 continue
             is_aggregator = is_curious_aggregator_source(u, p)
-            if not is_aggregator and not is_curious_policy_source(u, p):
+            if not is_aggregator and not is_curious_allowed_source(u, p):
                 continue
             if search_url_path_date_outside_window(
                 u, earliest=window_earliest, anchor=window_anchor
@@ -1188,6 +1372,7 @@ def fetch_curious_prioritized_raw_urls(
                 include_domains=list(batch),
                 allowed_hosts=list(batch),
                 curious_search=True,
+                pool_shortfall=escalate_shortfall,
             )
             search_batches_used += 1
             _accept(batch_urls)

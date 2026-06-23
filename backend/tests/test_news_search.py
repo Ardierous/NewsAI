@@ -207,6 +207,17 @@ def test_step1_listing_seed_url_covers_section_paths():
     ) is True
     assert news_search.is_step1_listing_seed_url("https://vc.ru/ai") is True
     assert news_search.is_step1_listing_seed_url(
+        "https://ria.ru/product_iskusstvennyy-intellekt/"
+    ) is True
+    assert news_search.is_listing_page_url(
+        "https://ria.ru/product_iskusstvennyy-intellekt/"
+    ) is True
+    assert news_search.search_url_prefilter_reason(
+        "https://ria.ru/product_iskusstvennyy-intellekt/",
+        tier_strict=True,
+    ) == "news_listing_page"
+    assert news_search.is_listing_page_url("https://ria.ru/20260519/ii-2093333250.html") is False
+    assert news_search.is_step1_listing_seed_url(
         "https://www.1tv.ru/news/2026-04-26/540448"
     ) is False
 

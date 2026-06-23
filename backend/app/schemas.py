@@ -165,6 +165,7 @@ class CandidateOut(BaseModel):
     is_duplicate: bool = False
     material_form: str = "article"
     not_ad_disclosure: bool = False
+    editorial_angle: str = "serious"
 
     model_config = {"from_attributes": True}
 
@@ -202,11 +203,20 @@ class CandidateOut(BaseModel):
             payload.get("verification_comment"),
             payload.get("description"),
         )
-        from app.services.step1_candidate_policy import has_not_ad_disclosure, parse_material_form_from_comment
+        from app.services.step1_candidate_policy import (
+            has_not_ad_disclosure,
+            parse_editorial_angle_from_comment,
+            parse_material_form_from_comment,
+        )
 
         comment = str(payload.get("verification_comment") or "")
         payload["material_form"] = parse_material_form_from_comment(comment)
         payload["not_ad_disclosure"] = has_not_ad_disclosure(comment)
+        angle = parse_editorial_angle_from_comment(comment)
+        tier = str(payload.get("tier") or "")
+        if angle == "serious" and tier.startswith("Curious-"):
+            angle = "curious"
+        payload["editorial_angle"] = angle
         return payload
 
 

@@ -50,3 +50,9 @@ def request_cancel(digest_id: int) -> bool:
 def is_cancelled(digest_id: int) -> bool:
     with _lock:
         return int(digest_id) in _cancelled
+
+
+def should_abort_step1_web_search() -> bool:
+    """True — новые платные web_search-вызовы для активного digest не запускать."""
+    with _lock:
+        return bool(_cancelled)

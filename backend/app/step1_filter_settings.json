@@ -2,7 +2,7 @@
   "version": 2,
   "serious": {
     "min_discovered_pages": 10,
-    "min_collection_iterations": 5,
+    "min_collection_iterations": 3,
     "filters": [
       {
         "id": "published_before_window",
@@ -207,7 +207,7 @@
       },
       {
         "id": "recent_top5_repeat",
-        "enabled": true,
+        "enabled": false,
         "order": 21
       }
     ]

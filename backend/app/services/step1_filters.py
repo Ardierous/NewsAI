@@ -24,7 +24,6 @@ CURIOUS_PREFILTER_DEFAULT_ORDER: tuple[str, ...] = (
     "invalid_url",
     "product_tool_page",
     "duplicate_url_skip",
-    "recent_top5_repeat",
 )
 
 
@@ -63,9 +62,10 @@ STEP1_FILTER_CATALOG: tuple[Step1FilterDef, ...] = (
     Step1FilterDef(
         "recent_top5_repeat",
         "Повтор из топ-5",
-        "Исключает ту же страницу статьи (URL), что уже была в топ-5 одного из 7 предыдущих выпусков. "
-        "Другой URL — другая публикация, даже если сюжет похож.",
-        "pre_http",
+        "На шаге 2 при выборе пятёрки нельзя взять ту же страницу статьи (URL), что уже была в топ-5 "
+        "одного из 7 предыдущих выпусков. В пуле кандидатов шага 1 повтор допускается.",
+        "step2",
+        default_enabled=False,
     ),
     Step1FilterDef(
         "aggregator_source",

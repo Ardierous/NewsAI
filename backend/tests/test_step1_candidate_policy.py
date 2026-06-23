@@ -53,7 +53,8 @@ def test_training_course_url_classified_and_title_tagged():
     assert is_training_education_candidate(item)
     assert classify_material_form(item) == MATERIAL_FORM_TRAINING
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(обучение)")
+    assert item["title"] == "Программа Machine Learning"
+    assert item["material_form"] == MATERIAL_FORM_TRAINING
     assert "NOT_AD:" in item["verification_comment"]
     assert is_training_pool_item(item)
 
@@ -68,7 +69,8 @@ def test_research_program_path_is_not_training():
     assert is_research_science_candidate(item)
     assert classify_material_form(item) == MATERIAL_FORM_RESEARCH
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(исследование)")
+    assert item["title"] == "MIT scientists publish new benchmark for large models"
+    assert item["material_form"] == MATERIAL_FORM_RESEARCH
 
 
 def test_nplus1_science_article_classified_as_research():
@@ -101,7 +103,8 @@ def test_openai_blog_deployment_is_press_not_research():
     assert not is_research_science_candidate(item)
     assert classify_material_form(item) == MATERIAL_FORM_PRESS
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(пресс-релиз)")
+    assert item["title"] == "OpenAI announces enterprise deployment partnership"
+    assert item["material_form"] == MATERIAL_FORM_PRESS
     assert not looks_like_product_tool_promo(item)
 
 
@@ -128,7 +131,8 @@ def test_yandex_education_university_phd_program_is_training_not_article():
     assert not is_research_science_candidate(item)
     assert classify_material_form(item) == MATERIAL_FORM_TRAINING
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(обучение)")
+    assert item["title"] == "ИИ и машинное обучение — программа аспирантуры от НИУ ВШЭ"
+    assert item["material_form"] == MATERIAL_FORM_TRAINING
 
 
 def test_yandex_education_learn_catalog_is_training_not_research():
@@ -144,7 +148,8 @@ def test_yandex_education_learn_catalog_is_training_not_research():
     assert not is_research_science_candidate(item)
     assert classify_material_form(item) == MATERIAL_FORM_TRAINING
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(обучение)")
+    assert item["title"] == "Изучайте | Яндекс Образование"
+    assert item["material_form"] == MATERIAL_FORM_TRAINING
 
 
 def test_sber_career_team_page_is_service_not_research():
@@ -160,7 +165,8 @@ def test_sber_career_team_page_is_service_not_research():
     assert not is_research_science_candidate(item)
     assert classify_material_form(item) == MATERIAL_FORM_SERVICE
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(услуга/реклама)")
+    assert item["title"] == "Присоединяйся к работе в команде Центр практического искусственного интеллекта"
+    assert item["material_form"] == MATERIAL_FORM_SERVICE
 
 
 def test_sber_vacancy_url_detected_as_non_article():
@@ -187,8 +193,48 @@ def test_neurolegal_about_is_service_not_article():
     }
     assert classify_material_form(item) == MATERIAL_FORM_SERVICE
     apply_material_form_to_candidate(item)
-    assert item["title"].endswith("(услуга/реклама)")
+    assert item["title"] == "ИИ-помощник для юристов"
+    assert item["material_form"] == MATERIAL_FORM_SERVICE
     assert should_reject_commercial_non_article(item, MATERIAL_FORM_SERVICE)
+
+
+def test_editorial_angle_curious_host_in_serious_digest():
+    from app.services.step1_candidate_policy import (
+        apply_material_form_to_candidate,
+        classify_editorial_angle,
+        parse_editorial_angle_from_comment,
+    )
+
+    item = {
+        "url": "https://pikabu.ru/story/ai_fail_123",
+        "title": "Нейросеть удалила код пользователя — мем дня",
+        "description": "фейл чат-бота",
+    }
+    assert classify_editorial_angle(item, digest_type="serious") == "curious"
+    apply_material_form_to_candidate(item, digest_type="serious")
+    assert parse_editorial_angle_from_comment(item["verification_comment"]) == "curious"
+
+
+def test_editorial_angle_serious_tier_in_serious_digest():
+    from app.services.step1_candidate_policy import classify_editorial_angle
+
+    item = {
+        "url": "https://ria.ru/20260616/ai-regulation-123.html",
+        "title": "Минцифры представило план развития ИИ",
+        "description": "регулирование и стратегия",
+    }
+    assert classify_editorial_angle(item, digest_type="serious") == "serious"
+
+
+def test_editorial_angle_always_curious_for_curious_digest():
+    from app.services.step1_candidate_policy import classify_editorial_angle
+
+    item = {
+        "url": "https://ria.ru/20260616/ai-123.html",
+        "title": "Официальный отчёт",
+        "description": "",
+    }
+    assert classify_editorial_angle(item, digest_type="curious") == "curious"
 
 
 def test_yandex_cybersecurity_report_is_article_not_finance():

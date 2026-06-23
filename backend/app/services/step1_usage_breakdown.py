@@ -19,6 +19,7 @@ TOOL_ORDER = (
     "http_verify",
     "telegram",
     "crew",
+    "crew_enrich",
     "seed_fallback",
     "other",
 )
@@ -29,6 +30,7 @@ TOOL_LABELS: dict[str, str] = {
     "http_verify": "HTTP-проверка ссылок",
     "telegram": "Монитор Telegram",
     "crew": "CrewAI добор",
+    "crew_enrich": "CrewAI оценка пула",
     "seed_fallback": "Seed-листинги",
     "other": "Прочее",
 }
@@ -39,6 +41,7 @@ TOOL_COLORS: dict[str, str] = {
     "http_verify": "#4ade80",
     "telegram": "#f472b6",
     "crew": "#fb923c",
+    "crew_enrich": "#f97316",
     "seed_fallback": "#fbbf24",
     "other": "#94a3b8",
 }
@@ -50,6 +53,7 @@ _COST_LABEL_TO_TOOL: dict[str, str] = {
     "run_candidates_research": "crew",
     "run_candidates_verify": "crew",
     "run_candidates_score": "crew",
+    "run_verified_pool_score_enrichment": "crew_enrich",
     "run_candidates_refill": "crew",
     "step_1_collect_pool": "_lump",
 }

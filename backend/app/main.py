@@ -10,6 +10,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.routes_config import router as config_router
 from app.api.routes_digests import router as digests_router
+from app.api.routes_source_tiers import router as source_tiers_router
 from app.config import get_settings
 from app.database import Base, engine, ensure_digest_schema_migrations
 from app.logging_config import setup_logging
@@ -62,6 +63,12 @@ async def lifespan(_: FastAPI):
             db.close()
     except Exception:
         logger.warning("Не удалось собрать файл ручных оценок шага 1 при старте", exc_info=True)
+    try:
+        from app.services.step1_web_search_cache import purge_expired_web_search_cache
+
+        purge_expired_web_search_cache(settings)
+    except Exception:
+        logger.warning("Не удалось очистить просроченный кэш web_search при старте", exc_info=True)
     scheduler.add_job(scheduled_digest_generation, "cron", hour=8, minute=0, id="daily_digest_job", replace_existing=True)
     scheduler.start()
     yield
@@ -79,6 +86,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(config_router)
+app.include_router(source_tiers_router)
 app.include_router(digests_router)
 
 

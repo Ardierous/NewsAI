@@ -178,5 +178,52 @@ def classify_curious_source(url: str, policy: CuriousSourcePolicy | None = None)
     return "Curious-T5", False, "❗ без подтверждения"
 
 
+def _load_gray_zone_hosts(path: Path) -> tuple[str, ...]:
+    if not path.is_file():
+        return ()
+    hosts: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        token = line.split("#", 1)[0].strip().lower()
+        if token and not token.startswith("["):
+            hosts.append(token)
+    return tuple(dict.fromkeys(hosts))
+
+
+@lru_cache(maxsize=4)
+def _cached_gray_zone_hosts(path_str: str, mtime_ns: int) -> tuple[str, ...]:
+    return _load_gray_zone_hosts(Path(path_str))
+
+
+def get_curious_gray_zone_hosts(path: Path | None = None) -> tuple[str, ...]:
+    if path is None:
+        from app.config import get_settings
+
+        path = get_settings().curious_gray_zone_hosts_path
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return _cached_gray_zone_hosts(str(path.resolve()), mtime_ns)
+
+
+def is_curious_gray_zone_source(url: str, policy: CuriousSourcePolicy | None = None) -> bool:
+    """Домен из серой зоны: не tier-1/2 и не агрегатор, но допускается на prefilter."""
+    p = policy or get_curious_source_policy()
+    if is_curious_blocked_host(url, p):
+        return False
+    if is_curious_aggregator_source(url, p):
+        return False
+    host = _host_from_url(url)
+    if _host_contains_marker(host, p.curious_tier1_hosts) or _host_contains_marker(host, p.curious_tier2_hosts):
+        return False
+    return _host_contains_marker(host, get_curious_gray_zone_hosts())
+
+
+def is_curious_allowed_source(url: str, policy: CuriousSourcePolicy | None = None) -> bool:
+    """Белый список (tier/aggregator) или серая зона."""
+    return is_curious_policy_source(url, policy) or is_curious_gray_zone_source(url, policy)
+
+
 def invalidate_curious_policy_cache() -> None:
     _cached_curious_policy.cache_clear()
+    _cached_gray_zone_hosts.cache_clear()

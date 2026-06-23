@@ -31,6 +31,20 @@ def test_rebalance_never_more_than_two_per_host() -> None:
     assert max(counts.values()) <= ds.STEP1_MAX_PER_SOURCE
 
 
+def test_pinned_items_still_respect_host_cap() -> None:
+    pool = [
+        _item(f"https://vedomosti.ru/a{i}", score=10 - i) for i in range(5)
+    ]
+    pinned = {ds._url_fingerprint(row["url"]) for row in pool}
+    out = ds._rebalance_verified_pool(
+        pool,
+        target=5,
+        pinned_fps=pinned,
+        digest_type="serious",
+    )
+    assert max(ds._pool_host_counts(out).values()) <= ds.STEP1_MAX_PER_SOURCE
+
+
 def test_social_status_url_detected() -> None:
     assert ds._is_social_embed_status_url("https://x.com/user/status/1234567890")
     assert ds._headline_unusable_for_digest("Функции JavaScript недоступны.")

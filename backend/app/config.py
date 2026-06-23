@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     # --- Пайплайн (дефолты; основной источник — app/pipeline_settings.json) ---
     step1_search_tier1_min_raw_urls: int = 15
     step1_max_cost_rub: float = 50.0
+    step1_hard_stop_cost_rub: float = 100.0
     step1_max_web_search_api_calls: int = 0
     step1_web_search_api_bonus_near_target: int = 10
     step1_batch_size: int = 10
@@ -53,11 +54,16 @@ class Settings(BaseSettings):
     step1_urls_checked_per_collect: int = 24
     step1_soft_time_limit_sec: int = 90
     step1_hard_time_limit_sec: int = 150
-    step1_max_candidates_for_ui: int = 15
+    step1_max_candidates_for_ui: int = 20
     step1_verify_workers: int = 6
     step1_crew_fallback_only_if_empty: bool = True
+    step1_crew_enrich_verified_scores: bool = False
+    step1_crew_enrich_min_verified: int = 1
+    step1_crew_enrich_max_items: int = 12
     step1_tier_strict_search: bool = True
     step1_curious_use_serious_tiers: bool = False
+    step1_serious_use_curious_tiers: bool = True
+    step1_serious_curious_search_batches: int = 4
     step1_telegram_monitor_enabled: bool = True
     step1_telegram_monitor_channels: str = "technokratos"
     step1_telegram_max_pages: int = 2
@@ -78,6 +84,7 @@ class Settings(BaseSettings):
     step1_registry_max_raw_when_short_pool: int = 8
     step1_host_unreachable_autoblock_threshold: int = 20
     step1_seed_urls_max: int = 35
+    step1_cheap_sources_first: bool = True
     step2_max_cost_rub: float = 50.0
     auto_run_step3_after_order: bool = True
     enable_step4_image_generation: bool = False
@@ -123,6 +130,7 @@ class Settings(BaseSettings):
     prompts_path: Path = BASE_DIR / "app" / "prompts" / "digest_contract.txt"
     source_tiers_path: Path = BASE_DIR / "app" / "prompts" / "source_tiers.txt"
     curious_source_hosts_path: Path = BASE_DIR / "app" / "prompts" / "curious_source_hosts.txt"
+    curious_gray_zone_hosts_path: Path = BASE_DIR / "app" / "prompts" / "curious_gray_zone_hosts.txt"
 
 
 def _apply_pipeline_settings(settings: Settings) -> None:

@@ -71,8 +71,44 @@ async function request<T>(path: string, init?: RequestOptions): Promise<T> {
   }
 }
 
+export type SourceHostStats = {
+  raw_count: number;
+  pool_count: number;
+  selected_count: number;
+};
+
+export type SourceHost = {
+  marker: string;
+  locked: boolean;
+  stats: SourceHostStats;
+};
+
+export type SourceTierGroup = {
+  id: string;
+  label: string;
+  priority: number;
+  is_blacklist: boolean;
+  hosts: SourceHost[];
+};
+
+export type SourceTiersEditor = {
+  digest_type: string;
+  window_days: number;
+  file_name: string;
+  groups: SourceTierGroup[];
+};
+
 export const api = {
   listDigests: () => request<any[]>("/digests"),
+  getSourceTiersEditor: (digestType: "serious" | "curious", windowDays = 30) =>
+    request<SourceTiersEditor>(
+      `/config/source-tiers?digest_type=${encodeURIComponent(digestType)}&window_days=${windowDays}`,
+    ),
+  saveSourceTiersEditor: (payload: { digest_type: string; groups: Array<{ id: string; hosts: Array<{ marker: string }> }> }) =>
+    request<SourceTiersEditor>("/config/source-tiers", {
+      method: "PUT",
+      body: JSON.stringify(payload),
+    }),
   getAppConfig: () =>
     request<{
       sections: Array<{

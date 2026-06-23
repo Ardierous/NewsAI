@@ -14,6 +14,7 @@ PHASE_KEYS = (
     "http_verify",
     "telegram",
     "crew",
+    "crew_enrich",
     "seed_fallback",
     "other",
 )

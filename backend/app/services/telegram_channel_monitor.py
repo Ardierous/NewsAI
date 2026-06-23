@@ -200,13 +200,14 @@ def collect_urls_from_digest_posts(
     post_text_filter: str | None = _DIGEST_TEXT_MARKER,
     max_links: int = 30,
 ) -> list[str]:
-    """Внешние URL из последних digest-постов (новые первыми)."""
+    """Внешние URL из последних digest-постов (сначала свежие посты канала)."""
     max_digest_posts = max(1, min(max_digest_posts, 10))
     max_links = max(1, min(max_links, 80))
     ordered: list[str] = []
     seen: set[str] = set()
     digest_posts_used = 0
-    for post in posts:
+    ordered_posts = sorted(posts, key=lambda p: p.published_at, reverse=True)
+    for post in ordered_posts:
         if digest_posts_used >= max_digest_posts or len(ordered) >= max_links:
             break
         pub_day = post.published_at.date()
@@ -386,11 +387,10 @@ def collect_external_links_from_channels(
                 if len(ordered) >= max_links:
                     return ordered
 
-            for post in posts:
+            for post in sorted(posts, key=lambda p: p.published_at, reverse=True):
                 if digest_posts_used >= max_digest_posts:
                     break
                 if earliest_date is not None and post.published_at.date() < earliest_date:
-                    stop_channel = True
                     break
                 if not post_matches_text_filter(post, post_text_filter):
                     continue

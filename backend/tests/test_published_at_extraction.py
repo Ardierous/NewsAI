@@ -61,6 +61,29 @@ def test_parse_russian_date_with_time():
     assert got.hour == 22 and got.minute == 40
 
 
+def test_parse_russian_date_without_year_uses_current_year():
+    got = ds._parse_published_at_raw("14 июня, 10:30")
+    assert got is not None
+    assert got.year == ds.datetime.now(ds.MSK_TZ).year
+    assert got.month == 6 and got.day == 14
+    assert got.hour == 10 and got.minute == 30
+
+
+def test_parse_dot_date_without_year_uses_current_year():
+    got = ds._parse_published_at_raw("18.06 15:42")
+    assert got is not None
+    assert got.year == ds.datetime.now(ds.MSK_TZ).year
+    assert got.month == 6 and got.day == 18
+    assert got.hour == 15 and got.minute == 42
+
+
+def test_extract_published_at_from_page_without_year_in_text():
+    chunk = '<span class="article-date">18 июня, 12:05</span>'
+    got = ds._extract_published_at_from_page(chunk, "https://example.com/news/story-123")
+    assert got is not None
+    assert got.startswith(f"{ds.datetime.now(ds.MSK_TZ).year}-06-18")
+
+
 def test_curious_rejects_dry_product_launch():
     item = {"url": "https://habr.com/ru/news/1037344/"}
     bundle = {

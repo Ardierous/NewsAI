@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -18,6 +19,8 @@ class Step1WebSearchStats:
     token_cost_est_rub: float = 0.0
     api_cap: int | None = None
     cap_hit: bool = False
+    strict_api_cap: bool = False
+    max_cost_rub: float | None = None
     empty_citation_streak: int = 0
 
     def to_meta(self) -> dict[str, int | bool | float | None]:
@@ -83,12 +86,99 @@ def current_step1_web_search_stats() -> Step1WebSearchStats | None:
     return _STATS.get()
 
 
-def set_step1_web_search_api_cap(limit: int | None) -> None:
+def step1_explicit_web_search_api_cap(settings: Any) -> int | None:
+    explicit = int(getattr(settings, "step1_max_web_search_api_calls", 0) or 0)
+    return explicit if explicit > 0 else None
+
+
+def step1_strict_web_search_economy(settings: Any) -> bool:
+    """Явный max_web_search_api_calls в pipeline — без refund слота; preview только при cap>=2."""
+    return step1_explicit_web_search_api_cap(settings) is not None
+
+
+def set_step1_web_search_cost_budget(max_rub: float | None) -> None:
+    stats = _STATS.get()
+    if stats is None:
+        return
+    if max_rub is None:
+        stats.max_cost_rub = None
+        return
+    stats.max_cost_rub = max(0.0, float(max_rub))
+
+
+def step1_web_search_cost_budget_exceeded() -> bool:
+    stats = _STATS.get()
+    if stats is None or stats.max_cost_rub is None:
+        return False
+    total = float(stats.service_cost_est_rub) + float(stats.token_cost_est_rub)
+    return total >= float(stats.max_cost_rub) - 1e-9
+
+
+def step1_estimated_web_search_cost_rub() -> float:
+    stats = _STATS.get()
+    if stats is None:
+        return 0.0
+    return float(stats.service_cost_est_rub) + float(stats.token_cost_est_rub)
+
+
+def step1_run_cost_rub(*, proxyapi_spent_rub: float = 0.0) -> float:
+    return max(float(proxyapi_spent_rub or 0.0), step1_estimated_web_search_cost_rub())
+
+
+def step1_hard_cost_limit_exceeded(*, proxyapi_spent_rub: float, hard_limit_rub: float) -> bool:
+    limit = float(hard_limit_rub or 0.0)
+    if limit <= 0:
+        return False
+    return step1_run_cost_rub(proxyapi_spent_rub=proxyapi_spent_rub) >= limit - 1e-9
+
+
+def step1_web_search_cost_budget_should_stop(
+    *,
+    verified_count: int = 0,
+    min_verified: int = 10,
+    pool_shortfall: int = 0,
+    proxyapi_spent_rub: float = 0.0,
+    hard_limit_rub: float | None = None,
+) -> bool:
+    """True, когда web_search нужно остановить из‑за ₽-лимита (не просто превышен учёт)."""
+    if hard_limit_rub is not None and step1_hard_cost_limit_exceeded(
+        proxyapi_spent_rub=proxyapi_spent_rub,
+        hard_limit_rub=float(hard_limit_rub),
+    ):
+        return True
+    if not step1_web_search_cost_budget_exceeded():
+        return False
+    if max(0, int(pool_shortfall or 0)) > 0:
+        return False
+    if int(verified_count) < int(min_verified):
+        return False
+    return True
+
+
+def step1_web_search_api_cap_should_stop(
+    *,
+    verified_count: int = 0,
+    min_verified: int = 10,
+    pool_shortfall: int = 0,
+) -> bool:
+    """True, когда web_search нужно остановить из‑за лимита API (не просто достигнут потолок)."""
+    if not step1_web_search_api_cap_reached():
+        return False
+    if max(0, int(pool_shortfall or 0)) > 0:
+        return False
+    if int(verified_count) < int(min_verified):
+        return False
+    return True
+
+
+def set_step1_web_search_api_cap(limit: int | None, *, strict: bool | None = None) -> None:
     stats = _STATS.get()
     if stats is None:
         return
     cap = max(0, int(limit)) if limit is not None else None
     stats.api_cap = cap if cap and cap > 0 else None
+    if strict is not None:
+        stats.strict_api_cap = bool(strict)
 
 
 def step1_web_search_api_cap() -> int | None:
@@ -131,7 +221,14 @@ def record_web_search_api_call(*, kind: str = "responses") -> None:
 
 
 def consume_web_search_api_call(*, kind: str = "responses") -> bool:
-    """True — вызов разрешён и учтён; False — достигнут потолок шага 1."""
+    """True — вызов разрешён и учтён; False — достигнут потолок шага 1 или отмена."""
+    try:
+        from app.services.step1_cancellation import should_abort_step1_web_search
+
+        if should_abort_step1_web_search():
+            return False
+    except ImportError:
+        pass
     stats = _STATS.get()
     if stats is None:
         return True
@@ -178,6 +275,8 @@ def refund_web_search_api_call(*, kind: str = "responses") -> None:
     """Вернуть слот cap, если вызов не дал citation URL (деньги ProxyAPI всё равно списаны)."""
     stats = _STATS.get()
     if stats is None or stats.api_calls <= 0:
+        return
+    if stats.strict_api_cap:
         return
     stats.api_calls -= 1
     if kind == "preview" and stats.preview_calls > 0:

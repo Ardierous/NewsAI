@@ -46,7 +46,6 @@ def build_web_search_cache_key(
         "ctx": str(search_context_size or "").strip().lower(),
         "hosts": hosts,
         "curious": bool(curious_search),
-        "preview_fallback": bool(proxy_fallback_on_empty),
     }
     raw = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -131,7 +130,6 @@ def get_cached_proxy_search_urls(
     if owns:
         db = _open_db()
     try:
-        purge_expired_web_search_cache(settings, db=db)
         row = db.get(Step1WebSearchCache, cache_key)
         if row is None:
             return None
