@@ -12,21 +12,27 @@
 
 ## 2) Быстрый старт (Windows)
 
-Из корня проекта:
+Двойной клик или из корня проекта:
+
+```bat
+push_dockerhub.bat
+```
+
+Альтернатива:
 
 ```bat
 scripts\push_dockerhub.bat
 ```
 
 Скрипт:
-- спросит Docker Hub username (по умолчанию `avardous`);
-- предложит ввести **PAT** (Personal Access Token); Enter — попробовать сохранённый вход;
-- при ошибке `unauthorized` запросит PAT повторно (в Python через скрытый ввод);
-- попросит подтверждение публикации;
-- соберет и опубликует backend и frontend;
-- опубликует тег версии и `latest` для обоих образов.
+- проверит Docker и место на диске;
+- **запросит логин и пароль / PAT** (без использования старого кэша Docker Desktop);
+- для **backend** и **frontend** отдельно:
+  - **шаг 1** — подтверждение → сборка контейнера (`docker build`);
+  - **шаг 2** — подтверждение → push в Docker Hub (тег версии и `latest`).
 
 PAT создаётся здесь: https://app.docker.com/settings/security (права **Read & Write**).
+В поле пароля вводите **токен**, не пароль от сайта (если включена 2FA).
 
 ## 3) Переменные окружения (опционально)
 
@@ -68,6 +74,17 @@ docker compose -f scripts/docker-compose.prod.yml up -d
 - API: <http://localhost:8000/health>
 
 ## 6) Частые проблемы
+
+- Скрипт «завис» на сборке backend  
+  Первая сборка **15–25 минут** — это нормально. Прогресс виден в окне (`Step 3/6`, `pip install`…).  
+  В Docker Desktop → **Builds** тоже виден статус.
+
+- `no space left on device` / `EROFS` / сборка обрывается на frontend  
+  На диске **C:** мало места (нужно **8–15 ГБ** свободно). Освободите место и выполните:
+  ```powershell
+  docker system prune -af
+  ```
+  Затем снова `scripts\push_dockerhub.bat`.
 
 - `denied: requested access to the resource is denied`  
   Проверьте `DOCKER_USERNAME` и имя репозитория.

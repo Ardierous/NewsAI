@@ -4,6 +4,11 @@ __pycache__
 logs
 storage
 digest.db
+*.db
+.env
+.env.*
+tests
+.git
 *.pyc
 *.pyo
 *.pyd
