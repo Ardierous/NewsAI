@@ -29,6 +29,10 @@ def test_begin_sync_snapshot_and_end():
         "collection_target_pages": 20,
     }
     live.sync_live_progress(42, meta=meta, reject_total=31, iteration_no=2)
+    for _ in range(28):
+        live.record_link_rejected(42)
+    for _ in range(3):
+        live.record_link_accepted_to_pool(42)
 
     snap = live.snapshot_live_progress(42)
     assert snap is not None
@@ -39,7 +43,9 @@ def test_begin_sync_snapshot_and_end():
     assert snap["urls_raw"] == 55
     assert snap["urls_sent_to_http"] == 38
     assert snap["verified_pool"] == 7
-    assert snap["rejected_total"] == 31
+    assert snap["rejected_links"] == 28
+    assert snap["reject_reason_events"] == 31
+    assert snap["links_checked"] == 31
     assert snap["web_search_api_calls"] == 9
     assert snap["collection_target"] == 20
     assert snap["elapsed_sec"] >= 0
@@ -85,6 +91,54 @@ def test_mark_cancel_requested():
     snap = live.snapshot_live_progress(99)
     assert snap is not None
     assert snap["cancel_requested"] is True
+
+
+def test_funnel_counters_and_yield():
+    live.begin_live_progress(50, collection_target=20)
+    live.bump_live_progress(50, pool_carried_over=8, iteration=2)
+    live.record_links_found_free(50, count=5)
+    live.sync_live_from_web_search_stats(50)
+    for _ in range(12):
+        live.record_link_rejected(50)
+    for _ in range(3):
+        live.record_link_accepted_to_pool(50)
+    live.bump_live_progress(50, verified_pool=11, rejected_total=12)
+
+    snap = live.snapshot_live_progress(50)
+    assert snap is not None
+    assert snap["links_found_free"] == 5
+    assert snap["pool_carried_over"] == 8
+    assert snap["pool_added_this_run"] == 3
+    assert snap["rejected_links"] == 12
+    assert snap["links_checked"] == 15
+    assert snap["pool_yield_pct"] == 20.0
+    assert snap["links_found_total"] >= 5
+
+    meta = {
+        "iterations": 2,
+        "elapsed_sec": 605,
+        "verified_total": 10,
+        "rejected_total": 48,
+        "reject_reason_events": 48,
+        "rejected_links": 38,
+        "pool_carried_over": 8,
+        "pool_added_this_run": 2,
+        "links_found_paid": 11,
+        "links_found_free": 0,
+        "urls_raw_merged": 11,
+        "urls_sent_to_http": 7,
+        "collection_target_pages": 20,
+        "web_search_api_calls": 1,
+        "web_search_citation_urls": 11,
+        "web_search_cost_est_rub": 12.2,
+    }
+    payload = live.live_payload_from_meta(meta)
+    assert payload["running"] is False
+    assert payload["links_found_total"] == 11
+    assert payload["links_checked"] == 40
+    assert payload["rejected_links"] == 38
+    assert payload["pool_yield_pct"] == 5.0
+    live.end_live_progress(50)
 
 
 def test_bump_live_progress_partial():

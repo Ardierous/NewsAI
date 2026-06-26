@@ -18,12 +18,6 @@
 push_dockerhub.bat
 ```
 
-Альтернатива:
-
-```bat
-scripts\push_dockerhub.bat
-```
-
 Скрипт:
 - проверит Docker и место на диске;
 - **запросит логин и пароль / PAT** (без использования старого кэша Docker Desktop);
@@ -84,7 +78,7 @@ docker compose -f scripts/docker-compose.prod.yml up -d
   ```powershell
   docker system prune -af
   ```
-  Затем снова `scripts\push_dockerhub.bat`.
+  Затем снова `push_dockerhub.bat`.
 
 - `denied: requested access to the resource is denied`  
   Проверьте `DOCKER_USERNAME` и имя репозитория.

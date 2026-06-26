@@ -256,7 +256,7 @@ docker compose down
 
 ### Публикация в Docker Hub
 
-- Windows: `push_dockerhub.bat` (или `scripts\push_dockerhub.bat`)
+- Windows: `push_dockerhub.bat`
 - Linux/macOS: `python scripts/push_to_dockerhub.py`
 - Автоматически по тегу/релизу: GitHub Actions (`.github/workflows/docker-publish.yml`)
 - Проверка Docker-сборки в PR (без push): GitHub Actions (`.github/workflows/docker-ci.yml`)

@@ -33,7 +33,7 @@ if not exist "backend\.env" (
   exit /b 1
 )
 
-findstr /R /C:"^PROXYAPI_API_KEY=your_key_here$" "backend\.env" >nul 2>&1
+findstr /C:"PROXYAPI_API_KEY=your_key_here" "backend\.env" >nul 2>&1
 if not errorlevel 1 (
   echo [ВНИМАНИЕ] В backend\.env стоит заглушка your_key_here.
   echo Вставьте настоящий ключ: PROXYAPI_API_KEY=sk-...
@@ -42,7 +42,7 @@ if not errorlevel 1 (
   exit /b 1
 )
 
-findstr /R /C:"^PROXYAPI_API_KEY=.\+" "backend\.env" >nul 2>&1
+findstr /B /C:"PROXYAPI_API_KEY=" "backend\.env" >nul 2>&1
 if errorlevel 1 (
   echo [ОШИБКА] В backend\.env нет строки PROXYAPI_API_KEY=...
   notepad "backend\.env"

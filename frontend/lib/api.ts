@@ -198,8 +198,19 @@ export const api = {
       urls_sent_to_http: number;
       verified_pool: number;
       rejected_total: number;
+      rejected_links: number;
+      reject_reason_events: number;
       collection_target: number;
       cancel_requested: boolean;
+      pool_carried_over: number;
+      pool_added_this_run: number;
+      links_found_paid: number;
+      links_found_free: number;
+      links_found_total: number;
+      links_processed: number;
+      links_checked: number;
+      pool_yield_pct: number | null;
+      recheck_only: boolean;
     }>(`/digests/${id}/step1/progress`),
   getStep1Filters: (id: number) =>
     request<any>(`/digests/${id}/step1/filters`),

@@ -3833,7 +3833,7 @@ class DigestService:
 
     def get_step1_live_progress(self, digest_id: int) -> dict[str, Any]:
         from app.services.step1_cancellation import is_running as step1_is_running
-        from app.services.step1_live_progress import _format_elapsed, snapshot_live_progress
+        from app.services.step1_live_progress import live_payload_from_meta, snapshot_live_progress
         from app.services.step1_statistics import _read_asset_json
 
         self.get_digest(digest_id)
@@ -3841,67 +3841,15 @@ class DigestService:
         if snap is not None:
             return snap
         if step1_is_running(digest_id):
-            return {
-                "running": True,
-                "phase": "",
-                "phase_key": "",
-                "elapsed_sec": 0,
-                "elapsed_human": "—",
-                "iteration": 0,
-                "web_search_api_calls": 0,
-                "web_search_citation_urls": 0,
-                "web_search_cost_est_rub": 0.0,
-                "urls_raw": 0,
-                "urls_raw_merged": 0,
-                "urls_prefilter_rejected": 0,
-                "urls_sent_to_http": 0,
-                "verified_pool": 0,
-                "rejected_total": 0,
-                "collection_target": 15,
-                "cancel_requested": False,
-            }
+            payload = live_payload_from_meta({})
+            payload["running"] = True
+            payload["phase"] = "Выполняется…"
+            payload["phase_key"] = ""
+            return payload
         meta = _read_asset_json(self.db, digest_id, "step1_collection_meta")
         if meta:
-            elapsed = int(meta.get("elapsed_sec") or 0)
-            raw = max(int(meta.get("urls_raw_unique") or 0), int(meta.get("urls_raw_merged") or 0))
-            return {
-                "running": False,
-                "phase": "Сбор завершён",
-                "phase_key": "done",
-                "elapsed_sec": elapsed,
-                "elapsed_human": _format_elapsed(elapsed),
-                "iteration": int(meta.get("iterations") or 0),
-                "web_search_api_calls": int(meta.get("web_search_api_calls") or 0),
-                "web_search_citation_urls": int(meta.get("web_search_citation_urls") or 0),
-                "web_search_cost_est_rub": float(meta.get("web_search_cost_est_rub") or 0.0),
-                "urls_raw": raw,
-                "urls_raw_merged": int(meta.get("urls_raw_merged") or 0),
-                "urls_prefilter_rejected": int(meta.get("urls_prefilter_rejected") or 0),
-                "urls_sent_to_http": int(meta.get("urls_sent_to_http") or 0),
-                "verified_pool": int(meta.get("verified_total") or 0),
-                "rejected_total": int(meta.get("rejected_total") or 0),
-                "collection_target": int(meta.get("collection_target_pages") or 15),
-                "cancel_requested": False,
-            }
-        return {
-            "running": False,
-            "phase": "",
-            "phase_key": "",
-            "elapsed_sec": 0,
-            "elapsed_human": "—",
-            "iteration": 0,
-            "web_search_api_calls": 0,
-            "web_search_citation_urls": 0,
-            "web_search_cost_est_rub": 0.0,
-            "urls_raw": 0,
-            "urls_raw_merged": 0,
-            "urls_prefilter_rejected": 0,
-            "urls_sent_to_http": 0,
-            "verified_pool": 0,
-            "rejected_total": 0,
-            "collection_target": 15,
-            "cancel_requested": False,
-        }
+            return live_payload_from_meta(meta)
+        return live_payload_from_meta({})
 
     def run_step_1(
         self,
@@ -4303,6 +4251,22 @@ class DigestService:
                 except Exception:
                     pass
 
+            def _record_link_rejected_live() -> None:
+                try:
+                    from app.services.step1_live_progress import record_link_rejected
+
+                    record_link_rejected(digest.id)
+                except Exception:
+                    pass
+
+            def _record_link_accepted_live() -> None:
+                try:
+                    from app.services.step1_live_progress import record_link_accepted_to_pool
+
+                    record_link_accepted_to_pool(digest.id)
+                except Exception:
+                    pass
+
             def register_reject(item: dict[str, Any]) -> None:
                 codes = _reject_reason_codes(str(item.get("verification_comment") or ""))
                 if not codes:
@@ -4328,6 +4292,7 @@ class DigestService:
                         unreachable_by_host[host] = unreachable_by_host.get(host, 0) + 1
                 self._step1_registry_track_item(digest, item)
                 _bump_live_rejects()
+                _record_link_rejected_live()
 
             for kept in kept_rows:
                 kept_item = self._news_candidate_to_pool_dict(kept)
@@ -4361,7 +4326,15 @@ class DigestService:
                         register_reject(kept_item)
                     else:
                         verified_pool.append(kept_item)
-    
+
+            if verified_pool:
+                try:
+                    from app.services.step1_live_progress import bump_live_progress
+
+                    bump_live_progress(digest.id, pool_carried_over=len(verified_pool))
+                except Exception:
+                    pass
+
             def append_verified(item: dict[str, Any]) -> None:
                 if _manual_required_dict(item):
                     if not item.get("link_status"):
@@ -4395,6 +4368,7 @@ class DigestService:
                     self._step1_registry_track_item(digest, item)
                     if len(verified_pool) >= STEP1_MIN_VERIFIED:
                         self._step1_min_fetch_limit = None
+                    _record_link_accepted_live()
                     try:
                         from app.services.step1_live_progress import bump_live_progress
 
@@ -4515,6 +4489,7 @@ class DigestService:
                 self._step1_registry_track_item(digest, item)
                 if len(verified_pool) >= STEP1_MIN_VERIFIED:
                     self._step1_min_fetch_limit = None
+                _record_link_accepted_live()
                 try:
                     from app.services.step1_live_progress import bump_live_progress
 
@@ -4613,7 +4588,8 @@ class DigestService:
                 step1_collection_meta["iterations"] = iteration_no
                 step1_collection_meta["elapsed_sec"] = int(time.monotonic() - started_monotonic)
                 step1_collection_meta["verified_total"] = len(verified_pool)
-                step1_collection_meta["rejected_total"] = sum(int(v) for v in reject_stats.values())
+                step1_collection_meta["reject_reason_events"] = sum(int(v) for v in reject_stats.values())
+                step1_collection_meta["rejected_total"] = step1_collection_meta["reject_reason_events"]
                 step1_collection_meta["urls_raw_unique"] = len(
                     getattr(self, "_step1_raw_urls_registry", set()) or set()
                 )
@@ -4625,9 +4601,37 @@ class DigestService:
                     phase_timers.merge_into(step1_collection_meta)
                 apply_funnel_conversions_to_meta(step1_collection_meta, digest_type=digest.digest_type or "serious")
                 self._enrich_step1_proxyapi_cost_meta(digest, step1_collection_meta)
+                step1_collection_meta["links_found_free"] = max(
+                    int(step1_collection_meta.get("links_found_free") or 0),
+                    int(step1_collection_meta.get("urls_raw_from_seed_listings") or 0),
+                )
+                step1_collection_meta["links_found_paid"] = max(
+                    int(step1_collection_meta.get("links_found_paid") or 0),
+                    int(step1_collection_meta.get("web_search_citation_urls") or 0),
+                    int(step1_collection_meta.get("urls_raw_unique") or 0),
+                    int(step1_collection_meta.get("urls_raw_merged") or 0)
+                    - int(step1_collection_meta.get("links_found_free") or 0),
+                )
                 try:
-                    from app.services.step1_live_progress import sync_live_progress
+                    from app.services.step1_live_progress import snapshot_live_progress, sync_live_progress
 
+                    live_payload = snapshot_live_progress(digest.id)
+                    if live_payload:
+                        for key in (
+                            "pool_carried_over",
+                            "pool_added_this_run",
+                            "links_found_paid",
+                            "links_found_free",
+                            "links_found_total",
+                            "links_checked",
+                            "links_processed",
+                            "rejected_links",
+                            "reject_reason_events",
+                            "pool_yield_pct",
+                            "recheck_only",
+                        ):
+                            if live_payload.get(key) is not None:
+                                step1_collection_meta[key] = live_payload[key]
                     sync_live_progress(
                         digest.id,
                         meta=step1_collection_meta,
@@ -8505,6 +8509,12 @@ class DigestService:
                 fp = _url_fingerprint(resolved_url)
                 if fp and fp in seen_fp:
                     continue
+                try:
+                    from app.services.step1_live_progress import record_links_found_free
+
+                    record_links_found_free(digest.id)
+                except Exception:
+                    pass
                 work = self._skeleton_dict_from_search_url(
                     resolved_url,
                     now_msk,
@@ -8598,6 +8608,12 @@ class DigestService:
             raw_unique.append(url)
             added += 1
         if added:
+            try:
+                from app.services.step1_live_progress import record_links_found_free
+
+                record_links_found_free(digest.id, count=added)
+            except Exception:
+                pass
             logger.info(
                 "Шаг 1: сырые URL из реестра (без web_search) | digest_id=%s count=%s",
                 digest.id,
@@ -9169,12 +9185,18 @@ class DigestService:
             from app.services.step1_live_progress import bump_live_progress, sync_live_from_web_search_stats
 
             sync_live_from_web_search_stats(digest_id)
+            free_from_funnel = int(funnel.get("urls_raw_from_seed_listings") or 0) + int(
+                funnel.get("urls_raw_from_registry") or 0
+            )
+            paid_from_funnel = max(0, int(funnel.get("urls_raw_merged") or 0) - free_from_funnel)
             bump_live_progress(
                 digest_id,
                 urls_raw_merged=int(funnel.get("urls_raw_merged") or 0),
                 urls_raw=int(funnel.get("urls_raw_unique") or funnel.get("urls_raw_merged") or 0),
                 urls_prefilter_rejected=int(funnel.get("urls_prefilter_rejected") or 0),
                 urls_sent_to_http=int(funnel.get("urls_sent_to_http") or 0),
+                links_found_paid=paid_from_funnel,
+                links_found_free=free_from_funnel,
                 phase_key="http_verify",
             )
         except Exception:

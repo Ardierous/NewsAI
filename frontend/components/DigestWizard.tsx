@@ -1883,7 +1883,7 @@ export function DigestWizard({ digestId }: Props) {
       void (async () => {
         try {
           const data = await api.getStep1Progress(digestId);
-          if (!cancelled && (data.urls_raw > 0 || data.verified_pool > 0 || data.web_search_api_calls > 0 || !data.running)) {
+          if (!cancelled && (data.urls_raw > 0 || data.verified_pool > 0 || data.web_search_api_calls > 0 || (data.links_found_total ?? 0) > 0 || data.rejected_total > 0 || !data.running)) {
             setStep1Live(data);
           }
         } catch {
@@ -1920,7 +1920,7 @@ export function DigestWizard({ digestId }: Props) {
         if (
           !cancelled &&
           !data.running &&
-          (data.urls_raw > 0 || data.verified_pool > 0 || data.web_search_api_calls > 0)
+          (data.urls_raw > 0 || data.verified_pool > 0 || data.web_search_api_calls > 0 || (data.links_found_total ?? 0) > 0 || data.rejected_total > 0)
         ) {
           setStep1Live(data);
         }
@@ -2208,9 +2208,10 @@ export function DigestWizard({ digestId }: Props) {
           <p className="wizard-hint-do" style={{ margin: 0, fontSize: "0.95rem" }}>
             {step1CollectionInProgress && step1Live?.running ? (
               <>
-                Сбор идёт: запросов web_search <strong>{step1Live.web_search_api_calls}</strong>, сырых URL{" "}
-                <strong>{step1Live.urls_raw}</strong>, на проверке HTTP <strong>{step1Live.urls_sent_to_http}</strong>, в
-                пуле <strong style={{ color: "#4ade80" }}>{step1Live.verified_pool}</strong>, отбраковано{" "}
+                Сбор идёт: итерация <strong>{step1Live.iteration || "—"}</strong>, найдено{" "}
+                <strong>{step1Live.links_found_total ?? step1Live.urls_raw}</strong> ссылок, проверено{" "}
+                <strong>{step1Live.links_processed ?? step1Live.rejected_total}</strong>, в пуле{" "}
+                <strong style={{ color: "#4ade80" }}>{step1Live.verified_pool}</strong>, отбраковано{" "}
                 <strong style={{ color: "#fca5a5" }}>{step1Live.rejected_total}</strong>.
               </>
             ) : (

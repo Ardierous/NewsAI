@@ -828,6 +828,13 @@ details.wizard-hint-why {
   margin-bottom: 12px;
 }
 
+.step1-live-elapsed {
+  margin-left: auto;
+  font-size: 0.88rem;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+
 .step1-live-title {
   font-size: 0.78rem;
   font-weight: 600;
@@ -844,8 +851,12 @@ details.wizard-hint-why {
 
 .step1-live-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   gap: 10px;
+}
+
+.step1-live-grid--primary {
+  margin-bottom: 14px;
 }
 
 .step1-live-stat {
@@ -878,13 +889,63 @@ details.wizard-hint-why {
 }
 
 .step1-live-funnel {
-  margin-top: 10px;
-  font-size: 0.82rem;
-  color: #94a3b8;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 6px 10px;
+  padding: 12px 10px;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.45);
+  font-size: 0.84rem;
+  color: #cbd5e1;
+}
+
+.step1-live-funnel-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 64px;
+}
+
+.step1-live-funnel-num {
+  font-size: 1.15rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: #e2e8f0;
+}
+
+.step1-live-funnel-caption {
+  font-size: 0.72rem;
+  text-transform: lowercase;
+  color: #64748b;
+}
+
+.step1-live-funnel-step--reject .step1-live-funnel-num {
+  color: #fca5a5;
+}
+
+.step1-live-funnel-step--pool .step1-live-funnel-num {
+  color: #4ade80;
+}
+
+.step1-live-summary {
+  margin: 12px 0 0;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: #94a3b8;
+}
+
+.step1-live-summary strong {
+  color: #e2e8f0;
+  font-weight: 600;
+}
+
+.step1-live-summary--muted {
+  margin-top: 6px;
+  font-size: 0.8rem;
+  color: #64748b;
 }
 
 .step1-live-funnel-arrow {

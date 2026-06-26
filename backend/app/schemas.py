@@ -475,8 +475,19 @@ class Step1LiveProgressOut(BaseModel):
     urls_sent_to_http: int = 0
     verified_pool: int = 0
     rejected_total: int = 0
+    rejected_links: int = 0
+    reject_reason_events: int = 0
     collection_target: int = 15
     cancel_requested: bool = False
+    pool_carried_over: int = 0
+    pool_added_this_run: int = 0
+    links_found_paid: int = 0
+    links_found_free: int = 0
+    links_found_total: int = 0
+    links_processed: int = 0
+    links_checked: int = 0
+    pool_yield_pct: float | None = None
+    recheck_only: bool = False
 
 
 class DigestDetail(BaseModel):
