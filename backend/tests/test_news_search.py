@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services import news_search
+from app.source_tiers_policy import is_policy_tier_source
 
 
 def test_extract_http_urls_from_json_array():
@@ -219,6 +220,38 @@ def test_step1_listing_seed_url_covers_section_paths():
     assert news_search.is_listing_page_url("https://ria.ru/20260519/ii-2093333250.html") is False
     assert news_search.is_step1_listing_seed_url(
         "https://www.1tv.ru/news/2026-04-26/540448"
+    ) is False
+
+
+def test_investing_com_noise_paths():
+    assert news_search.is_search_noise_url("https://ru.investing.com/certificates") is True
+    assert news_search.is_search_noise_url("https://ru.investing.com/certificates/foo-bar") is True
+    assert news_search.is_search_noise_url(
+        "https://www.investing.com/economic-calendar/ecb-president-lagarde-speaks-1965"
+    ) is True
+    assert news_search.is_search_noise_url(
+        "https://ru.investing.com/news/stock-market-news/nvidia-ai-rally-1234567"
+    ) is False
+
+
+def test_investing_com_listing_urls():
+    listings = (
+        "https://ru.investing.com/analysis/stock-markets",
+        "https://ru.investing.com/news/stock-market-news",
+        "https://ru.investing.com/news/economy",
+        "https://ru.investing.com/analysis/market-overview",
+        "https://ru.investing.com/analysis/bonds",
+    )
+    for listing in listings:
+        assert news_search.is_investing_com_listing_url(listing) is True
+        assert news_search.is_step1_listing_seed_url(listing) is True
+        assert news_search.is_listing_page_url(listing) is True
+        assert news_search.search_url_prefilter_reason(listing, tier_strict=True) == "news_listing_page"
+    assert is_policy_tier_source(
+        "https://ru.investing.com/news/stock-market-news/nvidia-ai-rally-1234567"
+    ) is True
+    assert news_search.is_investing_com_listing_url(
+        "https://ru.investing.com/analysis/ai-chips-market-outlook-1234567"
     ) is False
 
 

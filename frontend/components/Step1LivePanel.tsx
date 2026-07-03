@@ -149,8 +149,8 @@ export function Step1LivePanel({ live, finished = false }: Props) {
           →
         </span>
         <div className="step1-live-funnel-step step1-live-funnel-step--pool">
-          <span className="step1-live-funnel-num">{poolAdded}</span>
-          <span className="step1-live-funnel-caption">новых в пуле</span>
+          <span className="step1-live-funnel-num">{live.verified_pool}</span>
+          <span className="step1-live-funnel-caption">в пуле</span>
         </div>
       </div>
 
@@ -168,8 +168,14 @@ export function Step1LivePanel({ live, finished = false }: Props) {
         </p>
       ) : poolAdded > 0 && linksChecked > 0 ? (
         <p className="step1-live-summary">
-          Из <strong>{linksChecked}</strong> проверенных ссылок в пул добавлено <strong>{poolAdded}</strong> новых
-          {yieldLabel ? ` (${yieldLabel})` : ""}. Всего в пуле <strong>{live.verified_pool}</strong>, цель —{" "}
+          В пуле <strong>{live.verified_pool}</strong> материалов
+          {poolCarried > 0 ? (
+            <>
+              {" "}
+              (из них <strong>{poolCarried}</strong> с прошлого запуска, <strong>{poolAdded}</strong> новых)
+            </>
+          ) : null}
+          {yieldLabel && poolAdded > 0 ? ` — ${yieldLabel} новых прошли проверку` : ""}. Цель —{" "}
           <strong>{live.collection_target}</strong>.
         </p>
       ) : linksChecked > 0 ? (

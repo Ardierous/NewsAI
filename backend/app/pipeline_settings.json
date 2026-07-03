@@ -41,9 +41,9 @@
     "telegram_via_proxyapi": false,
     "telegram_direct_fallback": true,
     "telegram_proxyapi_context_size": "low",
-    "seed_urls_max": 24,
+    "seed_urls_max": 30,
     "cheap_sources_first": true,
-    "max_pending_per_host": 4,
+    "max_pending_per_host": 0,
     "curious_yield": {
       "enabled": true,
       "min_verified": 10,

@@ -58,6 +58,7 @@ Tier-2 (приоритет №2): ресурсы для профессионал
 - VC.ru, раздел AI — https://vc.ru/ai
 - NVIDIA, официальный AI-архив блога — https://blogs.nvidia.com/blog/tag/artificial-intelligence/ (российский blogs.nvidia.ru недоступен)
 - Shvedkov.pro — https://shvedkov.pro/
+- Investing.com (RU), разделы новостей и аналитики — https://ru.investing.com/news/stock-market-news , https://ru.investing.com/news/economy , https://ru.investing.com/analysis/stock-markets , https://ru.investing.com/analysis/market-overview , https://ru.investing.com/analysis/bonds — мониторинг шага 1: из лент берутся ссылки на отдельные статьи (в т.ч. про ИИ на финансовых рынках).
 
 Что не вошло в этот список, не повышай до Tier-2.
 
@@ -150,6 +151,7 @@ habr.com
 vc.ru
 blogs.nvidia.com
 shvedkov.pro
+investing.com
 [tier3_hosts]
 digital.gov.ru
 sk.ru
@@ -202,6 +204,7 @@ tadviser.ru
 habr.com
 vc.ru
 shvedkov.pro
+investing.com
 digital.gov.ru
 sk.ru
 rosatom.ru
@@ -224,6 +227,11 @@ https://www.analyticsinsight.net/artificial-intelligence/
 https://ai-manual.ru/
 https://t.me/s/ai_ud
 https://t.me/s/technokratos
+https://ru.investing.com/news/stock-market-news
+https://ru.investing.com/news/economy
+https://ru.investing.com/analysis/stock-markets
+https://ru.investing.com/analysis/market-overview
+https://ru.investing.com/analysis/bonds
 https://ria.ru/product_iskusstvennyy-intellekt/
 https://www.interfax.ru/digital/
 https://www.vedomosti.ru/technologies/
@@ -242,6 +250,3 @@ https://habr.com/ru/hubs/artificial_intelligence/
 https://vc.ru/ai
 https://blogs.nvidia.com/blog/tag/artificial-intelligence/
 https://shvedkov.pro/
-https://ru.investing.com/news/stock-market-news
-https://ru.investing.com/analysis/stock-markets
-https://ru.investing.com/analysis/bonds

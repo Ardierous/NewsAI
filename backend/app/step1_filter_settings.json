@@ -98,6 +98,11 @@
         "id": "url_mutated_between_agents",
         "enabled": true,
         "order": 19
+      },
+      {
+        "id": "recent_top5_repeat",
+        "enabled": true,
+        "order": 20
       }
     ]
   },
@@ -207,7 +212,7 @@
       },
       {
         "id": "recent_top5_repeat",
-        "enabled": false,
+        "enabled": true,
         "order": 21
       }
     ]

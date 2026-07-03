@@ -129,8 +129,127 @@ input[type="checkbox"] {
 .news-pick-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 16px;
   margin: 0 0 16px;
+}
+
+.news-pick-domain-group {
+  border: 1px solid #334155;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(15, 23, 42, 0.45);
+}
+
+.news-pick-domain-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 14px;
+  background: linear-gradient(90deg, rgba(79, 70, 229, 0.22) 0%, rgba(15, 23, 42, 0.6) 100%);
+  border-bottom: 1px solid #334155;
+}
+
+.news-pick-domain-name {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #e2e8f0;
+  letter-spacing: 0.01em;
+}
+
+.news-pick-domain-count {
+  font-size: 0.78rem;
+  color: #94a3b8;
+}
+
+.news-pick-domain-items {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.news-pick-domain-items .news-pick-row {
+  border-radius: 8px;
+  margin: 0;
+}
+
+.news-pick-url-line {
+  margin-top: 6px;
+  font-size: 0.82rem;
+  color: #93c5fd;
+  word-break: break-word;
+  line-height: 1.35;
+}
+
+.platform-output-preview {
+  min-height: 240px;
+  max-height: min(70vh, 720px);
+  overflow-y: auto;
+}
+
+.step4-results-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.65);
+}
+
+.step4-results-toolbar-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  flex: 1 1 200px;
+}
+
+.step4-results-finalize {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  flex: 1 1 240px;
+}
+
+.step4-results-finalize--done {
+  color: #86efac;
+  font-size: 0.92rem;
+}
+
+.step4-copy-all-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.85);
+}
+
+.step4-copy-all-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+
+.step4-copy-all-bar .step4-copy-btn {
+  white-space: nowrap;
+}
+
+.step4-copy-all-feedback {
+  font-size: 0.9rem;
+}
+
+.step4-platform-card h4 {
+  margin-bottom: 6px;
 }
 
 .news-pick-row {

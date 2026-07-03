@@ -161,7 +161,8 @@ export function SourceTiersModal({ digestType, open, onClose }: Props) {
             {meta ? (
               <p className="source-tiers-modal-sub">
                 Файл: <code>{meta.file_name}</code> · группы сверху вниз — порядок поиска на шаге 1
-                (сначала ленты и Telegram, затем Tier‑1…4) · счётчики за {meta.window_days} дн.
+                (сначала ленты и Telegram, затем Tier‑1…4) · домены из Tier автоматически попадают в
+                «Ленты, Telegram и seed-URL» · счётчики за {meta.window_days} дн.
               </p>
             ) : null}
           </div>

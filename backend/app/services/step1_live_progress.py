@@ -268,6 +268,25 @@ def record_links_found_free(digest_id: int | None = None, *, count: int = 1) -> 
             snap.links_found_free += int(count)
 
 
+def finalize_live_pool_stats(
+    digest_id: int,
+    *,
+    verified_pool: int,
+    pool_carried_over: int,
+    rejected_links: int | None = None,
+) -> None:
+    """Итоговые цифры пула после rebalance — совпадают с карточками в UI."""
+    pool_added = max(0, int(verified_pool) - max(0, int(pool_carried_over)))
+    kwargs: dict[str, Any] = {
+        "verified_pool": max(0, int(verified_pool)),
+        "pool_carried_over": max(0, int(pool_carried_over)),
+        "pool_added_this_run": pool_added,
+    }
+    if rejected_links is not None:
+        kwargs["rejected_links"] = max(0, int(rejected_links))
+    bump_live_progress(digest_id, **kwargs)
+
+
 def sync_live_from_web_search_stats(digest_id: int | None = None) -> None:
     """Подтянуть счётчики ProxyAPI web_search в live-снимок."""
     from app.services.step1_web_search_stats import current_step1_web_search_stats

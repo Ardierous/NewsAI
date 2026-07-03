@@ -196,7 +196,17 @@ def test_recent_top5_repeat_reason_on_service():
 
 def test_filter_in_catalog():
     assert "recent_top5_repeat" in STEP1_FILTER_DEF_BY_ID
-    assert STEP1_FILTER_DEF_BY_ID["recent_top5_repeat"].stage == "step2"
+    assert STEP1_FILTER_DEF_BY_ID["recent_top5_repeat"].stage == "pre_http"
+    assert STEP1_FILTER_DEF_BY_ID["recent_top5_repeat"].default_enabled is True
+
+
+def test_serious_filter_settings_enable_recent_top5_repeat():
+    from app.services.step1_filter_settings import load_step1_filter_settings
+
+    cfg = load_step1_filter_settings("serious")
+    row = next((x for x in cfg["filters"] if x["id"] == "recent_top5_repeat"), None)
+    assert row is not None
+    assert row["enabled"] is True
 
 
 def _add_pool_candidate(db, digest: Digest, *, url: str, number: int) -> NewsCandidate:
@@ -254,6 +264,7 @@ def test_select_news_rejects_recent_top5_repeat():
 
 
 def test_select_news_allows_repeat_in_pool_but_not_in_top5_auto():
+    """Повтор может остаться в БД (старый пул), но в автотоп-5 не попадает."""
     db = _make_db()
     repeat_url = "https://news.example.com/page/repeat-me"
     _add_digest_with_top5(db, date(2026, 5, 18), repeat_url)
@@ -271,7 +282,7 @@ def test_select_news_allows_repeat_in_pool_but_not_in_top5_auto():
 
     _add_pool_candidate(db, current, url=repeat_url, number=10)
     for i in range(5):
-        _add_pool_candidate(db, current, url=f"https://fresh.example.com/{i}", number=i + 1)
+        _add_pool_candidate(db, current, url=f"https://fresh{i}.example.com/news", number=i + 1)
 
     service = DigestService(db)
     picked = service.select_news(current.id, [], top5=True)

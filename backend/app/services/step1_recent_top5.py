@@ -6,6 +6,7 @@ from datetime import date
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from sqlalchemy import and_, or_
 from sqlalchemy.orm import Session
 
 from app.models import Digest, NewsCandidate, SelectedNews
@@ -44,9 +45,14 @@ def query_recent_top5_url_fingerprints(
     prev_rows = (
         db.query(Digest.id)
         .filter(Digest.id != digest_id)
-        .filter(Digest.date < digest_date)
         .filter(Digest.proxyapi_finalized_at.isnot(None))
-        .order_by(Digest.date.desc())
+        .filter(
+            or_(
+                Digest.date < digest_date,
+                and_(Digest.date == digest_date, Digest.id < digest_id),
+            )
+        )
+        .order_by(Digest.date.desc(), Digest.id.desc())
         .limit(lookback)
         .all()
     )

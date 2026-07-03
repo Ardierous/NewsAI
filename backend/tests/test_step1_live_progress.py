@@ -141,6 +141,21 @@ def test_funnel_counters_and_yield():
     live.end_live_progress(50)
 
 
+def test_finalize_live_pool_stats():
+    live.begin_live_progress(77, collection_target=20)
+    live.bump_live_progress(77, pool_carried_over=3)
+    for _ in range(8):
+        live.record_link_accepted_to_pool(77)
+    live.finalize_live_pool_stats(77, verified_pool=5, pool_carried_over=3, rejected_links=10)
+    snap = live.snapshot_live_progress(77)
+    assert snap is not None
+    assert snap["verified_pool"] == 5
+    assert snap["pool_carried_over"] == 3
+    assert snap["pool_added_this_run"] == 2
+    assert snap["links_checked"] == 12
+    live.end_live_progress(77)
+
+
 def test_bump_live_progress_partial():
     live.begin_live_progress(5, collection_target=12)
     live.bump_live_progress(5, iteration=2, urls_raw_merged=40, verified_pool=3, phase_key="http_verify")

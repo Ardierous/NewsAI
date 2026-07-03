@@ -737,15 +737,17 @@ def test_select_news_top5_picks_best_when_many_mandatory_manual(monkeypatch: pyt
     service, digest = _make_service(monkeypatch)
     digest.status = STATUS_STEP1
     digest.current_step = STATUS_STEP1
+    hosts = ["ria.ru", "rbc.ru", "kommersant.ru", "vedomosti.ru", "tass.ru", "interfax.ru", "cnews.ru"]
     for idx in range(12):
         mandatory = idx < 7
+        host = hosts[idx % len(hosts)]
         service.db.add(
             NewsCandidate(
                 digest_id=digest.id,
                 original_number=idx + 1,
                 title=f"Новость {idx}",
-                url=f"https://ria.ru/2026052{idx}/story",
-                source="ria.ru",
+                url=f"https://{host}/2026052{idx}/story",
+                source=host,
                 tier="Tier-1",
                 published_at="2026-05-20T12:00:00",
                 category="manual" if mandatory else "technology",
@@ -771,6 +773,42 @@ def test_select_news_top5_picks_best_when_many_mandatory_manual(monkeypatch: pyt
     assert len(selected) == 5
     service.db.refresh(digest)
     assert digest.status == STATUS_SELECTED
+
+
+def test_select_news_rejects_more_than_two_per_host(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    rows = []
+    for idx in range(6):
+        host = "ria.ru" if idx < 3 else f"site{idx}.com"
+        row = NewsCandidate(
+            digest_id=digest.id,
+            original_number=idx + 1,
+            title=f"Новость {idx}",
+            url=f"https://{host}/story{idx}",
+            source=host,
+            tier="Tier-1",
+            published_at="2026-05-20T12:00:00",
+            category="technology",
+            description="Описание",
+            significance_score=2,
+            novelty_score=2,
+            impact_score=2,
+            total_score=10 - idx,
+            reliability_status="✅ подтверждено",
+            link_status=True,
+            headline_editorial_ok=True,
+            page_verified=True,
+        )
+        service.db.add(row)
+        rows.append(row)
+    service.db.commit()
+    pick_ids = [rows[0].id, rows[1].id, rows[2].id, rows[3].id, rows[4].id]
+    with pytest.raises(HTTPException) as ex:
+        service.select_news(digest.id, pick_ids, top5=False)
+    assert ex.value.status_code == 400
+    assert "ria.ru" in str(ex.value.detail)
 
 
 def test_select_news_does_not_auto_run_step3(monkeypatch: pytest.MonkeyPatch):

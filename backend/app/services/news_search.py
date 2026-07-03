@@ -88,6 +88,28 @@ _SECTION_LISTING_PATH_RE = re.compile(
 )
 _DTF_USER_PROFILE_RE = re.compile(r"^/id\d+/?$", re.IGNORECASE)
 _RIA_PRODUCT_LISTING_RE = re.compile(r"^/product_[\w-]+$", re.IGNORECASE)
+_INVESTING_ARTICLE_ID_SUFFIX_RE = re.compile(r"-\d{5,}$", re.IGNORECASE)
+
+
+def is_investing_com_listing_url(url: str) -> bool:
+    """Рубрика/лента Investing.com (/news/… или /analysis/… из двух сегментов), не отдельная статья."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    try:
+        host = (urlparse(u).hostname or "").lower()
+        path = (urlparse(u).path or "").rstrip("/") or "/"
+    except Exception:
+        return False
+    if "investing.com" not in host:
+        return False
+    segments = [s for s in path.split("/") if s]
+    if len(segments) != 2 or segments[0] not in ("news", "analysis"):
+        return False
+    slug = segments[1]
+    if _INVESTING_ARTICLE_ID_SUFFIX_RE.search(slug) or slug.isdigit():
+        return False
+    return True
 
 _LISTING_EXCEPTION_KEYWORDS: tuple[str, ...] = (
     "top",
@@ -527,6 +549,8 @@ def is_listing_page_url(url: str) -> bool:
         return True
     if _RIA_PRODUCT_LISTING_RE.match(path):
         return True
+    if is_investing_com_listing_url(u):
+        return True
     return False
 
 
@@ -660,6 +684,12 @@ def is_search_noise_url(url: str) -> bool:
         return True
     if _AUTH_GATE_PATH_RE.search(path):
         return True
+    if "investing.com" in host and (
+        path.startswith("/certificates")
+        or path.startswith("/economic-calendar")
+        or path.startswith("/pro/")
+    ):
+        return True
     return False
 
 
@@ -710,6 +740,8 @@ def is_step1_listing_seed_url(url: str) -> bool:
     if re.search(r"^/articles/[\w_-]+$", path):
         return True
     if _RIA_PRODUCT_LISTING_RE.match(path):
+        return True
+    if is_investing_com_listing_url(u):
         return True
     if is_search_noise_url(u):
         return True
@@ -956,12 +988,12 @@ def fetch_tier_prioritized_raw_urls(
         per_batch_limit = max(14, min(32, max(fetch_limit // 3, 16)))
         raw_target = max(20, min(fetch_limit, 36))
         min_unique_hosts_target = max(6, min(12, max(fetch_limit // 3, 8)))
-        max_urls_per_host = max(3, min(5, max(fetch_limit // 10, 3)))
+        max_urls_per_host = 0
     else:
         per_batch_limit = max(6, min(12, max(fetch_limit // 6, 6)))
         raw_target = max(14, min(fetch_limit, 22))
         min_unique_hosts_target = max(6, min(10, max(fetch_limit // 2, 6)))
-        max_urls_per_host = max(2, min(4, max(fetch_limit // 12, 2)))
+        max_urls_per_host = 0
     merged: list[str] = []
     seen: set[str] = set()
     host_counts: dict[str, int] = {}
@@ -1005,7 +1037,7 @@ def fetch_tier_prioritized_raw_urls(
             if key in seen:
                 continue
             host = (urlparse(u).hostname or "").lower()
-            if host and host_counts.get(host, 0) >= max_urls_per_host:
+            if max_urls_per_host > 0 and host and host_counts.get(host, 0) >= max_urls_per_host:
                 continue
             if any(marker in host for marker in _FOREIGN_EDITORIAL_ACCEPT_CAP_HOSTS):
                 if host_counts.get(host, 0) >= 1:
@@ -1217,7 +1249,7 @@ def fetch_curious_prioritized_raw_urls(
     merged: list[str] = []
     seen: set[str] = set()
     host_counts: dict[str, int] = {}
-    max_urls_per_host = 5
+    max_urls_per_host = 0
     collect_cap = max(fetch_limit * 3, fetch_limit + 24, 48) if max_search_batches else max(
         fetch_limit * 4, fetch_limit + 40, 80
     )
@@ -1282,7 +1314,7 @@ def fetch_curious_prioritized_raw_urls(
             if key in seen:
                 continue
             host = (urlparse(u).hostname or "").lower()
-            if host and host_counts.get(host, 0) >= max_urls_per_host:
+            if max_urls_per_host > 0 and host and host_counts.get(host, 0) >= max_urls_per_host:
                 continue
             seen.add(key)
             merged.append(u)

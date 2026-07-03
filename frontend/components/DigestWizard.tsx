@@ -523,6 +523,8 @@ function isManualRequiredCandidate(c: { verification_comment?: string; descripti
 
 type Step2PickCandidate = {
   id: number;
+  url?: string;
+  source?: string;
   total_score?: number;
   verification_comment?: string;
   description?: string;
@@ -534,20 +536,111 @@ type Step2PickCandidate = {
   is_duplicate?: boolean;
 };
 
+const STEP2_MAX_PER_DOMAIN = 2;
+const STEP1_POOL_MAX_PER_DOMAIN = 3;
+
+function step1RebuildProgressLabel(selectedCount: number): string {
+  if (selectedCount > 0) {
+    return `Шаг 1: пересборка пула (сохранить ${selectedCount}, добрать остальные; подождите)…`;
+  }
+  return "Шаг 1: дополнение пула (сохранить текущие, искать новые; подождите)…";
+}
+
+function step1RebuildConfirmMessage(selectedCount: number, pastStep2: boolean): string {
+  if (selectedCount > 0) {
+    const base =
+      `Пересобрать пул, оставив ${selectedCount} отмеченных новостей?\n\n` +
+      "Остальные места в списке кандидатов будут заполнены заново (те же seed-ленты, web_search, проверка).\n" +
+      "Снятые галочки и их URL в новый пул не вернутся.\n";
+    if (pastStep2) {
+      return (
+        base +
+        "Сотрутся подтверждённая пятёрка, порядок, аналитика и финал — их нужно пройти заново.\n\n" +
+        "Тип дайджеста (шаг 0) сохранится. Продолжить?"
+      );
+    }
+    return base + "Отмеченные галочки сохранятся. Тип дайджеста (шаг 0) сохранится. Продолжить?";
+  }
+  const base =
+    "Дополнить пул новыми кандидатами?\n\n" +
+    "Все текущие карточки в пуле сохранятся; система запустит тот же поиск, что при первом сборе, и добавит новые ссылки.\n" +
+    "Чтобы заменить пул, оставив только часть карточек — отметьте их галочками и нажмите «Пересобрать пул (оставить N)».\n";
+  if (pastStep2) {
+    return (
+      base +
+      "Подтверждённая пятёрка, порядок, аналитика и финал сбросятся — их нужно пройти заново.\n\n" +
+      "Тип дайджеста (шаг 0) сохранится. Продолжить?"
+    );
+  }
+  return base + "Отмеченные галочки сохранятся. Тип дайджеста (шаг 0) сохранится. Продолжить?";
+}
+
+function step1RebuildButtonLabel(selectedCount: number): string {
+  if (selectedCount > 0) {
+    return `Пересобрать пул (оставить ${selectedCount})`;
+  }
+  return "Дополнить пул кандидатов";
+}
+
+function step1RebuildButtonTitle(selectedCount: number, pastStep2: boolean): string {
+  if (selectedCount > 0) {
+    return `Закрепить ${selectedCount} отмеченных; остальные слоты пула (до 15) — новый поиск и проверка`;
+  }
+  if (pastStep2) {
+    return "Сохранить весь текущий пул и добавить новые (тот же поиск); сброс шагов 2–4";
+  }
+  return "Сохранить весь текущий пул и добавить новые (seed-ленты, web_search, проверка); галочки сохранятся";
+}
+
+function publisherHostForCandidate(c: { url?: string; source?: string }): string {
+  const fromUrl = c.url ? hostFromUrl(String(c.url)) : "";
+  return (fromUrl || String(c.source || "")).toLowerCase().replace(/^www\./, "");
+}
+
+function countSelectedOnHost(
+  host: string,
+  selected: number[],
+  candidates: { id: number; url?: string; source?: string }[],
+): number {
+  if (!host) return 0;
+  return selected.filter((id) => {
+    const row = candidates.find((c) => c.id === id);
+    return row ? publisherHostForCandidate(row) === host : false;
+  }).length;
+}
+
+function canAddCandidateToSelection(
+  candidate: Step2PickCandidate,
+  selected: number[],
+  candidates: Step2PickCandidate[],
+): boolean {
+  if (!candidateSelectableForStep2(candidate)) return false;
+  if (selected.includes(candidate.id)) return true;
+  if (selected.length >= 5) return false;
+  const host = publisherHostForCandidate(candidate);
+  return countSelectedOnHost(host, selected, candidates) < STEP2_MAX_PER_DOMAIN;
+}
+
 /** Зеркало `select_news(..., top5=True)` на бэкенде — для мгновенной отметки чекбоксов. */
 function pickTop5ByRating(candidates: Step2PickCandidate[]): number[] {
   const strictAllowed = candidates.filter((c) => candidateSelectableForStep2(c));
   const mandatory = strictAllowed.filter((c) => isManualRequiredCandidate(c));
-  let chosen: Step2PickCandidate[];
-  if (mandatory.length > 5) {
-    chosen = [...mandatory].sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0)).slice(0, 5);
-  } else {
-    chosen = [...mandatory];
-    const chosenIds = new Set(chosen.map((c) => c.id));
-    const rest = [...strictAllowed]
-      .filter((c) => !chosenIds.has(c.id))
-      .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
-    chosen = [...chosen, ...rest.slice(0, Math.max(0, 5 - chosen.length))];
+  const chosen: Step2PickCandidate[] = [];
+  const hostCounts = new Map<string, number>();
+
+  const tryAdd = (c: Step2PickCandidate) => {
+    if (chosen.length >= 5) return;
+    if (chosen.some((x) => x.id === c.id)) return;
+    const host = publisherHostForCandidate(c);
+    const onHost = hostCounts.get(host) || 0;
+    if (onHost >= STEP2_MAX_PER_DOMAIN) return;
+    chosen.push(c);
+    hostCounts.set(host, onHost + 1);
+  };
+
+  for (const c of mandatory) tryAdd(c);
+  for (const c of [...strictAllowed].sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0))) {
+    tryAdd(c);
   }
   return chosen.map((c) => c.id);
 }
@@ -726,7 +819,7 @@ const REJECT_REASON_LABELS: Record<string, string> = {
   unknown_reject: "точная причина в данных не указана",
   duplicate_url_skip: "ссылка уже проверялась в этом запуске или исключена как дубликат",
   recent_top5_repeat:
-    "та же страница статьи уже была в топ-5 одного из 7 предыдущих зафиксированных выпусков (другой URL — можно)",
+    "та же страница статьи уже была в топ-5 одного из 7 предыдущих зафиксированных выпусков (после «Зафиксировать»); при включённом фильтре не попадает в пул шага 1",
   product_tool_page: "страница продукта/инструмента, а не новостная публикация",
   product_tool_promo: "промо инструмента или функции, а не новостное событие",
 };
@@ -1090,6 +1183,22 @@ export function DigestWizard({ digestId }: Props) {
     [digest],
   );
 
+  const candidatesGroupedByDomain = useMemo(() => {
+    const groups = new Map<string, typeof candidatesSorted>();
+    for (const c of candidatesSorted) {
+      const host = publisherHostForCandidate(c) || "—";
+      const list = groups.get(host) ?? [];
+      list.push(c);
+      groups.set(host, list);
+    }
+    return [...groups.entries()]
+      .sort(([a], [b]) => a.localeCompare(b, "ru"))
+      .map(([host, items]) => ({
+        host,
+        items: [...items].sort((a, b) => a.original_number - b.original_number),
+      }));
+  }, [candidatesSorted]);
+
   useEffect(() => {
     lastSelectedUrlsRef.current = selected
       .map((id) => candidatesSorted.find((c) => c.id === id)?.url)
@@ -1364,10 +1473,10 @@ export function DigestWizard({ digestId }: Props) {
 
   const toggleSelected = (id: number) => {
     const row = candidatesSorted.find((x: any) => x.id === id);
-    if (row && !candidateSelectableForStep2(row)) return;
+    if (!row || !candidateSelectableForStep2(row)) return;
     setSelected((prev) => {
       if (prev.includes(id)) return prev.filter((x) => x !== id);
-      if (prev.length >= 5) return prev;
+      if (!canAddCandidateToSelection(row, prev, candidatesSorted)) return prev;
       return [...prev, id];
     });
   };
@@ -1627,44 +1736,11 @@ export function DigestWizard({ digestId }: Props) {
 
   const runStep1 = (rebuild: boolean) => {
     const keepIds = rebuild && selected.length > 0 ? [...selected] : [];
-    const partialKeep = keepIds.length > 0;
-    const supplementAll = rebuild && keepIds.length === 0;
     const label = rebuild
-      ? partialKeep
-        ? `Шаг 1: пересборка пула (сохранить ${keepIds.length}, добрать остальные; подождите)…`
-        : supplementAll
-          ? "Шаг 1: дополнение пула (сохранить текущие, искать новые; подождите)…"
-          : "Шаг 1: полная пересборка пула (поиск, проверка, оценка; подождите)…"
+      ? step1RebuildProgressLabel(selected.length)
       : "Шаг 1: поиск новостей, проверка источников и оценка кандидатов (обычно 3–5 мин)…";
     if (rebuild) {
-      const ok = window.confirm(
-        partialKeep
-          ? pastStep2ForRebuild
-            ? `Пересобрать пул, оставив ${keepIds.length} отмеченных новостей?\n\n` +
-                "Остальные позиции в списке кандидатов будут заменены: веб-поиск, проверка страниц, скоринг.\n" +
-                "Сотрутся подтверждённая пятёрка, порядок, аналитика и финал — их нужно пройти заново.\n\n" +
-                "Тип дайджеста (шаг 0) сохранится. Продолжить?"
-            : `Пересобрать пул, оставив ${keepIds.length} отмеченных новостей?\n\n` +
-                "Остальные позиции в списке кандидатов будут заменены: веб-поиск, проверка страниц, скоринг.\n" +
-                "Отмеченные галочки сохранятся. Тип дайджеста (шаг 0) сохранится. Продолжить?"
-          : supplementAll
-            ? pastStep2ForRebuild
-              ? "Дополнить пул новыми кандидатами?\n\n" +
-                  "Текущие карточки в пуле сохранятся; система добавит новые ссылки поверх.\n" +
-                  "Подтверждённая пятёрка, порядок, аналитика и финал сбросятся — их нужно пройти заново.\n\n" +
-                  "Тип дайджеста (шаг 0) сохранится. Продолжить?"
-              : "Дополнить пул новыми кандидатами?\n\n" +
-                  "Текущие карточки в пуле сохранятся; система добавит новые ссылки поверх.\n" +
-                  "Отмеченные галочки сохранятся. Тип дайджеста (шаг 0) сохранится. Продолжить?"
-            : pastStep2ForRebuild
-              ? "Пересобрать пул кандидатов с нуля?\n\n" +
-                  "Будет заново: веб-поиск, проверка страниц, скоринг.\n" +
-                  "Сотрутся: выбранные 5 новостей, порядок, аналитика (шаг 3) и финальная сборка (шаг 4).\n\n" +
-                  "Тип дайджеста (шаг 0) сохранится. Продолжить?"
-              : "Пересобрать пул кандидатов с нуля?\n\n" +
-                  "Текущий список в шаге 2 будет заменён: снова веб-поиск, проверка страниц и скоринг.\n" +
-                  "Отмеченные галочки сбросятся. Тип дайджеста (шаг 0) сохранится. Продолжить?",
-      );
+      const ok = window.confirm(step1RebuildConfirmMessage(selected.length, pastStep2ForRebuild));
       if (!ok) return;
     }
     const keptUrls = keepIds
@@ -2137,7 +2213,7 @@ export function DigestWizard({ digestId }: Props) {
         <WizardWhy summary="Что означают статус и суммы в рублях">
           <p>
             <strong>Статус</strong> — этап конвейера на сервере. <strong>По выпуску (накопительно)</strong> — все
-            списания ProxyAPI с момента шага 0 по этому выпуску до фиксации кнопкой внизу (включая шаг 1: веб-поиск,
+            списания ProxyAPI с момента шага 0 по этому выпуску до фиксации кнопкой в блоке «Шаг 4 — результат» (включая шаг 1: веб-поиск,
             Telegram). <strong>Сегодня в приложении</strong> — учтённые запросы только этого мастера дайджеста за
             календарный день (МСК). <strong>Ключ ProxyAPI</strong> — все списания с API-ключом за день, в том числе
             Cursor, другие проекты и инструменты с тем же ключом.
@@ -2394,7 +2470,9 @@ export function DigestWizard({ digestId }: Props) {
           </p>
           <p>
             <strong>Поле URL</strong> — для обязательных материалов; оставьте пустым, если дополнительных ссылок нет. Когда список
-            кандидатов уже есть в шаге 2, для повторного сбора используйте <strong>«Пересобрать пул кандидатов»</strong> там же.
+            кандидатов уже есть в шаге 2, для повторного сбора используйте кнопку в шаге 2:{" "}
+            <strong>«Дополнить пул кандидатов»</strong> или, с галочками,{" "}
+            <strong>«Пересобрать пул (оставить N)»</strong>.
           </p>
           <p>Результат сбора отображается в блоке «Шаг 2» ниже после завершения запроса.</p>
         </WizardWhy>
@@ -2496,8 +2574,9 @@ export function DigestWizard({ digestId }: Props) {
         ) : null}
         {showRebuildPoolButton && hasCandidatePool ? (
           <p className="wizard-hint-do" style={{ marginTop: 10, fontSize: "0.92rem" }}>
-            Список кандидатов уже в блоке <strong>«Шаг 2»</strong> ниже. Чтобы обновить ленту — кнопка{" "}
-            <strong>«Пересобрать пул кандидатов»</strong> в шапке шага 2.
+            Список кандидатов уже в блоке <strong>«Шаг 2»</strong> ниже. Чтобы обновить ленту —{" "}
+            <strong>«Дополнить пул кандидатов»</strong> (все карточки остаются) или отметьте галочками нужные и нажмите{" "}
+            <strong>«Пересобрать пул (оставить N)»</strong>.
           </p>
         ) : null}
       </div>
@@ -3160,7 +3239,7 @@ export function DigestWizard({ digestId }: Props) {
                     : "выключена"}
                 </strong>
                 . Если сейчас выключена, а в журнале всё ещё 20 по дате — перезапустите backend после обновления кода и снова
-                «Пересобрать пул».
+                «Дополнить пул» или «Пересобрать пул (оставить N)».
               </p>
             ) : null}
             {step1RejectBreakdown.length > 0 ? (
@@ -3273,25 +3352,24 @@ export function DigestWizard({ digestId }: Props) {
                   type="button"
                   className="btn-rebuild"
                   disabled={loading}
-                  title={
-                    selected.length > 0
-                      ? `Оставить ${selected.length} отмеченных новостей, остальные слоты пула (до 15) пересобрать`
-                      : pastStep2ForRebuild
-                        ? "Новый поиск и проверка; сброс выбора, порядка, аналитики и финала"
-                        : "Заново собрать список кандидатов (поиск, проверка ссылок, скоринг)"
-                  }
+                  title={step1RebuildButtonTitle(selected.length, pastStep2ForRebuild)}
                   onClick={() => runStep1(true)}
                 >
-                  Пересобрать пул кандидатов
+                  {step1RebuildButtonLabel(selected.length)}
                 </button>
               ) : null}
             </div>
           </div>
           <StepProgressBar active={runningStepKey === "2pick"} />
-          {showRebuildPoolButton && pastStep2ForRebuild ? (
-            <p className="wizard-hint-warn" style={{ marginTop: 0, marginBottom: 12, fontSize: "0.92rem" }}>
-              Выпуск уже прошёл выбор или аналитику. Полная пересборка пула сбросит шаги 2–4 — снова отметьте пятёрку,
-              задайте порядок и дождитесь аналитики.
+          {showRebuildPoolButton ? (
+            <p className="wizard-hint-do" style={{ marginTop: 0, marginBottom: 12, fontSize: "0.92rem" }}>
+              <strong>Дополнить пул</strong> (кнопка без галочек) — все текущие карточки остаются, ищутся новые тем же
+              поиском, что при первом запуске.{" "}
+              <strong>Пересобрать с закреплением</strong> — отметьте галочками, что оставить; остальные места в пуле
+              заполнятся заново, снятые URL не вернутся.
+              {pastStep2ForRebuild
+                ? " После выбора или аналитики любой повторный сбор сбросит шаги 2–4."
+                : null}
             </p>
           ) : null}
           {step1CollectionInProgress && candidatesSorted.length === 0 ? (
@@ -3382,10 +3460,10 @@ export function DigestWizard({ digestId }: Props) {
           {canSelect && candidatesSorted.length > 0 ? (
             <WizardWhy summary="Как читать карточку и метки (читаемый заголовок, ссылка, топ‑5)">
               <p>
-                Каждая карточка — одна новость: заголовок, ссылка, источник, Tier, балл. У чекбокса три метки:{" "}
-                <strong>Читаемый заголовок</strong>, <strong>Ссылка рабочая</strong>, <strong>Можно в топ‑5</strong> — все условия
-                выполнены (тема ИИ, надёжность источника и т.д.). В пятёрку отмечайте только такие строки; серые чекбоксы —
-                смотрите «Подробнее» у строки и цветные чипы.
+                Каждая карточка — одна новость. Карточки <strong>сгруппированы по сайту</strong> (домену): в пуле не
+                больше {STEP1_POOL_MAX_PER_DOMAIN} статей с одного сайта; при выборе топ‑5 — не больше {STEP2_MAX_PER_DOMAIN}.
+                У чекбокса три метки: <strong>Читаемый заголовок</strong>, <strong>Ссылка рабочая</strong>,{" "}
+                <strong>Можно в топ‑5</strong> — все условия выполнены. В пятёрку отмечайте только такие строки.
               </p>
             </WizardWhy>
           ) : null}
@@ -3408,21 +3486,43 @@ export function DigestWizard({ digestId }: Props) {
               даже если список в БД остался заглушкой. Чтобы увидеть настоящие материалы: проверьте{" "}
               <code style={{ color: "#e2e8f0" }}>ENABLE_WEB_FETCH=true</code> и <code style={{ color: "#e2e8f0" }}>PROXYAPI_API_KEY</code> в{" "}
               <code style={{ color: "#e2e8f0" }}>backend/.env</code>, перезапустите backend и нажмите{" "}
-              <strong>«Пересобрать пул кандидатов»</strong> в этом блоке. Либо вставьте не менее 10 прямых URL на статьи (при{" "}
+              <strong>«Дополнить пул кандидатов»</strong> в этом блоке (или отметьте нужные галочками — «Пересобрать пул»).
+              Либо вставьте не менее 10 прямых URL на статьи (при{" "}
               <code style={{ color: "#e2e8f0" }}>ENABLE_WEB_FETCH=false</code>
               ) и снова тот же шаг.
             </div>
           ) : null}
           <div className="news-pick-list">
-            {candidatesSorted.map((c, listIndex) => {
+            {(() => {
+              let listIndex = 0;
+              return candidatesGroupedByDomain.map(({ host, items }) => (
+                <section key={host} className="news-pick-domain-group" aria-label={`Сайт ${host}`}>
+                  <div className="news-pick-domain-header">
+                    <span className="news-pick-domain-name">{host}</span>
+                    <span className="news-pick-domain-count">
+                      {items.length} {items.length === 1 ? "статья" : items.length < 5 ? "статьи" : "статей"}
+                      {items.length >= STEP1_POOL_MAX_PER_DOMAIN ? " · лимит пула" : ""}
+                    </span>
+                  </div>
+                  <div className="news-pick-domain-items">
+                    {items.map((c) => {
+                      listIndex += 1;
+                      const rowIndex = listIndex;
               const checked = selected.includes(c.id);
               const atMax = selected.length >= 5;
               const selectable = candidateSelectableForStep2(c);
-              const disabled = (!canSelect && !checked) || (atMax && !checked) || (!selectable && !checked);
+              const hostKey = publisherHostForCandidate(c);
+              const hostSelected = countSelectedOnHost(hostKey, selected, candidatesSorted);
+              const domainCapReached = selectable && !checked && hostSelected >= STEP2_MAX_PER_DOMAIN;
+              const canPickMore = canAddCandidateToSelection(c, selected, candidatesSorted);
+              const disabled =
+                (!canSelect && !checked) ||
+                (atMax && !checked) ||
+                (!selectable && !checked) ||
+                (selectable && !checked && !canPickMore);
               const rejectCodes = rejectReasonCodes(String(c.verification_comment || ""));
               const inputId = `news-candidate-${c.id}`;
               const warnRel = String(c.reliability_status || "").includes("⚠️") || String(c.reliability_status || "").includes("сомн");
-              const host = c.url ? hostFromUrl(String(c.url)) : "";
               const demoRow = looksLikeDemoCandidate(c);
               return (
                 <div key={c.id} className={`news-pick-row ${checked ? "is-selected" : ""}`}>
@@ -3431,25 +3531,20 @@ export function DigestWizard({ digestId }: Props) {
                     type="checkbox"
                     disabled={disabled}
                     checked={checked}
+                    title={
+                      domainCapReached
+                        ? `С сайта ${hostKey || "этого домена"} уже выбрано ${STEP2_MAX_PER_DOMAIN} новости — максимум для топ‑5`
+                        : undefined
+                    }
                     onChange={() => toggleSelected(c.id)}
                   />
                   <div className="news-pick-main">
-                    <div className="news-pick-eyebrow">Кандидат №{listIndex + 1}</div>
+                    <div className="news-pick-eyebrow">№{rowIndex} в списке</div>
                     <label htmlFor={inputId} className="news-pick-title-label">
                       <span className="news-pick-title">{displayCandidateTitle(c.title)}</span>
                     </label>
                     {c.url ? (
-                      <div
-                        style={{
-                          marginTop: 6,
-                          fontSize: "0.82rem",
-                          color: "#93c5fd",
-                          wordBreak: "break-word",
-                          lineHeight: 1.35,
-                        }}
-                      >
-                        {host ? <span style={{ color: "#cbd5e1" }}>{host}</span> : null}
-                        {host ? " · " : null}
+                      <div className="news-pick-url-line">
                         <a href={c.url} target="_blank" rel="noopener noreferrer" onClick={(e) => e.stopPropagation()}>
                           {truncateText(String(c.url), 96)}
                         </a>
@@ -3496,6 +3591,11 @@ export function DigestWizard({ digestId }: Props) {
                       ) : (
                         <span className="news-chip warn">Нельзя выбрать в топ‑5</span>
                       )}
+                      {domainCapReached ? (
+                        <span className="news-chip warn" title="С одного сайта в топ‑5 можно выбрать не более 2 новостей">
+                          Лимит домена ({STEP2_MAX_PER_DOMAIN})
+                        </span>
+                      ) : null}
                       {c.is_foreign_agent ? (
                         <span className="news-chip warn">Иноагент</span>
                       ) : (
@@ -3537,7 +3637,11 @@ export function DigestWizard({ digestId }: Props) {
                   </div>
                 </div>
               );
-            })}
+                    })}
+                  </div>
+                </section>
+              ));
+            })()}
           </div>
           {showRebuildPoolButton ? (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14, marginTop: 4 }}>
@@ -3545,16 +3649,10 @@ export function DigestWizard({ digestId }: Props) {
                 type="button"
                 className="btn-rebuild"
                 disabled={loading}
-                title={
-                  selected.length > 0
-                    ? `Оставить ${selected.length} отмеченных новостей, остальные слоты пула (до 15) пересобрать`
-                    : pastStep2ForRebuild
-                      ? "Новый поиск и проверка; сброс выбора, порядка, аналитики и финала"
-                      : "Заново собрать список кандидатов (поиск, проверка ссылок, скоринг)"
-                }
+                title={step1RebuildButtonTitle(selected.length, pastStep2ForRebuild)}
                 onClick={() => runStep1(true)}
               >
-                Пересобрать пул кандидатов
+                {step1RebuildButtonLabel(selected.length)}
               </button>
             </div>
           ) : null}
@@ -3810,7 +3908,7 @@ export function DigestWizard({ digestId }: Props) {
           <>
             <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
               Сначала обложки (если включены на сервере), затем тексты площадок. Текст поста и обложка публикуются
-              отдельно: скопируйте текст кнопкой ниже, обложку — скачайте или возьмите JPG из папки{" "}
+              отдельно: скопируйте текст кнопками в строке над полями в блоке «результат», обложку — скачайте или возьмите JPG из папки{" "}
               <code>images/</code> по типу выпуска. Под каждым заголовком — 2–4 простых предложения для читателей (до 450
               символов, без учёта заголовка).
             </p>
@@ -3964,37 +4062,98 @@ export function DigestWizard({ digestId }: Props) {
         <div className="card">
           <h3>Шаг 4 — результат</h3>
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-            Скопируйте текст кнопкой «Скопировать текст для …» и вставьте в редактор площадки (Ctrl+V). Обложку
-            загружайте отдельно — по ссылке ниже или из <code>images/</code>. Telegram — markdown; MAX и Дzen — HTML
-            (только через кнопку, не из поля); ВК — plain text. Скачайте .docx для архива.
+            Все кнопки «Скопировать текст для …» — одной строкой над полями; вставляйте в редактор площадки (Ctrl+V).
+            Обложку загружайте отдельно — ссылка ниже или <code>images/</code>. Telegram — markdown; MAX и Дzen — HTML
+            (только через кнопку); ВК — plain text.
           </p>
-          <div style={{ marginBottom: 10 }}>
-            {digest?.step4_selected_image_variant || digest?.image_path ? (
-              <a href={assetUrl(digestId, "image")} target="_blank" rel="noopener noreferrer">
-                Скачать обложку (загрузить на площадку отдельно)
-              </a>
-            ) : null}
-            {digest?.step4_selected_image_variant || digest?.image_path ? " | " : null}
-            {digest?.docx_path ? (
-              <a href={assetUrl(digestId, "docx")} target="_blank" rel="noopener noreferrer">
-                Скачать .docx
-              </a>
+          <div className="step4-results-toolbar">
+            <div className="step4-results-toolbar-links">
+              {digest?.step4_selected_image_variant || digest?.image_path ? (
+                <a href={assetUrl(digestId, "image")} target="_blank" rel="noopener noreferrer">
+                  Скачать обложку
+                </a>
+              ) : null}
+              {digest?.docx_path ? (
+                <a href={assetUrl(digestId, "docx")} target="_blank" rel="noopener noreferrer">
+                  Скачать .docx
+                </a>
+              ) : null}
+            </div>
+            {isFinal ? (
+              <div className="step4-results-finalize">
+                {releaseCostFinalized ? (
+                  <span className="step4-results-finalize--done">
+                    Зафиксировано: {Number(digest?.total_cost_rub ?? 0).toFixed(2)} ₽
+                    {digest?.release_cost_finalized_at
+                      ? ` (${formatRunWhen(digest.release_cost_finalized_at)})`
+                      : null}
+                  </span>
+                ) : (
+                  <span className="wizard-hint-do" style={{ fontSize: "0.88rem", margin: 0 }}>
+                    По выпуску: {Number(digest?.release_cost_rub ?? digest?.total_cost_rub ?? 0).toFixed(2)} ₽
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="btn-primary"
+                  disabled={releaseCostFinalized || loading}
+                  onClick={() => void handleFinalizeRelease()}
+                >
+                  {releaseCostFinalized ? "Выпуск зафиксирован" : "Зафиксировать"}
+                </button>
+              </div>
             ) : null}
           </div>
           {sortedOutputs.length === 0 ? (
             <p className="wizard-hint-wait">Тексты площадок ещё не сгенерированы — отметьте площадки в блоке 4.2.</p>
           ) : null}
+          {sortedOutputs.length > 0 ? (
+            <div className="step4-copy-all-bar">
+              <div className="step4-copy-all-buttons">
+                {sortedOutputs.map((o: any) => {
+                  const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();
+                  return (
+                    <button
+                      key={o.platform}
+                      type="button"
+                      className="step4-copy-btn"
+                      onClick={() => void handleCopyPlatform(o.platform, String(o.content ?? ""))}
+                    >
+                      Скопировать для {label}
+                    </button>
+                  );
+                })}
+              </div>
+              {sortedOutputs.map((o: any) => {
+                const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();
+                const st = copyStatus[o.platform] ?? "idle";
+                if (st === "idle") return null;
+                return (
+                  <p
+                    key={`${o.platform}-feedback`}
+                    className="step4-copy-all-feedback"
+                    style={{ color: st === "ok" ? "#4ade80" : "#f87171", margin: 0 }}
+                  >
+                    {st === "ok"
+                      ? o.platform === "max" || o.platform === "dzen"
+                        ? `${label}: скопировано с форматированием — вставьте в редактор (Ctrl+V).`
+                        : `${label}: скопировано — вставьте в редактор (Ctrl+V).`
+                      : `${label}: не удалось записать в буфер — выделите текст в поле ниже и Ctrl+C.`}
+                  </p>
+                );
+              })}
+            </div>
+          ) : null}
           {sortedOutputs.map((o: any) => {
             const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();
-            const st = copyStatus[o.platform] ?? "idle";
             return (
-              <div key={o.platform} className="card">
+              <div key={o.platform} className="card step4-platform-card">
                 <h4>{label}</h4>
                 {o.platform === "max" || o.platform === "dzen" ? (
                   <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
                     HTML для веб-редактора {label}: жирная шапка, кликабельные заголовки, отступы между абзацами.
-                    Нажмите «Скопировать текст для {label}» и вставьте в поле поста (Ctrl+V) — не копируйте вручную из
-                    поля, иначе форматирование не сохранится.
+                    Копируйте кнопкой «Скопировать для {label}» в строке выше и вставьте в пост (Ctrl+V) — не копируйте
+                    вручную из поля, иначе форматирование не сохранится.
                     {/\*\*|\\]\(/.test(String(o.content ?? "")) && !/<a\s+href=/i.test(String(o.content ?? "")) ? (
                       <span style={{ display: "block", color: "#fbbf24", marginTop: 6 }}>
                         В поле markdown вместо HTML — обновите страницу выпуска (сервер пересоберёт вёрстку) или
@@ -4004,18 +4163,27 @@ export function DigestWizard({ digestId }: Props) {
                   </p>
                 ) : o.platform === "telegram" ? (
                   <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
-                    Markdown: жирная шапка, ссылки в заголовках новостей. Копируйте кнопкой и вставляйте в Telegram
-                    (Ctrl+V).
+                    Markdown: жирная шапка, ссылки в заголовках новостей. Копируйте кнопкой в строке выше и вставляйте в
+                    Telegram (Ctrl+V).
                   </p>
                 ) : o.platform === "vk" ? (
                   <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
                     Plain text: заголовки CAPS, после каждой новости строка «Подробности: URL». Без markdown.
                   </p>
                 ) : null}
+                {(o.platform === "max" || o.platform === "dzen") && (
+                  <p className="wizard-hint-wait" style={{ fontSize: "0.85rem", margin: "0 0 6px" }}>
+                    {String(o.content ?? "").length} / {o.platform === "max" ? "4000" : "4096"} символов · подпись и
+                    хэштеги в конце текста
+                  </p>
+                )}
                 <textarea
                   readOnly
                   value={o.content ?? ""}
                   rows={14}
+                  className={
+                    o.platform === "max" || o.platform === "dzen" ? "platform-output-preview" : undefined
+                  }
                   style={{
                     width: "100%",
                     boxSizing: "border-box",
@@ -4032,23 +4200,6 @@ export function DigestWizard({ digestId }: Props) {
                   }}
                   spellCheck={false}
                 />
-                <div style={{ marginTop: 10, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
-                  <button type="button" onClick={() => void handleCopyPlatform(o.platform, String(o.content ?? ""))}>
-                    Скопировать текст для {label}
-                  </button>
-                  {st === "ok" ? (
-                    <span style={{ color: "#4ade80", fontSize: "0.9rem" }}>
-                      {o.platform === "max" || o.platform === "dzen"
-                        ? `Скопировано с форматированием — вставьте в веб-редактор ${label} (Ctrl+V).`
-                        : "Скопировано — вставьте в редактор площадки (Ctrl+V)."}
-                    </span>
-                  ) : null}
-                  {st === "err" ? (
-                    <span style={{ color: "#f87171", fontSize: "0.9rem" }}>
-                      Не удалось записать в буфер. Выделите текст в поле выше и нажмите Ctrl+C.
-                    </span>
-                  ) : null}
-                </div>
               </div>
             );
           })}
@@ -4109,44 +4260,6 @@ export function DigestWizard({ digestId }: Props) {
           </div>
         </div>
       )}
-
-      {isFinal ? (
-        <div
-          className="card"
-          style={{
-            marginTop: 16,
-            borderColor: releaseCostFinalized ? "#166534" : "#475569",
-            background: releaseCostFinalized ? "rgba(22, 101, 52, 0.12)" : undefined,
-          }}
-        >
-          <h3 style={{ marginTop: 0 }}>Фиксация выпуска</h3>
-          <p className="wizard-hint-do" style={{ marginBottom: 12 }}>
-            {releaseCostFinalized ? (
-              <>
-                Стоимость зафиксирована: <strong>{Number(digest?.total_cost_rub ?? 0).toFixed(2)} ₽</strong>
-                {digest?.release_cost_finalized_at
-                  ? ` (${formatRunWhen(digest.release_cost_finalized_at)})`
-                  : null}
-                . Сумма больше не меняется.
-              </>
-            ) : (
-              <>
-                Накопительно по ProxyAPI на этот выпуск сейчас:{" "}
-                <strong>{Number(digest?.release_cost_rub ?? digest?.total_cost_rub ?? 0).toFixed(2)} ₽</strong>. Нажмите
-                «Зафиксировать», когда результат на шаге 4 готов и правки закончены — в шапке останется итоговая сумма.
-              </>
-            )}
-          </p>
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={releaseCostFinalized || loading}
-            onClick={() => void handleFinalizeRelease()}
-          >
-            {releaseCostFinalized ? "Выпуск зафиксирован" : "Зафиксировать"}
-          </button>
-        </div>
-      ) : null}
 
       {digest?.model_recommendations?.length > 0 && (
         <div className="card">

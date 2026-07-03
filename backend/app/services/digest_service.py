@@ -131,6 +131,7 @@ from app.services.step1_cancellation import (
     request_cancel as step1_request_cancel,
 )
 from app.services.candidate_origin import apply_resolved_origin
+from app.services.source_tiers_editor import expand_search_seed_urls
 from app.services.telegram_channel_monitor import collect_telegram_seed_urls_for_digest
 from app.services.step1_filters import (
     CURIOUS_PREFILTER_DEFAULT_ORDER,
@@ -254,6 +255,11 @@ STEP1_DISCOVERED_REASON_CODES = {
 REJECT_REASON_PREFIX = "REJECT_REASON:"
 STEP1_MAX_PER_SOURCE = 2
 STEP1_MAX_PER_SOURCE_SHORT_POOL = 3
+STEP2_MAX_PER_SOURCE = 2
+"""Максимум статей с одного домена в пуле кандидатов (шаг 1)."""
+STEP1_POOL_PER_HOST_CAP = 3
+"""0 = без лимита URL с одного домена в сырой выдаче web_search."""
+STEP1_SEARCH_MAX_URLS_PER_HOST = 0
 STEP1_MIN_AUTO_DISCOVERED = 5
 STEP1_RU_SHARE_MIN = 0.30
 STEP1_RU_SHARE_MAX = 0.50
@@ -647,6 +653,14 @@ def _page_is_article_like(bundle: dict[str, Any]) -> bool:
 STEP1_LISTING_EXPAND_CHILDREN = 8
 
 
+def _listing_max_children(url: str) -> int:
+    """С investing.com и других лент берём больше дочерних статей."""
+    u = str(url or "").lower()
+    if "investing.com" in u:
+        return 16
+    return STEP1_LISTING_EXPAND_CHILDREN
+
+
 def _published_at_from_url_path_candidates(
     seed_url: str | None,
     page_url: str,
@@ -708,6 +722,8 @@ def _looks_like_article_url_from_listing(url: str, listing_url: str) -> bool:
     if not path or _is_site_homepage_url(url):
         return False
     low = url.lower()
+    if is_search_noise_url(url):
+        return False
     if any(x in low for x in ("?page=", "/page/", "/search", "/login", "/subscribe", "/rss", "/feed")):
         return False
     if re.search(r"\.(jpg|jpeg|png|gif|webp|pdf|zip)(\?|$)", low):
@@ -2086,7 +2102,26 @@ def _pool_host_counts(pool: list[dict[str, Any]]) -> dict[str, int]:
 def _pool_respects_source_cap(pool: list[dict[str, Any]], *, cap: int = STEP1_MAX_PER_SOURCE) -> bool:
     if not pool:
         return True
+    if cap <= 0:
+        return True
     return max(_pool_host_counts(pool).values()) <= cap
+
+
+def _effective_host_cap(per_host_cap: int | None) -> int | None:
+    """None — без лимита на домен (шаг 1)."""
+    if per_host_cap is None:
+        cap = STEP1_MAX_PER_SOURCE
+    else:
+        cap = int(per_host_cap)
+    if cap <= 0:
+        return None
+    return max(1, cap)
+
+
+def _host_cap_blocks(host_count: dict[str, int], host: str, host_cap: int | None) -> bool:
+    if host_cap is None:
+        return False
+    return host_count.get(host, 0) >= host_cap
 
 
 def _step1_search_query_exclude_saturated_hosts(base_query: str, saturated_hosts: set[str]) -> str:
@@ -2106,7 +2141,7 @@ def _rebalance_verified_pool(
 ) -> list[dict[str, Any]]:
     if not pool:
         return []
-    host_cap = max(1, int(per_host_cap or STEP1_MAX_PER_SOURCE))
+    host_cap = _effective_host_cap(per_host_cap)
     pinned_fps = pinned_fps or set()
     min_ru = max(0, int(round(target * STEP1_RU_SHARE_MIN + 0.499)))
     max_ru = max(min_ru, int(target * STEP1_RU_SHARE_MAX))
@@ -2193,7 +2228,7 @@ def _rebalance_verified_pool(
         if not fp or fp in selected_fps:
             return False
         host = _publisher_host_key(item)
-        if host_count.get(host, 0) >= host_cap:
+        if _host_cap_blocks(host_count, host, host_cap):
             return False
         chosen.append(item)
         selected_fps.add(fp)
@@ -2211,7 +2246,7 @@ def _rebalance_verified_pool(
         if not fp or fp in selected_fps:
             return False
         host = _publisher_host_key(item)
-        if host_count.get(host, 0) >= host_cap:
+        if _host_cap_blocks(host_count, host, host_cap):
             return False
         is_ru = _is_russian_host(_host_from_url(str(item.get("url") or "")))
         is_press = _is_substantive_press_for_pool(item)
@@ -2307,7 +2342,7 @@ def _rebalance_verified_pool_host_cap_only(
     apply_theme_caps = not is_curious_digest(digest_type)
     pinned_fps = pinned_fps or set()
     prechosen = prechosen or []
-    host_cap = max(1, int(per_host_cap or STEP1_MAX_PER_SOURCE))
+    host_cap = _effective_host_cap(per_host_cap)
 
     def _rank_key(x: dict[str, Any]) -> tuple[int, int]:
         total = int(x.get("total_score", 0))
@@ -2350,7 +2385,7 @@ def _rebalance_verified_pool_host_cap_only(
             if not fp or fp in selected_fps:
                 continue
             host = _publisher_host_key(item)
-            if host_count.get(host, 0) >= host_cap:
+            if _host_cap_blocks(host_count, host, host_cap):
                 continue
             chosen.append(item)
             selected_fps.add(fp)
@@ -2360,7 +2395,7 @@ def _rebalance_verified_pool_host_cap_only(
         fp = _url_fingerprint(str(item.get("url") or ""))
         if fp and fp in pinned_fps and fp not in selected_fps:
             host = _publisher_host_key(item)
-            if host_count.get(host, 0) >= host_cap:
+            if _host_cap_blocks(host_count, host, host_cap):
                 continue
             chosen.append(item)
             selected_fps.add(fp)
@@ -2371,7 +2406,7 @@ def _rebalance_verified_pool_host_cap_only(
         if not fp or fp in selected_fps:
             return False
         host = _publisher_host_key(item)
-        if host_count.get(host, 0) >= host_cap:
+        if _host_cap_blocks(host_count, host, host_cap):
             return False
         theme = _pool_item_theme(item) if apply_theme_caps else ""
         if theme and theme_counts.get(theme, 0) >= _theme_pool_quota(theme):
@@ -3481,7 +3516,14 @@ class DigestService:
         )
         digest = self.get_digest(digest_id)
         items = (
-            _rebalance_verified_pool(items, target, digest_type=digest.digest_type) if target else []
+            _rebalance_verified_pool(
+                items,
+                target,
+                digest_type=digest.digest_type,
+                per_host_cap=STEP1_POOL_PER_HOST_CAP,
+            )
+            if target and len(items) > target
+            else items
         )
         self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest_id).delete()
         seen_urls_lower: set[str] = set()
@@ -3547,12 +3589,22 @@ class DigestService:
         )
         if pinned_fps:
             preview_target = max(preview_target, len(pinned_fps))
-        capped_verified = _rebalance_verified_pool(
-            verified_preview,
-            preview_target,
-            pinned_fps=pinned_fps,
-            digest_type=digest.digest_type,
-        )
+        if len(verified_preview) <= preview_target:
+            capped_verified = _rebalance_verified_pool_host_cap_only(
+                verified_preview,
+                len(verified_preview),
+                pinned_fps=pinned_fps,
+                per_host_cap=STEP1_POOL_PER_HOST_CAP,
+                digest_type=digest.digest_type,
+            )
+        else:
+            capped_verified = _rebalance_verified_pool(
+                verified_preview,
+                preview_target,
+                pinned_fps=pinned_fps,
+                digest_type=digest.digest_type,
+                per_host_cap=STEP1_POOL_PER_HOST_CAP,
+            )
         capped_verified = self._dedupe_verified_pool_dicts(capped_verified)
         seen_lower: set[str] = set()
         entities: list[NewsCandidate] = []
@@ -4294,6 +4346,8 @@ class DigestService:
                 _bump_live_rejects()
                 _record_link_rejected_live()
 
+            pool_carried_over_initial = 0
+
             for kept in kept_rows:
                 kept_item = self._news_candidate_to_pool_dict(kept)
                 kept_item["_user_pinned_pool"] = True
@@ -4328,10 +4382,11 @@ class DigestService:
                         verified_pool.append(kept_item)
 
             if verified_pool:
+                pool_carried_over_initial = len(verified_pool)
                 try:
                     from app.services.step1_live_progress import bump_live_progress
 
-                    bump_live_progress(digest.id, pool_carried_over=len(verified_pool))
+                    bump_live_progress(digest.id, pool_carried_over=pool_carried_over_initial)
                 except Exception:
                     pass
 
@@ -4955,7 +5010,7 @@ class DigestService:
                 raw_u = str(item.get("url") or "").strip()
                 if not raw_u.startswith("http"):
                     continue
-                for resolved_url, bundle in _expand_listing_url_candidates(raw_u, max_children=3):
+                for resolved_url, bundle in _expand_listing_url_candidates(raw_u, max_children=_listing_max_children(raw_u)):
                     fp = _url_fingerprint(resolved_url)
                     if fp in seen_fp:
                         continue
@@ -5179,8 +5234,7 @@ class DigestService:
                 )
                 try:
                     with step1_phase("seed_fallback"):
-                        policy = get_source_tiers_policy(self.settings.source_tiers_path)
-                        seed_candidates = [u for u in policy.search_seed_urls if str(u).startswith(("http://", "https://"))]
+                        seed_candidates = self._step1_effective_search_seed_urls(digest)
                         seed_scan_limit = min(len(seed_candidates), 6 if partial_rebuild else 24)
                         yield_policy = getattr(self, "_step1_curious_yield", None)
                         if yield_policy and is_curious_digest(digest.digest_type):
@@ -5191,7 +5245,9 @@ class DigestService:
                                 break
                             if len(verified_pool) >= STEP1_MIN_VERIFIED:
                                 break
-                            for resolved_url, bundle in _expand_listing_url_candidates(str(seed_url), max_children=3):
+                            for resolved_url, bundle in _expand_listing_url_candidates(
+                                str(seed_url), max_children=_listing_max_children(str(seed_url))
+                            ):
                                 if int(time.monotonic() - started_monotonic) >= hard_time_limit_sec:
                                     step1_collection_meta["seed_listing_fallback_stopped_by_hard_limit"] = True
                                     break
@@ -5616,83 +5672,85 @@ class DigestService:
             verified_pool = self._pin_kept_candidates_first(verified_pool, keep_ids_ordered, kept_rows)
             verified_pool = self._dedupe_verified_pool_dicts(verified_pool)
             pinned_fps = set(preview_pinned_fps)
-            rebalance_target = min(target_pool_pages, len(verified_pool_before_rebalance))
-            if partial_rebuild and pinned_fps:
-                rebalance_target = max(rebalance_target, len(pinned_fps))
-            short_pool = len(verified_pool_before_rebalance) < STEP1_MIN_VERIFIED
-            relaxed_host_cap = STEP1_MAX_PER_SOURCE_SHORT_POOL if short_pool else STEP1_MAX_PER_SOURCE
-            if short_pool:
-                verified_pool = _rebalance_verified_pool_host_cap_only(
-                    verified_pool,
-                    min(rebalance_target, len(verified_pool_before_rebalance)),
-                    pinned_fps=pinned_fps,
-                    per_host_cap=relaxed_host_cap,
-                    digest_type=digest.digest_type,
-                )
+            pool_host_cap = STEP1_POOL_PER_HOST_CAP
+            if len(verified_pool) > collection_target_pages:
+                verified_pool_before_rebalance = list(verified_pool)
+                rebalance_target = collection_target_pages
+                if partial_rebuild and pinned_fps:
+                    rebalance_target = max(rebalance_target, len(pinned_fps))
+                short_pool = len(verified_pool_before_rebalance) < STEP1_MIN_VERIFIED
+                if short_pool:
+                    verified_pool = _rebalance_verified_pool_host_cap_only(
+                        verified_pool,
+                        min(rebalance_target, len(verified_pool_before_rebalance)),
+                        pinned_fps=pinned_fps,
+                        per_host_cap=pool_host_cap,
+                        digest_type=digest.digest_type,
+                    )
+                else:
+                    verified_pool = _rebalance_verified_pool(
+                        verified_pool,
+                        rebalance_target,
+                        pinned_fps=pinned_fps,
+                        digest_type=digest.digest_type,
+                        per_host_cap=pool_host_cap,
+                    )
+                if len(verified_pool) < min(rebalance_target, len(verified_pool_before_rebalance)):
+                    verified_pool = _rebalance_verified_pool_host_cap_only(
+                        verified_pool_before_rebalance,
+                        min(rebalance_target, len(verified_pool_before_rebalance)),
+                        pinned_fps=pinned_fps,
+                        per_host_cap=pool_host_cap,
+                        digest_type=digest.digest_type,
+                    )
+                elif (
+                    len(verified_pool) < STEP1_MIN_VERIFIED
+                    and len(verified_pool_before_rebalance) >= STEP1_MIN_VERIFIED
+                ):
+                    verified_pool = _rebalance_verified_pool_host_cap_only(
+                        verified_pool_before_rebalance,
+                        max(rebalance_target, STEP1_MIN_VERIFIED),
+                        pinned_fps=pinned_fps,
+                        per_host_cap=pool_host_cap,
+                        digest_type=digest.digest_type,
+                    )
+                if (
+                    len(verified_pool) < STEP1_MIN_VERIFIED
+                    and len(verified_pool_before_rebalance) >= STEP1_MIN_VERIFIED
+                ):
+                    verified_pool = _rebalance_verified_pool_host_cap_only(
+                        verified_pool_before_rebalance,
+                        min(len(verified_pool_before_rebalance), collection_target_pages),
+                        pinned_fps=pinned_fps,
+                        per_host_cap=pool_host_cap,
+                        digest_type=digest.digest_type,
+                    )
+                    logger.warning(
+                        "Шаг 1: rebalance урезал пул ниже минимума — восстановлен проверенный список | digest_id=%s count=%s",
+                        digest.id,
+                        len(verified_pool),
+                    )
             else:
-                verified_pool = _rebalance_verified_pool(
-                    verified_pool,
-                    rebalance_target,
-                    pinned_fps=pinned_fps,
-                    digest_type=digest.digest_type,
-                    per_host_cap=relaxed_host_cap,
-                )
-            if len(verified_pool) < min(rebalance_target, len(verified_pool_before_rebalance)):
-                verified_pool = _rebalance_verified_pool_host_cap_only(
-                    verified_pool_before_rebalance,
-                    min(rebalance_target, len(verified_pool_before_rebalance)),
-                    pinned_fps=pinned_fps,
-                    per_host_cap=relaxed_host_cap,
-                    digest_type=digest.digest_type,
-                )
-            elif (
-                len(verified_pool) < STEP1_MIN_VERIFIED
-                and len(verified_pool_before_rebalance) >= STEP1_MIN_VERIFIED
-            ):
-                verified_pool = _rebalance_verified_pool_host_cap_only(
-                    verified_pool_before_rebalance,
-                    max(rebalance_target, STEP1_MIN_VERIFIED),
-                    pinned_fps=pinned_fps,
-                    per_host_cap=relaxed_host_cap,
-                    digest_type=digest.digest_type,
-                )
-            if not _pool_respects_source_cap(verified_pool):
+                verified_pool_before_rebalance = list(verified_pool)
                 verified_pool = _rebalance_verified_pool_host_cap_only(
                     verified_pool,
                     len(verified_pool),
                     pinned_fps=pinned_fps,
-                    per_host_cap=STEP1_MAX_PER_SOURCE,
+                    per_host_cap=pool_host_cap,
                     digest_type=digest.digest_type,
                 )
-            if not _pool_respects_source_cap(verified_pool):
-                logger.error(
-                    "Шаг 1: пул после rebalance нарушает лимит на источник | digest_id=%s counts=%s",
-                    digest.id,
-                    _pool_host_counts(verified_pool),
-                )
-                raise HTTPException(
-                    status_code=502,
-                    detail=(
-                        "Внутренняя ошибка: пул кандидатов нарушает лимит «не более 2 новостей с одного источника». "
-                        "Перезапустите сбор или добавьте ручные URL с других сайтов."
-                    ),
-                )
-            if (
-                len(verified_pool) < STEP1_MIN_VERIFIED
-                and len(verified_pool_before_rebalance) >= STEP1_MIN_VERIFIED
-            ):
-                verified_pool = _rebalance_verified_pool_host_cap_only(
-                    verified_pool_before_rebalance,
-                    min(len(verified_pool_before_rebalance), collection_target_pages),
-                    pinned_fps=pinned_fps,
-                    per_host_cap=relaxed_host_cap,
-                    digest_type=digest.digest_type,
-                )
-                logger.warning(
-                    "Шаг 1: rebalance урезал пул ниже минимума — восстановлен проверенный список | digest_id=%s count=%s",
+                logger.info(
+                    "Шаг 1: пул с лимитом на домен | digest_id=%s count=%s max_per_host=%s",
                     digest.id,
                     len(verified_pool),
+                    pool_host_cap,
                 )
+            logger.info(
+                "Шаг 1: итоговый пул перед сохранением | digest_id=%s count=%s iterations=%s",
+                digest.id,
+                len(verified_pool),
+                iteration_no,
+            )
             if (
                 not step1_user_cancelled
                 and not step1_proxyapi_depleted
@@ -5715,7 +5773,7 @@ class DigestService:
                             batch_size=step1_batch_size,
                         max_rounds=6,
                         filter_enabled=self._is_step1_filter_enabled,
-                        respect_host_cap=True,
+                        respect_host_cap=False,
                         phase_label="post_rebalance",
                         )
                         step1_collection_meta["topup_post_rebalance_rounds"] = int(topup_meta.get("rounds", 0) or 0)
@@ -5737,7 +5795,7 @@ class DigestService:
                     raise HTTPException(
                         status_code=502,
                         detail=(
-                            f"Подтверждено {len(verified_pool_before_rebalance)} материалов, но в пул с квотами "
+                            f"Подтверждено {len(verified_pool_before_rebalance)} материалов, но в итоговый пул "
                             f"вошло только {len(verified_pool)} (нужно {STEP1_MIN_VERIFIED}). "
                             "В шаге 2 показаны все проверенные и отбракованные карточки — добавьте ручные URL с других источников "
                             "или пересоберите пул."
@@ -5762,6 +5820,19 @@ class DigestService:
 
             verified_pool = self._dedupe_verified_pool_dicts(verified_pool)
             self._renumber_verified_pool_items(verified_pool)
+            try:
+                from app.services.step1_live_progress import finalize_live_pool_stats, snapshot_live_progress
+
+                snap = snapshot_live_progress(digest.id)
+                rejected_links = int(snap.get("rejected_links") or 0) if snap else None
+                finalize_live_pool_stats(
+                    digest.id,
+                    verified_pool=len(verified_pool),
+                    pool_carried_over=pool_carried_over_initial,
+                    rejected_links=rejected_links,
+                )
+            except Exception:
+                logger.debug("Шаг 1: finalize live pool stats", exc_info=True)
             # #region agent log
             try:
                 from app.services.agent_debug_log import agent_debug_log
@@ -6106,6 +6177,53 @@ class DigestService:
             "pool_count": len(existing) + len(created_rows),
         }
 
+    def _candidate_publisher_host(self, candidate: NewsCandidate) -> str:
+        return _publisher_host_key({"url": str(candidate.url or ""), "source": str(candidate.source or "")})
+
+    def _selection_respects_host_cap(
+        self, candidates: list[NewsCandidate], *, max_per_host: int = STEP2_MAX_PER_SOURCE
+    ) -> tuple[bool, str | None]:
+        counts: dict[str, int] = {}
+        for c in candidates:
+            host = self._candidate_publisher_host(c)
+            counts[host] = counts.get(host, 0) + 1
+            if counts[host] > max_per_host:
+                return False, host
+        return True, None
+
+    def _pick_top5_with_host_cap(
+        self,
+        strict_allowed: list[NewsCandidate],
+        mandatory_manual: list[NewsCandidate],
+        *,
+        max_per_host: int = STEP2_MAX_PER_SOURCE,
+    ) -> list[NewsCandidate]:
+        chosen: list[NewsCandidate] = []
+        host_counts: dict[str, int] = {}
+
+        def can_add(c: NewsCandidate) -> bool:
+            host = self._candidate_publisher_host(c)
+            return host_counts.get(host, 0) < max_per_host
+
+        def add(c: NewsCandidate) -> None:
+            host = self._candidate_publisher_host(c)
+            chosen.append(c)
+            host_counts[host] = host_counts.get(host, 0) + 1
+
+        for c in mandatory_manual:
+            if len(chosen) >= 5:
+                break
+            if can_add(c):
+                add(c)
+        for c in sorted(strict_allowed, key=lambda x: x.total_score, reverse=True):
+            if len(chosen) >= 5:
+                break
+            if c.id in {x.id for x in chosen}:
+                continue
+            if can_add(c):
+                add(c)
+        return chosen
+
     def select_news(self, digest_id: int, selected_ids: list[int], top5: bool) -> list[SelectedNews]:
         digest = self.get_digest(digest_id)
         if digest.status not in SELECT_NEWS_ALLOWED:
@@ -6153,20 +6271,15 @@ class DigestService:
             if self._is_manual_required_candidate(c.verification_comment, c.description)
         ]
         if top5:
-            if len(mandatory_manual) > 5:
-                chosen = sorted(mandatory_manual, key=lambda x: x.total_score, reverse=True)[:5]
-            else:
-                chosen = list(mandatory_manual)
-                strict_rest = [
-                    c
-                    for c in sorted(strict_allowed, key=lambda x: x.total_score, reverse=True)
-                    if c.id not in {m.id for m in chosen}
-                ]
-                chosen.extend(strict_rest[: max(0, 5 - len(chosen))])
+            chosen = self._pick_top5_with_host_cap(strict_allowed, mandatory_manual)
             if len(chosen) < 5:
                 raise HTTPException(
                     status_code=400,
-                    detail="Недостаточно проверенных по странице кандидатов для топ-5. Запустите шаг 1 снова или добавьте ручные URL.",
+                    detail=(
+                        "Недостаточно проверенных кандидатов для топ-5 с учётом лимита "
+                        f"не более {STEP2_MAX_PER_SOURCE} новостей с одного сайта. "
+                        "Выберите пятёрку вручную или пересоберите пул."
+                    ),
                 )
         else:
             uniq_ids = list(dict.fromkeys(selected_ids))
@@ -6196,6 +6309,15 @@ class DigestService:
                         status_code=400,
                         detail="Можно выбирать только новости с читаемым заголовком и рабочей ссылкой на материал.",
                     )
+            ok_hosts, bad_host = self._selection_respects_host_cap(chosen)
+            if not ok_hosts:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"С одного сайта ({bad_host}) можно выбрать не более {STEP2_MAX_PER_SOURCE} новостей. "
+                        "Снимите лишние галочки с этого домена."
+                    ),
+                )
 
         self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest.id).delete()
         created: list[SelectedNews] = []
@@ -7541,7 +7663,7 @@ class DigestService:
                 dropped.append(item)
                 continue
             resolved_ok = False
-            for resolved_url, bundle in _expand_listing_url_candidates(u, max_children=2):
+            for resolved_url, bundle in _expand_listing_url_candidates(u, max_children=_listing_max_children(u)):
                 if not bundle.get("ok"):
                     continue
                 item["url"] = resolved_url[:1000]
@@ -7585,10 +7707,15 @@ class DigestService:
 
     def _step1_curious_source_seed_hint(self, max_urls: int = 24) -> str:
         policy = get_curious_source_policy()
-        seeds = [u for u in policy.search_seed_urls if u.startswith(("http://", "https://"))]
-        if not seeds:
+        seeds = expand_search_seed_urls(
+            policy.search_seed_urls,
+            settings=self.settings,
+            digest_type="curious",
+        )
+        http_seeds = [u for u in seeds if u.startswith(("http://", "https://"))]
+        if not http_seeds:
             return ""
-        primary = seeds[:max_urls]
+        primary = http_seeds[:max_urls]
         return (
             "Сначала ищи в развлекательных и курьёзных разделах из curious_source_hosts: "
             + ", ".join(primary)
@@ -7598,10 +7725,15 @@ class DigestService:
 
     def _step1_source_seed_hint(self, max_urls: int = 30) -> str:
         policy = get_source_tiers_policy(self.settings.source_tiers_path)
-        seeds = [u for u in policy.search_seed_urls if u.startswith(("http://", "https://"))]
-        if not seeds:
+        seeds = expand_search_seed_urls(
+            policy.search_seed_urls,
+            settings=self.settings,
+            digest_type="serious",
+        )
+        http_seeds = [u for u in seeds if u.startswith(("http://", "https://"))]
+        if not http_seeds:
             return ""
-        primary = seeds[:max_urls]
+        primary = http_seeds[:max_urls]
         return (
             "Сначала ищи в проверенных AI-разделах и агрегаторах (Tier-2) из tier-файла: "
             + ", ".join(primary)
@@ -7843,9 +7975,7 @@ class DigestService:
         }
 
         def _query_for_round(round_idx: int) -> str:
-            saturated_hosts = {
-                host for host, count in _pool_host_counts(verified_pool).items() if count >= STEP1_MAX_PER_SOURCE
-            }
+            # На шаге 1 не исключаем домены из поиска — лимит 2/домен только на шаге 2 (выбор топ‑5).
             if is_curious_digest(digest.digest_type):
                 if round_idx % 3 == 0:
                     return self._step1_curious_human_stories_query(digest)
@@ -7860,8 +7990,6 @@ class DigestService:
             elif round_idx % 5 == 3:
                 return self._step1_research_science_query(digest)
             base = self._step1_fresh_tier1_query(digest)
-            if round_idx % 2 == 0 and saturated_hosts:
-                return _step1_search_query_exclude_saturated_hosts(base, saturated_hosts)
             return base
 
         for round_idx in range(max(1, int(max_rounds or 1))):
@@ -8344,11 +8472,7 @@ class DigestService:
                     len(verified_pool),
                 )
                 break
-            saturated_hosts = {
-                host
-                for host, count in _pool_host_counts(verified_pool).items()
-                if count >= STEP1_MAX_PER_SOURCE
-            }
+            saturated_hosts: set[str] = set()
             extra = self._step1_fetch_supplementary_dicts(
                 digest,
                 seen_fp,
@@ -8373,7 +8497,7 @@ class DigestService:
                     filter_enabled is None or bool(filter_enabled("llm_hallucinated_url"))
                 ):
                     continue
-                for resolved_url, bundle in _expand_listing_url_candidates(raw_u, max_children=3):
+                for resolved_url, bundle in _expand_listing_url_candidates(raw_u, max_children=_listing_max_children(raw_u)):
                     fp = _url_fingerprint(resolved_url)
                     if fp in seen_fp:
                         continue
@@ -8403,17 +8527,26 @@ class DigestService:
     def _step1_cheap_sources_first_enabled(self) -> bool:
         return bool(getattr(self.settings, "step1_cheap_sources_first", True))
 
-    def _step1_resolve_seed_urls(self, digest: Digest) -> list[str]:
+    def _step1_effective_search_seed_urls(self, digest: Digest) -> list[str]:
+        """Ленты из search_seed_urls + Telegram + tier-домены из модалки «Источники»."""
         if is_curious_digest(digest.digest_type):
             policy = get_curious_source_policy()
         else:
             policy = get_source_tiers_policy(self.settings.source_tiers_path)
-        max_seeds = max(1, int(getattr(self.settings, "step1_seed_urls_max", 35) or 35))
-        seeds = [
+        expanded = expand_search_seed_urls(
+            policy.search_seed_urls,
+            settings=self.settings,
+            digest_type=digest.digest_type,
+        )
+        return [
             str(u).strip()
-            for u in policy.search_seed_urls
+            for u in expanded
             if str(u).startswith(("http://", "https://"))
         ]
+
+    def _step1_resolve_seed_urls(self, digest: Digest) -> list[str]:
+        max_seeds = max(1, int(getattr(self.settings, "step1_seed_urls_max", 35) or 35))
+        seeds = self._step1_effective_search_seed_urls(digest)
         return list(dict.fromkeys(seeds))[:max_seeds]
 
     def _step1_add_seed_listing_raw_urls(
@@ -8424,7 +8557,7 @@ class DigestService:
         raw_unique: list[str],
         skip_urls: list[str] | None,
         max_seeds: int | None = None,
-        max_children_per_seed: int = 3,
+        max_children_per_seed: int | None = None,
     ) -> int:
         """HTTP-разбор seed-лент/агрегаторов → сырые URL статей (без ProxyAPI web_search)."""
         skip_norm = {str(u).strip().lower().rstrip("/") for u in (skip_urls or []) if u}
@@ -8436,8 +8569,13 @@ class DigestService:
             seed_key = str(seed_url).strip().lower().rstrip("/")
             if seed_key in skip_norm:
                 continue
+            expand_n = (
+                int(max_children_per_seed)
+                if max_children_per_seed is not None
+                else _listing_max_children(str(seed_url))
+            )
             try:
-                pairs = _expand_listing_url_candidates(str(seed_url), max_children=max_children_per_seed)
+                pairs = _expand_listing_url_candidates(str(seed_url), max_children=expand_n)
             except Exception:
                 logger.debug(
                     "Шаг 1: seed-лента не разобрана | digest_id=%s seed=%s",
@@ -8500,7 +8638,9 @@ class DigestService:
                 meta["cheap_seed_listings_stopped_by_hard_limit"] = True
                 break
             meta["cheap_seed_listings_scanned"] = int(meta["cheap_seed_listings_scanned"]) + 1
-            for resolved_url, bundle in _expand_listing_url_candidates(str(seed_url), max_children=3):
+            for resolved_url, bundle in _expand_listing_url_candidates(
+                str(seed_url), max_children=_listing_max_children(str(seed_url))
+            ):
                 if len(verified_pool) >= stop_at:
                     break
                 if hard_limit_monotonic is not None and time.monotonic() >= hard_limit_monotonic:
@@ -9310,7 +9450,7 @@ class DigestService:
         listing_child_rejected_by_url_date = 0
         process_cap = max_urls_to_process if max_urls_to_process is not None else max(limit * 10, 80)
         pending_cap = max_pending_checks if max_pending_checks is not None else max(limit * 12, 96)
-        max_pending_per_host = max(1, int(getattr(self.settings, "step1_max_pending_per_host", 4) or 4))
+        max_pending_per_host = max(0, int(getattr(self.settings, "step1_max_pending_per_host", 0) or 0))
         processed = 0
 
         logger.info(
@@ -9382,7 +9522,11 @@ class DigestService:
                 if not fp or fp in seen_fp or fp in visited:
                     continue
                 host = _host_from_url(resolved_url).lower()
-                if host and pending_host_counts.get(host, 0) >= max_pending_per_host:
+                if (
+                    max_pending_per_host > 0
+                    and host
+                    and pending_host_counts.get(host, 0) >= max_pending_per_host
+                ):
                     continue
                 visited.add(fp)
                 pending.append((resolved_url, bundle, seq))
@@ -10146,7 +10290,7 @@ class DigestService:
                 "published_date_undefined",
             ],
         )
-        saturated = exclude_hosts or set()
+        saturated = set()
 
         if search_route.uses_curious_hosts:
             window_hint, topic_terms, product_excludes = self._step1_search_query_parts(digest)
@@ -10162,9 +10306,6 @@ class DigestService:
             )
             urls: list[str] = []
             for u in raw_urls:
-                host = _host_from_url(u).lower()
-                if saturated and any(marker in host for marker in saturated):
-                    continue
                 pre_reason = search_url_prefilter_reason(
                     u,
                     is_enabled=filter_enabled,
@@ -10195,9 +10336,6 @@ class DigestService:
             )
             urls: list[str] = []
             for u in raw_urls:
-                host = _host_from_url(u).lower()
-                if saturated and any(marker in host for marker in saturated):
-                    continue
                 pre_reason = search_url_prefilter_reason(
                     u,
                     is_enabled=filter_enabled,
@@ -10212,10 +10350,7 @@ class DigestService:
                     continue
                 urls.append(u)
         else:
-            query = _step1_search_query_exclude_saturated_hosts(
-                self._step1_search_query(digest),
-                saturated,
-            )
+            query = self._step1_search_query(digest)
             urls = fetch_article_urls_from_search(
                 self.settings,
                 query,

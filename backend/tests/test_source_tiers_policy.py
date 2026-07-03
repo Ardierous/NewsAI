@@ -27,6 +27,16 @@ def test_load_source_tiers_splits_prompt_and_host_rules():
     assert "meduza.io" in policy.banned_media_hosts
     assert "arxiv.org" in policy.blocked_search_hosts
     assert "https://ria.ru/product_iskusstvennyy-intellekt/" in policy.search_seed_urls
+    assert "investing.com" in policy.tier2_hosts
+    investing_seeds = (
+        "https://ru.investing.com/news/stock-market-news",
+        "https://ru.investing.com/news/economy",
+        "https://ru.investing.com/analysis/stock-markets",
+        "https://ru.investing.com/analysis/market-overview",
+        "https://ru.investing.com/analysis/bonds",
+    )
+    for seed in investing_seeds:
+        assert seed in policy.search_seed_urls
 
 
 def test_classify_source_policy_aggregator_as_tier2():

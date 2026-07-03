@@ -198,7 +198,7 @@ HTML_LAYOUT_PLATFORMS = frozenset({"max", "dzen"})
 
 
 def needs_html_layout_refresh(platform: str, content: str) -> bool:
-    """True, если текст MAX/Дзен сохранён в старом markdown/plain формате."""
+    """True, если текст MAX/Дzen сохранён в старом markdown/plain формате или без подписи/тегов."""
     if platform not in HTML_LAYOUT_PLATFORMS:
         return False
     text = str(content or "").strip()
@@ -206,6 +206,12 @@ def needs_html_layout_refresh(platform: str, content: str) -> bool:
         return False
     lower = text.lower()
     if "<a href=" in lower and "<b>" in lower:
+        if platform == "max":
+            sub = subscription_html_inline()
+            if sub not in text:
+                return True
+            if not re.search(r"#\w", text):
+                return True
         return False
     if "**" in text:
         return True
@@ -263,8 +269,8 @@ def _html_news_block(item: dict[str, Any], *, max_body_chars: int | None = None)
     return f"{_news_link_html(title, url)}<br><br>{summary}"
 
 
-def _max_news_block(item: dict[str, Any]) -> str:
-    return _html_news_block(item)
+def _max_news_block(item: dict[str, Any], *, max_body_chars: int | None = None) -> str:
+    return _html_news_block(item, max_body_chars=max_body_chars)
 
 
 def _truncate_at_word(text: str, max_len: int) -> str:
@@ -331,17 +337,21 @@ def assemble_max(payload: dict[str, Any]) -> str:
     """HTML для веб-редактора MAX: жирная шапка, ссылки в заголовках, отступы через <br>."""
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
-    lead = resolve_lead(payload, "max")
+    lead = _truncate_at_word(resolve_lead(payload, "max"), 280)
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
-    news_blocks = [_max_news_block(item) for item in payload.get("selected_news") or []]
-    body = f"<br><br>{MAX_NEWS_SEP}<br><br>".join(news_blocks)
-    text = (
+    footer = f"<br><br>{subscription_html_inline()}<br><br>{escape_html_text(tags)}"
+    header = (
         f"<b>{escape_html_text(header_title)} | {escape_html_text(date_ru)}</b><br><br>"
         f"{escape_html_text(lead)}<br><br>"
-        f"{body}<br><br>"
-        f"{subscription_html_inline()}<br><br>"
-        f"{escape_html_text(tags)}"
     )
+    news = list(payload.get("selected_news") or [])
+    n = max(len(news), 1)
+    sep = f"<br><br>{MAX_NEWS_SEP}<br><br>"
+    budget = MAX_PLATFORM_MAX_CHARS - len(header) - len(footer) - len(sep) * max(n - 1, 0)
+    per_news = max(120, (budget // n) - 120)
+    news_blocks = [_max_news_block(item, max_body_chars=per_news) for item in news]
+    body = sep.join(news_blocks)
+    text = header + body + footer
     return truncate_platform_html(text, MAX_PLATFORM_MAX_CHARS)
 
 

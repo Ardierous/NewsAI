@@ -46,6 +46,19 @@ CURIOUS_GROUP_SPECS: tuple[tuple[str, str, bool, int], ...] = (
     ("blocked_search_hosts", "Чёрный список поиска", True, 6),
 )
 
+SERIOUS_TIER_SEED_SECTIONS: tuple[str, ...] = (
+    "tier1_hosts",
+    "tier2_hosts",
+    "tier3_hosts",
+    "tier4_hosts",
+    "aggregator_hosts",
+)
+CURIOUS_TIER_SEED_SECTIONS: tuple[str, ...] = (
+    "curious_tier1_hosts",
+    "curious_tier2_hosts",
+    "aggregator_hosts",
+)
+
 
 def _normalize_marker(value: str) -> str:
     token = str(value or "").strip().lower().removeprefix("www.")
@@ -64,6 +77,35 @@ def _marker_matches_host(marker: str, host: str) -> bool:
     if not m or not h:
         return False
     return m in h or h in m
+
+
+def _seed_is_bare_homepage(seed: str) -> bool:
+    try:
+        path = (urlparse(str(seed or "").strip()).path or "").rstrip("/") or "/"
+    except Exception:
+        return False
+    return path in ("", "/")
+
+
+def _site_has_path_seeds(host: str, seeds: list[str]) -> bool:
+    """У домена уже есть seed с путём (не главная) — голую главную не дублируем."""
+    h = str(host or "").lower().removeprefix("www.")
+    if not h:
+        return False
+    for seed in seeds:
+        if _seed_is_bare_homepage(seed):
+            continue
+        sh = _host_from_url(seed)
+        if sh and _marker_matches_host(h, sh):
+            return True
+    return False
+
+
+def _skip_redundant_homepage_seed(seed: str, existing_seeds: list[str]) -> bool:
+    if not _seed_is_bare_homepage(seed):
+        return False
+    host = _host_from_url(seed)
+    return _site_has_path_seeds(host, existing_seeds)
 
 
 def tiers_file_path(settings: Any, digest_type: str | None) -> Path:
@@ -87,16 +129,27 @@ def _merge_section_entries(
     entries: list[tuple[str, bool]],
     *,
     settings: Any,
+    digest_type: str | None = None,
+    section_entries: dict[str, list[tuple[str, bool]]] | None = None,
 ) -> list[tuple[str, bool]]:
     if section_id != "search_seed_urls":
         return entries
-    seen = {marker for marker, _ in entries}
-    merged = list(entries)
-    for url in _telegram_seed_markers(settings):
-        marker = _normalize_marker(url)
-        if marker and marker not in seen:
-            seen.add(marker)
-            merged.append((marker, False))
+    base = [seed for seed in expand_search_seed_urls(
+        [marker for marker, _ in entries],
+        settings=settings,
+        digest_type=digest_type,
+        section_entries=section_entries,
+    )]
+    seen: set[str] = set()
+    merged: list[tuple[str, bool]] = []
+    locked_by_marker = {marker: locked for marker, locked in entries}
+    for seed in base:
+        display = seed if seed.startswith(("http://", "https://")) else _normalize_marker(seed)
+        key = _normalize_marker(display)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append((display, locked_by_marker.get(key, False)))
     return merged
 
 
@@ -104,6 +157,100 @@ def group_specs_for_digest_type(digest_type: str | None) -> tuple[tuple[str, str
     if is_curious_digest(digest_type):
         return CURIOUS_GROUP_SPECS
     return SERIOUS_GROUP_SPECS
+
+
+def tier_seed_section_ids(digest_type: str | None) -> tuple[str, ...]:
+    if is_curious_digest(digest_type):
+        return CURIOUS_TIER_SEED_SECTIONS
+    return SERIOUS_TIER_SEED_SECTIONS
+
+
+def marker_to_listing_seed_url(marker: str) -> str | None:
+    """
+    Маркер домена или URL из модалки «Источники» → seed для HTTP-разбора лент на шаге 1.
+    Полные https-URL сохраняются; голый домен → https://domain/.
+    """
+    raw = str(marker or "").strip()
+    if not raw or raw.startswith("#"):
+        return None
+    if raw.startswith(("http://", "https://")):
+        return raw.split("#", 1)[0].strip()
+    norm = _normalize_marker(raw)
+    if not norm or norm.endswith("."):
+        return None
+    if "/" in raw:
+        return f"https://{raw.lstrip('/')}"
+    if "." not in norm:
+        return None
+    return f"https://{norm}/"
+
+
+def _tier_markers_from_sections(
+    section_entries: dict[str, list[tuple[str, bool]]],
+    digest_type: str | None,
+) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for section_id in tier_seed_section_ids(digest_type):
+        for marker, _locked in section_entries.get(section_id, []):
+            m = _normalize_marker(marker)
+            if not m or m in seen:
+                continue
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+def expand_search_seed_urls(
+    base_seeds: tuple[str, ...] | list[str],
+    *,
+    settings: Any,
+    digest_type: str | None,
+    section_entries: dict[str, list[tuple[str, bool]]] | None = None,
+) -> tuple[str, ...]:
+    """search_seed_urls из файла + Telegram + seed-URL, собранные из tier-доменов модалки."""
+    path = tiers_file_path(settings, digest_type)
+    sections = section_entries if section_entries is not None else _load_section_entries(path)
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw in (*base_seeds, *_telegram_seed_markers(settings)):
+        seed = marker_to_listing_seed_url(raw) or str(raw or "").strip()
+        if not seed:
+            continue
+        key = _normalize_marker(seed)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(seed)
+    for marker in _tier_markers_from_sections(sections, digest_type):
+        seed = marker_to_listing_seed_url(marker)
+        if not seed:
+            continue
+        if _skip_redundant_homepage_seed(seed, merged):
+            continue
+        key = _normalize_marker(seed)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(seed)
+    return tuple(merged)
+
+
+def sync_tier_markers_to_search_seeds(updated: dict[str, list[str]], digest_type: str | None) -> None:
+    """При сохранении модалки: tier-домены дублируются в search_seed_urls (как t.me/s/…)."""
+    seeds = list(updated.get("search_seed_urls") or [])
+    seen = {_normalize_marker(s) for s in seeds}
+    for section_id in tier_seed_section_ids(digest_type):
+        for marker in updated.get(section_id) or []:
+            seed = marker_to_listing_seed_url(marker)
+            if not seed:
+                continue
+            key = _normalize_marker(seed)
+            if key in seen:
+                continue
+            seen.add(key)
+            seeds.append(seed)
+    updated["search_seed_urls"] = seeds
 
 
 def _read_rules_sections(path: Path) -> dict[str, list[str]]:
@@ -222,7 +369,13 @@ def build_source_tiers_editor(db: Session, settings: Any, digest_type: str, *, w
         if not entries:
             markers = _read_rules_sections(path).get(section_id, [])
             entries = [(_normalize_marker(m), False) for m in markers if _normalize_marker(m)]
-        entries = _merge_section_entries(section_id, entries, settings=settings)
+        entries = _merge_section_entries(
+            section_id,
+            entries,
+            settings=settings,
+            digest_type=dtype,
+            section_entries=section_entries,
+        )
         seen: set[str] = set()
         hosts: list[SourceHostOut] = []
         for marker, locked in entries:
@@ -354,6 +507,10 @@ def save_source_tiers_editor(
             seen.add(m)
             markers.append(m)
         updated[group.id] = markers
+    if "search_seed_urls" not in updated:
+        existing = _load_section_entries(path)
+        updated["search_seed_urls"] = [marker for marker, _ in existing.get("search_seed_urls", [])]
+    sync_tier_markers_to_search_seeds(updated, dtype)
     _rewrite_host_rules(path, updated)
     invalidate_policy_cache()
     if is_curious_digest(dtype):

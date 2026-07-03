@@ -7,6 +7,7 @@ from app.services.platform_assembly import (
     HEADER_TITLE_CURIOUS,
     HEADER_TITLE_SERIOUS,
     MAX_NEWS_SEP,
+    MAX_PLATFORM_MAX_CHARS,
     assemble_dzen,
     assemble_max,
     assemble_platform_outputs,
@@ -151,6 +152,26 @@ def test_needs_html_layout_refresh_detects_legacy_markdown():
     assert needs_html_layout_refresh("dzen", legacy)
     assert not needs_html_layout_refresh("max", assemble_max(_sample_payload()))
     assert not needs_html_layout_refresh("telegram", legacy)
+
+
+def test_needs_html_layout_refresh_detects_truncated_max_without_footer():
+    broken = '<b>⚡Пять актуальных новостей про ИИ | 16 мая 2026</b><br><br>➤ <a href="https://x">Y</a>'
+    assert needs_html_layout_refresh("max", broken)
+
+
+def test_max_long_summaries_preserve_subscription_and_tags():
+    news = {
+        "title": "OpenAI перестраивается вокруг ИИ-агентов",
+        "url": "https://3dnews.ru/1141822/openai-agents",
+        "source": "3DNews",
+        "summary_short": "Коротко. " + ("Очень длинный анализ новости. " * 250),
+    }
+    payload = {**_sample_payload(), "selected_news": [news] * 5}
+    text = assemble_max(payload)
+    sub = subscription_html_inline()
+    assert len(text) <= MAX_PLATFORM_MAX_CHARS
+    assert sub in text
+    assert text.index(sub) < text.rfind("#")
 
 
 def test_extract_lead_from_legacy_platform_text():
