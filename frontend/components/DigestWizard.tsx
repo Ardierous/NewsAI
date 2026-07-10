@@ -1105,6 +1105,23 @@ export function DigestWizard({ digestId }: Props) {
   }, [digestId, loadDigest]);
 
   useEffect(() => {
+    if (manualUrls.trim()) return;
+    const list = digest?.candidates as
+      | { url?: string; verification_comment?: string; description?: string }[]
+      | undefined;
+    if (!list?.length) return;
+    const urls = [
+      ...new Set(
+        list
+          .filter((c) => isManualRequiredCandidate(c))
+          .map((c) => String(c.url || "").trim())
+          .filter(Boolean),
+      ),
+    ];
+    if (urls.length) setManualUrls(urls.join("\n"));
+  }, [digest?.candidates, manualUrls]);
+
+  useEffect(() => {
     newsWindowHydratedForRef.current = null;
   }, [digestId]);
 
@@ -2172,7 +2189,12 @@ export function DigestWizard({ digestId }: Props) {
       <AsyncProgress active={loading} label={asyncProgressLabel} />
 
       <div className="card">
-        <h2 style={{ marginBottom: 6 }}>Мастер дайджеста · {formatDigestDateLabel(digest?.digest?.date)}</h2>
+        <div className="wizard-header-top">
+          <h2>Мастер дайджеста · {formatDigestDateLabel(digest?.digest?.date)}</h2>
+          <Link href="/" className="wizard-home-btn" title="Вернуться на панель выпусков">
+            На главную
+          </Link>
+        </div>
         <div style={{ fontSize: "0.88rem", color: "#94a3b8", marginBottom: 8 }}>
           Текущий статус: <strong style={{ color: "#e2e8f0" }}>{digest?.digest?.status ?? "…"}</strong>
           {" · "}
@@ -2369,13 +2391,14 @@ export function DigestWizard({ digestId }: Props) {
         </fieldset>
         <WizardWhy summary="Зачем тип важен и как ведут себя кнопки">
           <p>
-            От выбора зависят промпты к ИИ на шагах 1–4 — это не просто «стиль оформления». До первого сохранения ни одна
-            кнопка не подсвечена — это нормально: подсветка появится у выбранного варианта; остальные станут бледнее (их
-            всё ещё можно нажать, чтобы сменить тип до шага 1).
+            От выбора зависят промпты к ИИ на шагах 1–4 — это не просто «стиль оформления». Новый выпуск сразу
+            создаётся с типом <strong>серьёзный</strong> (подсветка на кнопке). Курьёзный или «по умолчанию из
+            настроек» можно выбрать до шага 1.
           </p>
           <p>
             <strong>Серьёзный</strong> — нейтральный деловой стиль. <strong>Курьёзный</strong> — легче формулировки.{" "}
-            <strong>По умолчанию</strong> — в будни серьёзный, в выходные курьёзный (решает сервер по календарю Москвы).
+            <strong>По умолчанию</strong> — тип из файла настроек сервера (<code>digest_defaults.json</code>, сейчас
+            серьёзный).
           </p>
           <p>
             <strong>Окно новостей</strong> ограничивает шаг 1: в пул попадают только материалы с датой публикации не раньше N
@@ -2426,7 +2449,7 @@ export function DigestWizard({ digestId }: Props) {
             disabled={loading}
             style={step0BtnStyle("default")}
             aria-pressed={step0Active === "default"}
-            title="Будни → серьёзный, выходные → курьёзный; сервер решает по календарю Москвы."
+            title="Тип из digest_defaults.json на сервере (сейчас — серьёзный)."
             onClick={() =>
               run("Сохранение типа дайджеста по умолчанию…", () =>
                 api.step0(digestId, {
@@ -4123,6 +4146,9 @@ export function DigestWizard({ digestId }: Props) {
                     </button>
                   );
                 })}
+                <Link href="/" className="wizard-home-btn step4-home-btn" title="Вернуться на панель выпусков">
+                  На главную
+                </Link>
               </div>
               {sortedOutputs.map((o: any) => {
                 const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();

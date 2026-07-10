@@ -228,6 +228,42 @@ def test_rebalance_keeps_manual_required_in_pool():
     assert manual["url"] in urls
 
 
+def test_rebalance_keeps_manual_required_despite_host_cap():
+    host = "habr.com"
+    filler = [
+        {
+            "url": f"https://{host}/ru/news/auto-{i}/",
+            "verification_comment": "",
+            "description": "search",
+            "total_score": 40 - i,
+            "tier": "Tier-1",
+            "link_status": True,
+            "headline_editorial_ok": True,
+            "title": f"Авто {i}",
+        }
+        for i in range(3)
+    ]
+    manual = {
+        "url": f"https://{host}/ru/news/manual-user-story/",
+        "verification_comment": "MANUAL_REQUIRED: добавлено пользователем",
+        "description": "Вставлено в поле URL на шаге 1",
+        "total_score": 3,
+        "tier": "Tier-3",
+        "link_status": True,
+        "headline_editorial_ok": True,
+        "title": "Ручная новость пользователя",
+    }
+    pool = filler + [manual]
+    chosen = _rebalance_verified_pool(
+        pool,
+        target=3,
+        digest_type="serious",
+        per_host_cap=ds.STEP1_POOL_PER_HOST_CAP,
+    )
+    urls = {str(x.get("url") or "") for x in chosen}
+    assert manual["url"] in urls
+
+
 def test_manual_unreachable_url_rejected(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
     monkeypatch.setattr(ds, "_fetch_article_page_bundle", lambda _url: {"ok": False})

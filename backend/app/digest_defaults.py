@@ -13,7 +13,7 @@ _DEFAULTS_PATH = Path(__file__).resolve().parent / "digest_defaults.json"
 
 @dataclass(frozen=True)
 class Step0Defaults:
-    digest_type_default: Literal["serious", "curious"] = "curious"
+    digest_type_default: Literal["serious", "curious"] = "serious"
     news_window_days_default: int = 3
     news_window_day_kind_default: Literal["calendar", "working"] = "working"
 
@@ -24,9 +24,9 @@ class DigestDefaults:
 
 
 def _coerce_step0(raw: dict[str, Any]) -> Step0Defaults:
-    dtype = str(raw.get("digest_type_default") or "curious").strip().lower()
+    dtype = str(raw.get("digest_type_default") or "serious").strip().lower()
     if dtype not in {"serious", "curious"}:
-        dtype = "curious"
+        dtype = "serious"
     kind = str(raw.get("news_window_day_kind_default") or "working").strip().lower()
     if kind not in {"calendar", "working"}:
         kind = "working"

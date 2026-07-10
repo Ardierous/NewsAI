@@ -193,7 +193,7 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
         alternatives="перетаскивание в модалке «Настройки фильтра новостей» → PUT step1/filters.",
     ),
     "digest_type_default": ConfigItemMeta(
-        why="curious — тип выпуска по умолчанию на шаге 0 (можно сменить перед запуском).",
+        why="serious — тип выпуска по умолчанию на шаге 0 (можно сменить перед запуском).",
         alternatives=(
             "serious — деловой тон; EN-ключи поиска, пресс-релизы в rebalance. "
             "curious — курьёзы/фейлы/мемы; RU+EN-ключи, без пресс-релизов и без добора press-query."

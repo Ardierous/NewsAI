@@ -2228,7 +2228,7 @@ def _rebalance_verified_pool(
         if not fp or fp in selected_fps:
             return False
         host = _publisher_host_key(item)
-        if _host_cap_blocks(host_count, host, host_cap):
+        if not _manual_required_dict(item) and _host_cap_blocks(host_count, host, host_cap):
             return False
         chosen.append(item)
         selected_fps.add(fp)
@@ -2385,8 +2385,6 @@ def _rebalance_verified_pool_host_cap_only(
             if not fp or fp in selected_fps:
                 continue
             host = _publisher_host_key(item)
-            if _host_cap_blocks(host_count, host, host_cap):
-                continue
             chosen.append(item)
             selected_fps.add(fp)
             host_count[host] = host_count.get(host, 0) + 1
@@ -2395,7 +2393,7 @@ def _rebalance_verified_pool_host_cap_only(
         fp = _url_fingerprint(str(item.get("url") or ""))
         if fp and fp in pinned_fps and fp not in selected_fps:
             host = _publisher_host_key(item)
-            if _host_cap_blocks(host_count, host, host_cap):
+            if not _manual_required_dict(item) and _host_cap_blocks(host_count, host, host_cap):
                 continue
             chosen.append(item)
             selected_fps.add(fp)
@@ -3129,7 +3127,12 @@ class DigestService:
         self.db.commit()
         self.db.refresh(digest)
         logger.info("Создан новый выпуск на сегодня | digest_id=%s date=%s", digest.id, today)
-        return digest
+        return self.run_step_0(
+            digest.id,
+            d0.digest_type_default,
+            news_window_days=d0.news_window_days_default,
+            news_window_day_kind=d0.news_window_day_kind_default,
+        )
 
     def list_digests(self) -> list[Digest]:
         return self.db.query(Digest).order_by(Digest.date.desc()).all()
@@ -3145,6 +3148,7 @@ class DigestService:
         if not digest:
             raise HTTPException(status_code=404, detail="Digest not found")
         self._repair_orphan_step1_status(digest)
+        self._ensure_step0_type_for_draft(digest)
         self._dedupe_digest_candidate_rows(digest_id)
         self._purge_invalid_step1_pool_rows(digest_id)
         return digest
@@ -3264,6 +3268,28 @@ class DigestService:
         digest.current_step = STATUS_STEP1
         self.db.commit()
 
+    def _ensure_step0_type_for_draft(self, digest: Digest) -> None:
+        """Старые выпуски без типа на шаге 0 — серьёзный из digest_defaults.json."""
+        if digest.digest_type:
+            return
+        if digest.status not in {STATUS_DRAFT, STATUS_STEP0}:
+            return
+        from app.digest_defaults import get_digest_defaults
+
+        d0 = get_digest_defaults().step0
+        digest.digest_type = d0.digest_type_default
+        digest.digest_type_via_default = False
+        digest.status = STATUS_STEP0
+        digest.current_step = STATUS_STEP0
+        self._ensure_release_cost_opening(digest)
+        self.db.commit()
+        self.db.refresh(digest)
+        logger.info(
+            "Шаг 0: применён тип по умолчанию | digest_id=%s type=%s",
+            digest.id,
+            digest.digest_type,
+        )
+
     def run_step_0(
         self,
         digest_id: int,
@@ -3275,8 +3301,9 @@ class DigestService:
         digest = self.get_digest(digest_id)
         via_default = digest_type is None
         if via_default:
-            weekday = datetime.now(MSK_TZ).weekday()
-            digest_type = "serious" if weekday < 5 else "curious"
+            from app.digest_defaults import get_digest_defaults
+
+            digest_type = get_digest_defaults().step0.digest_type_default
         if digest_type not in {"serious", "curious"}:
             raise HTTPException(status_code=400, detail="digest_type must be serious or curious")
         digest.digest_type = digest_type
@@ -4020,7 +4047,16 @@ class DigestService:
                 digest.id, keep_ids_ordered
             )
 
-        user_manual_urls = self._normalize_seed_urls(manual_urls)
+        user_manual_urls = self._normalize_manual_urls(manual_urls)
+        if not user_manual_urls:
+            carried_manual_urls = self._collect_previous_user_manual_urls(digest.id)
+            if carried_manual_urls:
+                user_manual_urls = carried_manual_urls
+                logger.info(
+                    "Шаг 1: подтянуты ручные URL из предыдущего пула | digest_id=%s count=%s",
+                    digest.id,
+                    len(carried_manual_urls),
+                )
         telegram_seed_urls: list[str] = []
         normalized_manual_urls: list[str] = list(user_manual_urls)
         telegram_only_urls: list[str] = []
@@ -4398,19 +4434,6 @@ class DigestService:
                         f"{item.get('title', '')} {item.get('description', '')} "
                         f"{item.get('article_excerpt', '')}"
                     )
-                    material_form = _classify_material_form(item, extra=promo_corpus)
-                    if _should_reject_commercial_non_article(item, material_form, promo_corpus):
-                        reject_code = _commercial_non_article_reject_reason(item, material_form, promo_corpus)
-                        if step1_filter_enabled.get(reject_code, True) or step1_filter_enabled.get(
-                            "product_tool_promo", True
-                        ):
-                            _append_reject_reason(item, reject_code)
-                            item["headline_editorial_ok"] = False
-                            item["link_status"] = False
-                            item["page_verified"] = False
-                            snapshot_preview_row(item)
-                            register_reject(item)
-                            return
                     item["headline_editorial_ok"] = True
                     item["page_verified"] = True
                     _apply_material_form_to_candidate(item, extra=promo_corpus, digest_type=digest.digest_type)
@@ -7060,6 +7083,26 @@ class DigestService:
         """Обратная совместимость: только ручной ввод с прежним лимитом 10."""
         return self._normalize_seed_urls(manual_urls)[:10]
 
+    def _collect_previous_user_manual_urls(self, digest_id: int) -> list[str]:
+        """Ручные URL из сохранённого пула — для пересборки без повторного ввода в поле."""
+        rows = (
+            self.db.query(NewsCandidate)
+            .filter(NewsCandidate.digest_id == digest_id)
+            .order_by(NewsCandidate.original_number.asc(), NewsCandidate.id.asc())
+            .all()
+        )
+        urls: list[str] = []
+        for row in rows:
+            comment = str(row.verification_comment or "")
+            desc = str(row.description or "")
+            if "TELEGRAM_SEED:" in comment or "Telegram-монитор" in desc:
+                continue
+            if "MANUAL_REQUIRED:" in comment or self._is_manual_required_candidate(comment, desc):
+                value = str(row.url or "").strip()
+                if value:
+                    urls.append(value)
+        return self._normalize_manual_urls(urls)
+
     def _ensure_russian_candidate_title(self, digest_id: int, url: str, headline: str) -> str:
         """Заголовок для карточки кандидата: на русском; иностранный — короткий перевод через LLM."""
         t = headline.strip()
@@ -7251,46 +7294,6 @@ class DigestService:
                         "Вставьте прямую ссылку на публикацию с заголовком новости."
                     )
                     comment = f"{comment} {REJECT_REASON_PREFIX}non_article_page"
-                    policy_fields = {}
-                    _apply_source_policy_from_url(policy_fields, stored)
-                    result.append(
-                        {
-                            "original_number": idx,
-                            "title": title,
-                            "url": stored[:1000],
-                            "source": host,
-                            "tier": policy_fields.get("tier", "Tier-3"),
-                            "published_at": PUBLISHED_AT_UNDEFINED,
-                            "category": "manual",
-                            "description": desc,
-                            "significance_score": 3,
-                            "novelty_score": 3,
-                            "impact_score": 3,
-                            "total_score": 9,
-                            "reliability_status": policy_fields.get("reliability_status", "⚠️ сомнительный"),
-                            "is_foreign_agent": _is_foreign_agent_source(stored),
-                            "is_aggregator": policy_fields.get("is_aggregator", False),
-                            "is_duplicate": False,
-                            "verification_comment": comment,
-                            "link_status": False,
-                            "headline_editorial_ok": False,
-                            "page_verified": False,
-                        }
-                    )
-                    continue
-
-                policy_reject = _manual_url_commercial_reject_reason(
-                    stored,
-                    title=str(bundle.get("headline") or ""),
-                    topic_corpus=str(bundle.get("topic_corpus") or ""),
-                )
-                if policy_reject:
-                    title = str(bundle.get("headline") or f"Статья по ссылке ({host})")[:500]
-                    desc = (
-                        "Страница не является новостной публикацией: вакансия, лендинг услуги "
-                        "или промо-страница обучения. Вставьте прямую ссылку на статью."
-                    )
-                    comment = f"{comment} {REJECT_REASON_PREFIX}{policy_reject}"
                     policy_fields = {}
                     _apply_source_policy_from_url(policy_fields, stored)
                     result.append(

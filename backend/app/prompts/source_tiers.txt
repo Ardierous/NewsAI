@@ -107,6 +107,8 @@ Tier-5 (запрещённые источники и недопустимые UR
 
 
 
+
+
 # Правила для кода (шаг 1, поиск). Один хост/маркер на строку; подстрока в hostname.
 # Секции: aggregator_hosts (поиск Tier-2, не blacklist), tier1_hosts, tier2_hosts, tier3_hosts, tier4_hosts,
 # banned_media_hosts, foreign_agent_hosts, russian_host_markers, blocked_search_hosts, search_seed_urls.
@@ -239,7 +241,6 @@ https://www.technologyreview.com/topic/artificial-intelligence/
 https://spectrum.ieee.org/topic/artificial-intelligence/
 https://www.wired.com/tag/artificial-intelligence/
 https://techcrunch.com/category/artificial-intelligence/
-https://tldr.tech/api/latest/ai
 https://www.sciencedaily.com/news/computers_math/artificial_intelligence/
 https://techxplore.com/machine-learning-ai-news/
 https://www.zdnet.com/topic/artificial-intelligence/
@@ -250,3 +251,59 @@ https://habr.com/ru/hubs/artificial_intelligence/
 https://vc.ru/ai
 https://blogs.nvidia.com/blog/tag/artificial-intelligence/
 https://shvedkov.pro/
+https://particle.news/
+https://digital.gov.ru/
+https://sk.ru/
+https://rosatom.ru/
+https://rostec.ru/
+https://netology.ru/
+https://yandex.ru/
+https://ya.ru/
+https://vk.com/
+https://vk.company/
+https://sberbank.ru/
+https://blog.google/
+https://deepmind.google/
+https://openai.com/
+https://yandex.ru/news
+https://thenextweb.com/
+https://analyticsinsight.net/
+https://ria.ru/
+https://interfax.ru/
+https://vedomosti.ru/
+https://technologyreview.com/
+https://spectrum.ieee.org/
+https://wired.com/
+https://techcrunch.com/
+https://sciencedaily.com/
+https://techxplore.com/
+https://zdnet.com/
+https://tadviser.ru/
+https://habr.com/
+https://vc.ru/
+https://blogs.nvidia.com/
+https://investing.com/
+https://coursera.org/
+https://stepik.org/
+https://aiindex.stanford.edu/
+https://sber.ru/
+https://cognitive.ru/
+https://abbyy.com/
+https://googleblog.com/
+https://ai.google/
+https://microsoft.com/
+https://ibm.com/
+https://nvidia.com/
+https://anthropic.com/
+https://google.com/news
+https://news.ycombinator.com/
+https://reddit.com/
+https://medium.com/tag/
+https://feedly.com/
+https://flipboard.com/
+https://news.tek.fm/
+https://x.com/
+https://t.co/
+https://telegram.me/
+https://therundown.ai/
+https://tldr.tech/

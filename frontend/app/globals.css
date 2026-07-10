@@ -183,6 +183,42 @@ input[type="checkbox"] {
   line-height: 1.35;
 }
 
+.wizard-home-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid #475569;
+  background: #1e293b;
+  color: #e2e8f0;
+  font-size: 0.92rem;
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.wizard-home-btn:hover {
+  border-color: #7dd3fc;
+  background: #1e3a5f;
+  color: #f8fafc;
+}
+
+.wizard-header-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 14px;
+  margin-bottom: 6px;
+}
+
+.wizard-header-top h2 {
+  margin: 0;
+  flex: 1 1 220px;
+}
+
 .platform-output-preview {
   min-height: 240px;
   max-height: min(70vh, 720px);
@@ -242,6 +278,10 @@ input[type="checkbox"] {
 
 .step4-copy-all-bar .step4-copy-btn {
   white-space: nowrap;
+}
+
+.step4-copy-all-bar .step4-home-btn {
+  margin-left: auto;
 }
 
 .step4-copy-all-feedback {
