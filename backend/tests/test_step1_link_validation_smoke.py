@@ -539,3 +539,28 @@ def test_verify_rejects_redirect_to_homepage(monkeypatch):
     ds.DigestService._verify_llm_candidate_dict(svc, _digest(), item)
     assert "REJECT_REASON:url_redirect_mismatch" in str(item.get("verification_comment") or "")
     assert item.get("headline_editorial_ok") is not True
+
+
+def test_choose_coherent_headline_prefers_longer_h1_over_truncated_og():
+    short = "Система управления ИИ-агентами на основе протокола тушения п"
+    long = (
+        "Система управления ИИ-агентами на основе протокола тушения пожаров: "
+        "как ICS решает проблему ложных готовностей LLM"
+    )
+    url = "https://ai-manual.ru/article/example/"
+    headline, source, _strict = ds._choose_coherent_headline(
+        url,
+        short,
+        url,
+        None,
+        [],
+        long,
+        short,
+    )
+    assert headline == long
+    assert source == "h1_fallback"
+
+
+def test_title_looks_truncated_detects_mid_word_cut():
+    assert ds._title_looks_truncated("Как Google Search помогает организовать идеальный ужин: AI-и")
+    assert not ds._title_looks_truncated("OpenAI выпустила обновление API для разработчиков.")

@@ -20,6 +20,7 @@ from app.services.platform_assembly import (
     needs_html_layout_refresh,
     subscription_html_inline,
     subscription_md_inline,
+    truncate_platform_html,
 )
 
 
@@ -179,3 +180,19 @@ def test_extract_lead_from_legacy_platform_text():
     lead = extract_lead_from_legacy_platform_text(legacy)
     assert lead.startswith("Коротко:")
     assert "➤" not in lead
+
+
+def test_truncate_platform_html_preserves_full_link_title():
+    title = (
+        "Искусственный интеллект пишет уже половину нашего кода, "
+        "но при этом в 44% случаев он не проходит тесты безопасности"
+    )
+    summary = "Подробный текст новости. " * 120
+    block = f'➤ <a href="https://example.com/a">{title}</a><br><br>{summary}'
+    text = (
+        f"<b>⚡Пять актуальных новостей про ИИ | 16 мая 2026</b><br><br>"
+        f"Короткий лид.<br><br>{block}<br><br>{subscription_html_inline()}<br><br>#ИИ"
+    )
+    out = truncate_platform_html(text, 900)
+    assert title in out
+    assert len(out) <= 900

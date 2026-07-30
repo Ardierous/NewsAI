@@ -21,6 +21,8 @@ DEFAULT_LEAD_CURIOUS = (
 )
 DEFAULT_LEAD = DEFAULT_LEAD_SERIOUS
 
+MAX_CHANNEL_URL = "https://max.ru/channel_extellect"
+
 _MONTHS_RU = (
     "января",
     "февраля",
@@ -115,7 +117,7 @@ def subscription_md_inline() -> str:
     return (
         "👉 Подпишитесь на ExTellect: [Telegram](https://t.me/extellect) • "
         "[ВКонтакте](https://vk.com/extellect) • "
-        "[MAX](https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY) • "
+        f"[MAX]({MAX_CHANNEL_URL}) • "
         "[Дзен](https://dzen.ru/extellect) • [Boosty](https://boosty.to/extellect)"
     )
 
@@ -126,7 +128,7 @@ def subscription_html_inline() -> str:
         "👉 Подпишитесь на ExTellect: "
         '<a href="https://t.me/extellect">Telegram</a> • '
         '<a href="https://vk.com/extellect">ВКонтакте</a> • '
-        '<a href="https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY">MAX</a> • '
+        f'<a href="{MAX_CHANNEL_URL}">MAX</a> • '
         '<a href="https://dzen.ru/extellect">Дзен</a> • '
         '<a href="https://boosty.to/extellect">Boosty</a>'
     )
@@ -138,7 +140,7 @@ def subscription_md_block() -> str:
         "👉 Подпишитесь на ExTellect:\n"
         "[Telegram](https://t.me/extellect)\n"
         "[ВКонтакте](https://vk.com/extellect)\n"
-        "[MAX](https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY)\n"
+        f"[MAX]({MAX_CHANNEL_URL})\n"
         "[Дзен](https://dzen.ru/extellect)\n"
         "[Boosty](https://boosty.to/extellect)"
     )
@@ -149,7 +151,7 @@ def subscription_vk_block() -> str:
         "👉 Подпишитесь на ExTellect:\n"
         "Telegram: https://t.me/extellect\n"
         "ВКонтакте: https://vk.com/extellect\n"
-        "MAX: https://max.ru/join/fu6Q3ibyBe8ONaZEg5J_3md_GXpZbJ5WlNKBOzeg4rY\n"
+        f"MAX: {MAX_CHANNEL_URL}\n"
         "Дзен: https://dzen.ru/extellect\n"
         "Boosty: https://boosty.to/extellect"
     )
@@ -282,6 +284,60 @@ def _truncate_at_word(text: str, max_len: int) -> str:
     return cut + "…"
 
 
+def _split_platform_html_footer(text: str) -> tuple[str, str]:
+    sub = subscription_html_inline()
+    idx = text.find(sub)
+    if idx < 0:
+        return text, ""
+    start = text.rfind("<br><br>", 0, idx)
+    if start < 0:
+        return text, ""
+    return text[:start], text[start:]
+
+
+def _shrink_html_news_summaries(body: str, max_len: int) -> str:
+    """Укорачивает текст после заголовка-ссылки, сами заголовки не трогаем."""
+    if len(body) <= max_len:
+        return body
+    blocks = re.split(rf"(<br><br>{re.escape(MAX_NEWS_SEP)}<br><br>)", body)
+    if len(blocks) <= 1:
+        blocks = [body]
+    news_parts: list[str] = []
+    seps: list[str] = []
+    for i, part in enumerate(blocks):
+        if i % 2 == 1:
+            seps.append(part)
+        else:
+            news_parts.append(part)
+    for idx in range(len(news_parts) - 1, -1, -1):
+        part = news_parts[idx]
+        m = re.match(
+            r"(?s)(.*?➤ <a href=\"[^\"]+\">)([^<]+)(</a><br><br>)(.*)$",
+            part,
+        )
+        if not m:
+            continue
+        prefix, _title, mid, summary = m.groups()
+        if not summary.strip():
+            continue
+        while len("".join(news_parts[:idx]) + "".join(seps[:idx]) + prefix + _title + mid + summary) > max_len and len(summary) > 40:
+            summary = _truncate_at_word(summary, max(40, len(summary) - 48))
+        news_parts[idx] = prefix + _title + mid + summary
+        rebuilt = ""
+        for j, news in enumerate(news_parts):
+            rebuilt += news
+            if j < len(seps):
+                rebuilt += seps[j]
+        if len(rebuilt) <= max_len:
+            return rebuilt
+    rebuilt = ""
+    for j, news in enumerate(news_parts):
+        rebuilt += news
+        if j < len(seps):
+            rebuilt += seps[j]
+    return rebuilt
+
+
 def truncate_platform_text(text: str, max_chars: int, *, tail_marker: str = "…") -> str:
     if len(text) <= max_chars:
         return text
@@ -289,23 +345,48 @@ def truncate_platform_text(text: str, max_chars: int, *, tail_marker: str = "…
     if cut < 100:
         return text[:max_chars]
     chunk = text[:cut]
+    last_news = chunk.rfind("\n➤ [")
     last_break = chunk.rfind("\n\n")
-    if last_break > cut // 2:
-        chunk = chunk[:last_break]
+    safe = max(last_news, last_break)
+    if safe > cut // 2:
+        chunk = chunk[:safe]
+    elif last_news > 0:
+        line_end = chunk.find("\n", last_news + 1)
+        if line_end > last_news:
+            chunk = chunk[:line_end]
     return chunk.rstrip() + tail_marker
 
 
 def truncate_platform_html(text: str, max_chars: int, *, tail_marker: str = "…") -> str:
     if len(text) <= max_chars:
         return text
-    cut = max_chars - len(tail_marker)
-    if cut < 100:
+    body, footer = _split_platform_html_footer(text)
+    budget = max_chars - len(tail_marker) - len(footer)
+    if budget < 100:
         return text[:max_chars]
-    chunk = text[:cut]
-    last_break = chunk.rfind("<br><br>")
-    if last_break > cut // 2:
-        chunk = chunk[:last_break]
-    return chunk.rstrip() + tail_marker
+    if len(body) <= budget:
+        return body + footer
+    chunk = body[:budget]
+    sep = f"<br><br>{MAX_NEWS_SEP}<br><br>"
+    while sep in chunk:
+        last_sep = chunk.rfind(sep)
+        if last_sep <= budget // 3:
+            break
+        chunk = chunk[:last_sep]
+        if len(chunk) + len(footer) <= max_chars - len(tail_marker):
+            return chunk.rstrip() + footer
+    last_link = chunk.rfind("</a><br><br>")
+    if last_link > budget // 2:
+        chunk = chunk[: last_link + len("</a>")]
+        if len(chunk) + len(footer) <= max_chars - len(tail_marker):
+            return chunk + footer
+    shrunk = _shrink_html_news_summaries(body, budget)
+    if len(shrunk) + len(footer) <= max_chars - len(tail_marker):
+        return shrunk + footer
+    if last_link > 0:
+        chunk = shrunk[: shrunk.rfind("</a>") + len("</a>")]
+        return chunk.rstrip() + tail_marker + footer
+    return shrunk[:budget].rstrip() + tail_marker + footer
 
 
 def _dzen_post_news_block(item: dict[str, Any], *, max_body_chars: int) -> str:

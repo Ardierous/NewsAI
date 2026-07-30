@@ -1184,6 +1184,48 @@ def _pick_display_url(final_url: str, canonical: str | None, og_url: str | None)
     return final_url.split("#")[0]
 
 
+def _headline_extends(longer: str, shorter: str) -> bool:
+    """Длинный заголовок — полная версия укороченного meta/og (обрыв на полуслове)."""
+    if len(longer) <= len(shorter) + 4:
+        return False
+    l = longer.strip().lower()
+    s = shorter.strip().lower()
+    if l.startswith(s):
+        return True
+    if " " in s:
+        s_prefix = s.rsplit(" ", 1)[0]
+        if len(s_prefix) >= 20 and l.startswith(s_prefix):
+            return True
+    return False
+
+
+def _pick_best_headline_candidate(candidates: list[tuple[str, str, bool]]) -> tuple[str, str, bool]:
+    """Из кандидатов выбираем самый полный заголовок, не обрезанный meta-тегом."""
+    if not candidates:
+        raise ValueError("empty candidates")
+    seen: set[str] = set()
+    uniq: list[tuple[str, str, bool]] = []
+    for headline, source, strict in candidates:
+        key = headline.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append((headline, source, strict))
+    strict = [c for c in uniq if c[2]]
+    seed = max(strict, key=lambda c: len(c[0])) if strict else max(uniq, key=lambda c: len(c[0]))
+    best = seed
+    for cand in uniq:
+        if len(cand[0]) <= len(best[0]):
+            continue
+        if (
+            _headline_extends(cand[0], best[0])
+            or _headline_extends(best[0], cand[0])
+            or _titles_are_near_duplicates(best[0], cand[0])
+        ):
+            best = cand
+    return best
+
+
 def _choose_coherent_headline(
     final_url: str,
     og_title: str | None,
@@ -1195,39 +1237,35 @@ def _choose_coherent_headline(
 ) -> tuple[str | None, str, bool]:
     """Возвращает (headline, source, strict_match). strict_match=True только для сильного URL-согласования."""
     fp = _url_fingerprint(final_url)
+    candidates: list[tuple[str, str, bool]] = []
 
     def polish(t: str) -> str | None:
         s = _strip_site_branding(_clean_headline_text(t))
         return s[:480] if len(s) >= 8 else None
+
+    def add(raw: str | None, source: str, strict: bool) -> None:
+        if not raw:
+            return
+        got = polish(raw)
+        if got:
+            candidates.append((got, source, strict))
 
     for h, u in ld_pairs:
         if not u:
             continue
         u2 = u.split("#")[0]
         if _url_fingerprint(u2) == fp:
-            got = polish(h)
-            if got:
-                return got, "ld_url_match", True
+            add(h, "ld_url_match", True)
 
     if og_title and og_url:
         ou = og_url.split("#")[0]
         if _url_fingerprint(ou) == fp:
-            got = polish(og_title)
-            if got:
-                return got, "og_url_match", True
-            if twitter_title:
-                got2 = polish(twitter_title)
-                if got2:
-                    return got2, "twitter_url_match", True
+            add(og_title, "og_url_match", True)
+            add(twitter_title, "twitter_url_match", True)
     elif og_title and not og_url:
-        got = polish(og_title)
-        if got:
-            return got, "og_title_no_ogurl", False
+        add(og_title, "og_title_no_ogurl", False)
 
-    if h1:
-        got = polish(h1)
-        if got:
-            return got, "h1_fallback", False
+    add(h1, "h1_fallback", False)
 
     try:
         host = (urlparse(final_url).hostname or "").lower().removeprefix("www.")
@@ -1238,23 +1276,51 @@ def _choose_coherent_headline(
             continue
         uh = (urlparse(u).hostname or "").lower().removeprefix("www.")
         if host and uh == host:
-            got = polish(h)
-            if got:
-                return got, "ld_same_host_fallback", False
+            add(h, "ld_same_host_fallback", False)
 
     for h, _u in ld_pairs:
-        got = polish(h)
-        if got:
-            return got, "ld_any_fallback", False
+        add(h, "ld_any_fallback", False)
 
-    if html_title:
-        got = polish(html_title)
-        if got:
-            return got, "html_title_fallback", False
-    return None, "none", False
+    add(html_title, "html_title_fallback", False)
+
+    if not candidates:
+        return None, "none", False
+    headline, source, strict = _pick_best_headline_candidate(candidates)
+    return headline, source, strict
 
 
-def _rough_visible_text_from_html(chunk: str, limit: int = 4500) -> str:
+def _title_looks_truncated(title: str) -> bool:
+    """Эвристика: заголовок оборван meta-тегом или лимитом CMS (часто ~60 символов)."""
+    t = (title or "").strip()
+    if len(t) < 40:
+        return False
+    if t.endswith(("…", "...")):
+        return True
+    if re.search(r"-\w{1,2}$", t):
+        return True
+    if re.search(r"[\wа-яё]$", t, re.IGNORECASE) and not re.search(r"[.!?»\"')\]:]$", t):
+        tail = t.rsplit(" ", 1)[-1]
+        if len(tail) <= 2:
+            return True
+    return False
+
+
+def _refresh_truncated_candidate_title(url: str, title: str) -> str | None:
+    """Подтягивает полный заголовок со страницы, если сохранённый выглядит обрезанным."""
+    stored = str(title or "").strip()
+    if not stored or not _title_looks_truncated(stored) or not url.startswith("http"):
+        return None
+    try:
+        bundle = _fetch_article_page_bundle(url)
+    except Exception:
+        return None
+    headline = str(bundle.get("headline") or "").strip()
+    if len(headline) <= len(stored) + 4:
+        return None
+    if not (_headline_extends(headline, stored) or _titles_are_near_duplicates(stored, headline)):
+        return None
+    return headline[:500]
+
     """Грубое снятие текста со страницы для тематической эвристики (без BeautifulSoup)."""
     t = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", chunk)
     t = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", t)
@@ -6742,9 +6808,13 @@ class DigestService:
                 essence=essence,
                 analysis=analysis,
             )
+            title = str(candidate.title or "").strip()
+            refreshed = _refresh_truncated_candidate_title(str(candidate.url or ""), title)
+            if refreshed:
+                title = self._ensure_russian_candidate_title(digest.id, str(candidate.url or ""), refreshed)[:500]
             selected_payload.append(
                 {
-                    "title": candidate.title,
+                    "title": title,
                     "url": candidate.url,
                     "source": candidate.source,
                     "essence": essence,
