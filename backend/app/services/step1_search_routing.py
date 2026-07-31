@@ -12,8 +12,9 @@ from dataclasses import dataclass
 from typing import Literal
 
 from app.services.digest_type_policy import is_curious_digest
+from app.services.digest_topic_policy import is_style_digest
 
-SearchRoute = Literal["curious_hosts", "serious_tier", "legacy_open", "query_override"]
+SearchRoute = Literal["curious_hosts", "serious_tier", "style_tier", "legacy_open", "query_override"]
 
 
 @dataclass(frozen=True)
@@ -25,7 +26,7 @@ class Step1SearchRouting:
 
     @property
     def uses_source_tiers(self) -> bool:
-        return self.route == "serious_tier"
+        return self.route in {"serious_tier", "style_tier"}
 
     @property
     def uses_curious_hosts(self) -> bool:
@@ -35,6 +36,7 @@ class Step1SearchRouting:
 def resolve_step1_search_routing(
     digest_type: str | None,
     *,
+    digest_topic: str | None = None,
     query_override: str | None,
     tier_strict_setting: bool,
     curious_use_serious_tiers: bool = False,
@@ -42,11 +44,19 @@ def resolve_step1_search_routing(
     """
     Выбор контура поиска и prefilter для одного батча шага 1.
 
+    - style → source_tiers_style.txt (tier_strict)
     - curious + curious_use_serious_tiers → source_tiers (как serious), фильтр тона curious на verify
     - curious без флага → curious_source_hosts.txt, curious_strict prefilter
     - serious + tier_strict → source_tiers.txt
     - иначе → legacy open query
     """
+    if is_style_digest(digest_topic):
+        return Step1SearchRouting(
+            route="style_tier",
+            tier_strict=True,
+            curious_strict=False,
+            curious_verify=False,
+        )
     curious = is_curious_digest(digest_type)
     if query_override is not None:
         return Step1SearchRouting(

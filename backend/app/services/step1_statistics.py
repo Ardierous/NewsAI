@@ -33,6 +33,7 @@ REJECT_REASON_LABELS_RU: dict[str, str] = {
     "news_listing_page": "это лента или рубрика, а не статья",
     "non_article_page": "нет нормального заголовка материала",
     "off_topic_not_ai": "тема не про ИИ и нейросети",
+    "off_topic_not_style": "тема не про моду и стиль",
     "support_documentation_page": "справка или документация, не статья",
     "off_topic_not_curious": "сухой официоз для курьёзного выпуска",
     "excluded_from_final_pool": "прошла проверку, но не вошла в финальный список",

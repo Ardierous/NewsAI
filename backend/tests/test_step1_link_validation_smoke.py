@@ -564,3 +564,11 @@ def test_choose_coherent_headline_prefers_longer_h1_over_truncated_og():
 def test_title_looks_truncated_detects_mid_word_cut():
     assert ds._title_looks_truncated("Как Google Search помогает организовать идеальный ужин: AI-и")
     assert not ds._title_looks_truncated("OpenAI выпустила обновление API для разработчиков.")
+
+
+def test_mass_http_unreachable_connectivity_hint():
+    hint = ds._mass_http_unreachable_connectivity_hint({"http_unreachable": 66, "news_listing_page": 10})
+    assert "связ" in hint.lower()
+    assert "повторный запуск" in hint.lower()
+    assert ds._mass_http_unreachable_connectivity_hint({"http_unreachable": 2}) == ""
+    assert ds._mass_http_unreachable_connectivity_hint({"published_before_window": 20}) == ""

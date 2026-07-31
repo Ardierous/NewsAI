@@ -15,6 +15,7 @@ from app.services.digest_type_policy import (
     step1_research_editorial_block,
     step1_scoring_editorial_block,
 )
+from app.services.digest_topic_policy import is_style_digest, step2_order_system_prompt_for_topic
 from app.services.platform_assembly import assemble_platform_outputs, subscription_md_inline
 from app.services.reader_copy import build_reader_text_fallback, sanitize_reader_description
 
@@ -431,9 +432,16 @@ class CrewWorkflow:
             "overall_rationale": overall_rationale,
         }
 
-    def run_analytics(self, selected_news: list[dict[str, Any]]) -> dict[str, Any]:
+    def run_analytics(
+        self,
+        selected_news: list[dict[str, Any]],
+        *,
+        digest_topic: str = "ai",
+    ) -> dict[str, Any]:
+        topic_label = "мода и стиль" if is_style_digest(digest_topic) else "искусственный интеллект"
         task = Task(
             description=self._with_contract(
+                f"Тематика выпуска: {topic_label}. "
                 "Сформируй JSON: items[], overall_analysis, hashtags[], self_check[]. "
                 f"{_ANALYTICS_EDITORIAL} Вход: {json.dumps(selected_news, ensure_ascii=False)}"
             ),

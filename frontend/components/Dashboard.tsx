@@ -15,6 +15,7 @@ type DigestTop5Item = {
 type DigestListRow = {
   id: number;
   date: string;
+  digest_topic?: "ai" | "style" | string;
   status: string;
   status_label_ru: string;
   summary_title: string;
@@ -30,6 +31,10 @@ function formatDigestDateLabel(iso: string): string {
   const dt = new Date(y, m - 1, day);
   if (Number.isNaN(dt.getTime())) return iso;
   return dt.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+}
+
+function digestTopicLabelRu(topic: string | undefined): string {
+  return topic === "style" ? "Стиль" : "ИИ";
 }
 
 function todayIsoMsk(): string {
@@ -48,14 +53,13 @@ function splitDigestsForDashboard(rows: DigestListRow[]): {
     return { visible: [], archive: [] };
   }
   const today = todayIsoMsk();
-  const todayDigest = rows.find((d) => digestDateIso(d.date) === today);
+  const todayDigests = rows.filter((d) => digestDateIso(d.date) === today);
   const others = rows.filter((d) => digestDateIso(d.date) !== today);
   const visible: DigestListRow[] = [];
-  if (todayDigest) {
-    visible.push(todayDigest);
-  }
+  visible.push(...todayDigests);
   for (const d of others) {
-    if (visible.length >= 2) break;
+    if (todayDigests.length > 0 && visible.length >= todayDigests.length + 1) break;
+    if (todayDigests.length === 0 && visible.length >= 2) break;
     visible.push(d);
   }
   if (visible.length === 0) {
@@ -71,9 +75,13 @@ function splitDigestsForDashboard(rows: DigestListRow[]): {
 function DigestCard({ d }: { d: DigestListRow }) {
   return (
     <div className="card">
-      <div style={{ fontSize: "0.88rem", color: "#94a3b8", marginBottom: 6 }}>{formatDigestDateLabel(d.date)}</div>
+      <div style={{ fontSize: "0.88rem", color: "#94a3b8", marginBottom: 6 }}>
+        {formatDigestDateLabel(d.date)}
+        {" · "}
+        <strong style={{ color: "#cbd5e1", fontWeight: 600 }}>{digestTopicLabelRu(d.digest_topic)}</strong>
+      </div>
       <h3 style={{ margin: "0 0 10px", fontSize: "1.12rem", lineHeight: 1.4, fontWeight: 600, color: "#f1f5f9" }}>
-        {d.summary_title || `Выпуск ${formatDigestDateLabel(d.date)}`}
+        {d.summary_title || `Выпуск ${formatDigestDateLabel(d.date)} · ${digestTopicLabelRu(d.digest_topic)}`}
       </h3>
       <p className="wizard-hint-do" style={{ fontSize: "0.95rem", margin: "0 0 6px" }}>
         Статус: <strong>{d.status_label_ru || d.status}</strong>

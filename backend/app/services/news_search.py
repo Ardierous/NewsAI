@@ -69,6 +69,10 @@ _LISTING_PATH_EXACT = frozenset(
         "/latest",
         "/top",
         "/line",
+        "/fashion",
+        "/fashion/trends",
+        "/fashion/things",
+        "/trends",
     }
 )
 _LISTING_PATH_SUFFIX_RE = re.compile(
@@ -152,6 +156,24 @@ _URL_PATH_DATE_EMBEDDED_ISO_RE = re.compile(
     r"(?:^|[/_\-.])(\d{4})-(\d{1,2})-(\d{1,2})(?:[/_\-.]|\.html?|$)",
     re.IGNORECASE,
 )
+_URL_PATH_DATE_DMON_YYYY_RE = re.compile(
+    r"(?:^|/)(\d{1,2})-(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*-(\d{4})(?:[/_\-.]|\.html?|$)",
+    re.IGNORECASE,
+)
+_URL_PATH_MON_NAME_TO_NUM = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
 _URL_PATH_MIN_YEAR = 2010
 _URL_PATH_MAX_YEAR = 2032
 
@@ -225,6 +247,14 @@ def url_path_publication_day(url: str) -> date | None:
         got = _url_path_disambiguate_day_month(int(m.group(1)), int(m.group(2)), int(m.group(3)))
         if got:
             return got
+
+    m = _URL_PATH_DATE_DMON_YYYY_RE.search(path)
+    if m:
+        mon = _URL_PATH_MON_NAME_TO_NUM.get(m.group(2).lower()[:3])
+        if mon:
+            got = _url_path_plausible_ymd(int(m.group(3)), mon, int(m.group(1)))
+            if got:
+                return got
 
     return None
 _EDITORIAL_DATED_STORY_RE = re.compile(

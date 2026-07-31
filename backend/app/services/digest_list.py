@@ -36,9 +36,14 @@ def _format_digest_date_label(raw: date | datetime) -> str:
     return d.strftime("%d.%m.%Y")
 
 
+def _topic_label_ru(digest_topic: str | None) -> str:
+    return "Стиль" if str(digest_topic or "").strip().lower() == "style" else "ИИ"
+
+
 def _fallback_summary_title(digest: Digest) -> str:
     type_ru = "деловой" if (digest.digest_type or "serious") == "serious" else "курьёзный"
-    return f"Дайджест за {_format_digest_date_label(digest.date)} ({type_ru} тон)"
+    topic_ru = _topic_label_ru(getattr(digest, "digest_topic", None))
+    return f"Дайджест за {_format_digest_date_label(digest.date)} · {topic_ru} ({type_ru} тон)"
 
 
 def build_digest_list_payload(db: Session, digests: list[Digest]) -> list[dict]:
@@ -83,8 +88,10 @@ def build_digest_list_payload(db: Session, digests: list[Digest]) -> list[dict]:
     live_budget_used: float | None = None
 
     cost_by_digest_id: dict[int, float] = {}
-    prev_anchor_balance: float | None = None
+    prev_anchor_balance_by_topic: dict[str, float | None] = {}
     for digest in sorted(digests, key=lambda item: item.id):
+        topic = str(getattr(digest, "digest_topic", None) or "ai").strip().lower() or "ai"
+        prev_anchor_balance = prev_anchor_balance_by_topic.get(topic)
         session_spent = digest_proxyapi_spent_rub(
             digest,
             live_balance=live_balance,
@@ -103,11 +110,11 @@ def build_digest_list_payload(db: Session, digests: list[Digest]) -> list[dict]:
             finalized_cost_rub=digest.proxyapi_finalized_cost_rub,
         )
         if digest.proxyapi_balance_after is not None:
-            prev_anchor_balance = float(digest.proxyapi_balance_after)
+            prev_anchor_balance_by_topic[topic] = float(digest.proxyapi_balance_after)
         elif session_spent is not None and prev_anchor_balance is not None:
-            prev_anchor_balance = float(prev_anchor_balance) - float(session_spent)
+            prev_anchor_balance_by_topic[topic] = float(prev_anchor_balance) - float(session_spent)
         elif digest.proxyapi_balance_session_start is not None and live_balance is not None:
-            prev_anchor_balance = float(live_balance)
+            prev_anchor_balance_by_topic[topic] = float(live_balance)
 
     out: list[dict] = []
     for digest in digests:
@@ -118,6 +125,7 @@ def build_digest_list_payload(db: Session, digests: list[Digest]) -> list[dict]:
                 "id": digest.id,
                 "date": digest.date,
                 "digest_type": digest.digest_type,
+                "digest_topic": getattr(digest, "digest_topic", None) or "ai",
                 "digest_type_via_default": bool(digest.digest_type_via_default),
                 "news_window_days": digest.news_window_days,
                 "news_window_day_kind": digest.news_window_day_kind,

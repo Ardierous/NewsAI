@@ -18,6 +18,7 @@ class DigestItem(BaseModel):
     id: int
     date: date
     digest_type: str | None
+    digest_topic: Literal["ai", "style"] = "ai"
     digest_type_via_default: bool = False
     news_window_days: int = 3
     news_window_day_kind: Literal["calendar", "working"] = "working"
@@ -50,8 +51,13 @@ def _step0_news_window_day_kind_default() -> Literal["calendar", "working"]:
     return get_digest_defaults().step0.news_window_day_kind_default
 
 
+def _step0_digest_topic_default() -> Literal["ai", "style"]:
+    return get_digest_defaults().step0.digest_topic_default
+
+
 class Step0Request(BaseModel):
     digest_type: Literal["serious", "curious"] | None = None
+    digest_topic: Literal["ai", "style"] | None = None
     news_window_days: int = Field(default_factory=_step0_news_window_days_default, ge=1, le=90)
     news_window_day_kind: Literal["calendar", "working"] = Field(
         default_factory=_step0_news_window_day_kind_default
@@ -69,7 +75,9 @@ class FinalizeReleaseResponse(BaseModel):
 class Step0Response(BaseModel):
     digest_id: int
     digest_type: str
+    digest_topic: Literal["ai", "style"]
     default_applied: bool
+    topic_default_applied: bool = False
     news_window_days: int
     news_window_day_kind: Literal["calendar", "working"]
 
@@ -137,7 +145,14 @@ class Step1FiltersResponse(BaseModel):
 
 class Step1DiscoveredFeedbackRequest(BaseModel):
     score: int = Field(ge=1, le=3)
-    reason: Literal["published_out_of_range", "http_unreachable", "url_redirect_mismatch", "off_topic_not_ai", "other"] | None = None
+    reason: Literal[
+        "published_out_of_range",
+        "http_unreachable",
+        "url_redirect_mismatch",
+        "off_topic_not_ai",
+        "off_topic_not_style",
+        "other",
+    ] | None = None
     reason_other: str | None = None
 
 

@@ -133,6 +133,7 @@ export const api = {
     id: number,
     opts?: {
       digest_type?: "serious" | "curious";
+      digest_topic?: "ai" | "style";
       news_window_days?: number;
       news_window_day_kind?: "calendar" | "working";
     },
@@ -141,6 +142,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({
         digest_type: opts?.digest_type,
+        digest_topic: opts?.digest_topic,
         news_window_days: opts?.news_window_days ?? 3,
         news_window_day_kind: opts?.news_window_day_kind ?? "working",
       }),

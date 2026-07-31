@@ -14,6 +14,7 @@ _DEFAULTS_PATH = Path(__file__).resolve().parent / "digest_defaults.json"
 @dataclass(frozen=True)
 class Step0Defaults:
     digest_type_default: Literal["serious", "curious"] = "serious"
+    digest_topic_default: Literal["ai", "style"] = "ai"
     news_window_days_default: int = 3
     news_window_day_kind_default: Literal["calendar", "working"] = "working"
 
@@ -31,8 +32,12 @@ def _coerce_step0(raw: dict[str, Any]) -> Step0Defaults:
     if kind not in {"calendar", "working"}:
         kind = "working"
     days = max(1, min(90, int(raw.get("news_window_days_default") or 3)))
+    topic = str(raw.get("digest_topic_default") or "ai").strip().lower()
+    if topic not in {"ai", "style"}:
+        topic = "ai"
     return Step0Defaults(
         digest_type_default=dtype,  # type: ignore[arg-type]
+        digest_topic_default=topic,  # type: ignore[arg-type]
         news_window_days_default=days,
         news_window_day_kind_default=kind,  # type: ignore[arg-type]
     )

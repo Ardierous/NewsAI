@@ -78,9 +78,9 @@ def _cached_policy(path_str: str, mtime_ns: int) -> SourceTiersPolicy:
 
 def get_source_tiers_policy(path: Path | None = None) -> SourceTiersPolicy:
     if path is None:
-        from app.config import get_settings
+        from app.services.digest_topic_policy import resolve_source_tiers_path
 
-        path = get_settings().source_tiers_path
+        path = resolve_source_tiers_path()
     try:
         mtime_ns = path.stat().st_mtime_ns
     except OSError:

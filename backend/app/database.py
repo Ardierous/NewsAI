@@ -68,6 +68,11 @@ def ensure_digest_schema_migrations() -> None:
             if "digest_type_via_default" not in names:
                 conn.execute(text("ALTER TABLE digests ADD COLUMN digest_type_via_default INTEGER NOT NULL DEFAULT 0"))
                 conn.commit()
+            rows = conn.execute(text("PRAGMA table_info(digests)")).fetchall()
+            names = {row[1] for row in rows}
+            if "digest_topic" not in names:
+                conn.execute(text("ALTER TABLE digests ADD COLUMN digest_topic VARCHAR(16) NOT NULL DEFAULT 'ai'"))
+                conn.commit()
             rows_nc = conn.execute(text("PRAGMA table_info(news_candidates)")).fetchall()
             nc_names = {row[1] for row in rows_nc}
             if nc_names and "page_verified" not in nc_names:
@@ -145,6 +150,84 @@ def ensure_digest_schema_migrations() -> None:
                     names.add(col)
             if "proxyapi_finalized_at" not in names:
                 conn.execute(text("ALTER TABLE digests ADD COLUMN proxyapi_finalized_at DATETIME"))
+                conn.commit()
+            # Миграция уникальности: один день может иметь два выпуска (ai/style).
+            # Было: UNIQUE(date). Нужно: UNIQUE(date, digest_topic).
+            idx_rows = conn.execute(text("PRAGMA index_list(digests)")).fetchall()
+            has_unique_date_only = False
+            has_unique_date_topic = False
+            for idx_row in idx_rows:
+                idx_name = str(idx_row[1])
+                is_unique = int(idx_row[2]) == 1
+                idx_cols = [str(x[2]) for x in conn.execute(text(f"PRAGMA index_info('{idx_name}')")).fetchall()]
+                if is_unique and idx_cols == ["date"]:
+                    has_unique_date_only = True
+                if is_unique and idx_cols == ["date", "digest_topic"]:
+                    has_unique_date_topic = True
+            if has_unique_date_only or not has_unique_date_topic:
+                conn.execute(text("PRAGMA foreign_keys=OFF"))
+                conn.execute(text("DROP TABLE IF EXISTS digests__new"))
+                conn.execute(
+                    text(
+                        """
+                        CREATE TABLE digests__new (
+                            id INTEGER PRIMARY KEY,
+                            date DATE NOT NULL,
+                            digest_type VARCHAR(32),
+                            digest_topic VARCHAR(16) NOT NULL DEFAULT 'ai',
+                            digest_type_via_default INTEGER NOT NULL DEFAULT 0,
+                            status VARCHAR(40) NOT NULL DEFAULT 'draft',
+                            current_step VARCHAR(40) NOT NULL DEFAULT 'draft',
+                            created_at DATETIME,
+                            updated_at DATETIME,
+                            step1_budget_capped INTEGER NOT NULL DEFAULT 0,
+                            step2_budget_capped INTEGER NOT NULL DEFAULT 0,
+                            news_window_days INTEGER NOT NULL DEFAULT 3,
+                            news_window_day_kind VARCHAR(16) NOT NULL DEFAULT 'working',
+                            step4_selected_image_variant INTEGER,
+                            proxyapi_balance_session_start REAL,
+                            proxyapi_budget_used_session_start REAL,
+                            proxyapi_balance_before REAL,
+                            proxyapi_balance_after REAL,
+                            proxyapi_budget_used_before REAL,
+                            proxyapi_budget_used_after REAL,
+                            proxyapi_release_open_balance REAL,
+                            proxyapi_release_open_budget_used REAL,
+                            proxyapi_finalized_cost_rub REAL,
+                            proxyapi_finalized_at DATETIME
+                        )
+                        """
+                    )
+                )
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO digests__new (
+                            id, date, digest_type, digest_topic, digest_type_via_default, status, current_step,
+                            created_at, updated_at, step1_budget_capped, step2_budget_capped, news_window_days,
+                            news_window_day_kind, step4_selected_image_variant, proxyapi_balance_session_start,
+                            proxyapi_budget_used_session_start, proxyapi_balance_before, proxyapi_balance_after,
+                            proxyapi_budget_used_before, proxyapi_budget_used_after, proxyapi_release_open_balance,
+                            proxyapi_release_open_budget_used, proxyapi_finalized_cost_rub, proxyapi_finalized_at
+                        )
+                        SELECT
+                            id, date, digest_type, COALESCE(digest_topic, 'ai'), COALESCE(digest_type_via_default, 0),
+                            status, current_step, created_at, updated_at, COALESCE(step1_budget_capped, 0),
+                            COALESCE(step2_budget_capped, 0), COALESCE(news_window_days, 3),
+                            COALESCE(news_window_day_kind, 'working'), step4_selected_image_variant,
+                            proxyapi_balance_session_start, proxyapi_budget_used_session_start, proxyapi_balance_before,
+                            proxyapi_balance_after, proxyapi_budget_used_before, proxyapi_budget_used_after,
+                            proxyapi_release_open_balance, proxyapi_release_open_budget_used, proxyapi_finalized_cost_rub,
+                            proxyapi_finalized_at
+                        FROM digests
+                        """
+                    )
+                )
+                conn.execute(text("DROP TABLE digests"))
+                conn.execute(text("ALTER TABLE digests__new RENAME TO digests"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_digests_date ON digests (date)"))
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_digests_date_topic ON digests (date, digest_topic)"))
+                conn.execute(text("PRAGMA foreign_keys=ON"))
                 conn.commit()
             if "proxyapi_spend_days" not in {
                 r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
@@ -352,6 +435,41 @@ def ensure_digest_schema_migrations() -> None:
                     "ALTER TABLE digests ADD COLUMN digest_type_via_default BOOLEAN NOT NULL DEFAULT false"
                 )
             )
+    cols = {c["name"] for c in insp.get_columns("digests")}
+    if "digest_topic" not in cols:
+        with engine.begin() as conn:
+            conn.execute(
+                text("ALTER TABLE digests ADD COLUMN digest_topic VARCHAR(16) NOT NULL DEFAULT 'ai'")
+            )
+    # Миграция уникальности: вместо UNIQUE(date) использовать UNIQUE(date, digest_topic).
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                DO $$
+                DECLARE v_name text;
+                BEGIN
+                    SELECT c.conname
+                    INTO v_name
+                    FROM pg_constraint c
+                    JOIN pg_class t ON t.oid = c.conrelid
+                    WHERE t.relname = 'digests'
+                      AND c.contype = 'u'
+                      AND pg_get_constraintdef(c.oid) ILIKE '%(date)%'
+                      AND pg_get_constraintdef(c.oid) NOT ILIKE '%digest_topic%';
+                    IF v_name IS NOT NULL THEN
+                        EXECUTE format('ALTER TABLE digests DROP CONSTRAINT %I', v_name);
+                    END IF;
+                END$$;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_digests_date_topic "
+                "ON digests (date, digest_topic)"
+            )
+        )
     if insp.has_table("news_candidates"):
         nc_cols = {c["name"] for c in insp.get_columns("news_candidates")}
         if "page_verified" not in nc_cols:

@@ -196,3 +196,26 @@ def test_truncate_platform_html_preserves_full_link_title():
     out = truncate_platform_html(text, 900)
     assert title in out
     assert len(out) <= 900
+
+
+def test_style_topic_outputs_without_subscription_signature():
+    payload = {**_sample_payload(), "digest_topic": "style"}
+    tg = assemble_telegram(payload)
+    vk = assemble_vk(payload)
+    max_text = assemble_max(payload)
+    dzen = assemble_dzen(payload)
+
+    assert "Подпишитесь на ExTellect" not in tg
+    assert "Подпишитесь на ExTellect" not in vk
+    assert "Подпишитесь на ExTellect" not in max_text
+    assert "Подпишитесь на ExTellect" not in dzen
+    assert "#ИИ" in tg
+    assert "#ИИ" in vk
+    assert "#ИИ" in max_text
+    assert "#ИИ" in dzen
+
+
+def test_needs_html_layout_refresh_accepts_style_html_without_subscription():
+    payload = {**_sample_payload(), "digest_topic": "style"}
+    max_text = assemble_max(payload)
+    assert not needs_html_layout_refresh("max", max_text)

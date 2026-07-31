@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.digest_type_policy import is_curious_digest, normalize_digest_type
+from app.services.digest_topic_policy import is_style_digest, normalize_digest_topic
 from app.services.step1_filters import (
     STEP1_FILTER_CATALOG,
     STEP1_FILTER_DEF_BY_ID,
@@ -22,6 +23,16 @@ _MIN_COLLECTION_ITERATIONS_UPPER = 50
 _STEP1_FILTER_SETTINGS_PATH = Path(__file__).resolve().parents[1] / "step1_filter_settings.json"
 
 _CURIOUS_ONLY_FILTER_IDS = frozenset({"off_topic_not_curious"})
+_STYLE_ONLY_FILTER_IDS = frozenset({"off_topic_not_style"})
+
+
+def step1_filter_profile_key(
+    digest_type: str | None = None,
+    digest_topic: str | None = None,
+) -> str:
+    if is_style_digest(digest_topic):
+        return "style"
+    return normalize_digest_type(digest_type)
 
 
 def step1_filter_settings_path() -> Path:
@@ -33,12 +44,15 @@ def _bootstrap_filter_config() -> dict[str, Any]:
     shared_filters = [
         {"id": f.id, "enabled": bool(f.default_enabled), "order": idx}
         for idx, f in enumerate(STEP1_FILTER_CATALOG, start=1)
-        if f.id not in _CURIOUS_ONLY_FILTER_IDS
+        if f.id not in _CURIOUS_ONLY_FILTER_IDS and f.id not in _STYLE_ONLY_FILTER_IDS
     ]
     curious_filters = list(shared_filters)
     curious_filters.append(
         {"id": "off_topic_not_curious", "enabled": True, "order": len(curious_filters) + 1}
     )
+    style_filters = list(shared_filters)
+    style_filters = [f for f in style_filters if f["id"] != "off_topic_not_ai"]
+    style_filters.append({"id": "off_topic_not_style", "enabled": True, "order": len(style_filters) + 1})
     return {
         "version": 2,
         "serious": {
@@ -50,6 +64,11 @@ def _bootstrap_filter_config() -> dict[str, Any]:
             "min_discovered_pages": 10,
             "min_collection_iterations": 4,
             "filters": curious_filters,
+        },
+        "style": {
+            "min_discovered_pages": 10,
+            "min_collection_iterations": 3,
+            "filters": style_filters,
         },
     }
 
@@ -94,10 +113,18 @@ def _load_raw_settings_file() -> dict[str, Any]:
     return raw
 
 
-def _normalize_section(payload: dict[str, Any] | list[Any] | None, *, digest_type: str) -> dict[str, Any]:
-    """Нормализует один профиль (serious или curious)."""
+def _normalize_section(payload: dict[str, Any] | list[Any] | None, *, profile_key: str) -> dict[str, Any]:
+    """Нормализует один профиль (serious, curious или style)."""
+    if profile_key == "style":
+        digest_type = "serious"
+        digest_topic = "style"
+    else:
+        digest_type = normalize_digest_type(profile_key)
+        digest_topic = "ai"
     allowed_ids = {
-        f.id for f in STEP1_FILTER_CATALOG if filter_def_applies_to_digest_type(f.id, digest_type)
+        f.id
+        for f in STEP1_FILTER_CATALOG
+        if filter_def_applies_to_digest_type(f.id, digest_type, digest_topic=digest_topic)
     }
     if isinstance(payload, list):
         filters_raw = payload
@@ -170,6 +197,7 @@ def _normalize_section(payload: dict[str, Any] | list[Any] | None, *, digest_typ
         "min_discovered_pages": min_pages,
         "min_collection_iterations": min_iters,
         "digest_type": digest_type,
+        "digest_topic": digest_topic,
     }
 
 
@@ -177,51 +205,60 @@ def normalize_step1_filter_config(
     payload: dict[str, Any] | list[Any] | None,
     *,
     digest_type: str | None = None,
+    digest_topic: str | None = None,
 ) -> dict[str, Any]:
-    dtype = normalize_digest_type(digest_type)
-    return _normalize_section(payload, digest_type=dtype)
+    profile = step1_filter_profile_key(digest_type, digest_topic)
+    return _normalize_section(payload, profile_key=profile)
 
 
 def normalize_step1_filter_states(
     states: list[dict[str, Any]] | None,
     *,
     digest_type: str | None = None,
+    digest_topic: str | None = None,
 ) -> list[dict[str, Any]]:
     return list(
-        normalize_step1_filter_config({"version": 2, "filters": states or []}, digest_type=digest_type).get(
-            "filters"
-        )
+        normalize_step1_filter_config(
+            {"version": 2, "filters": states or []},
+            digest_type=digest_type,
+            digest_topic=digest_topic,
+        ).get("filters")
         or []
     )
 
 
-def get_min_discovered_pages(digest_type: str | None = None) -> int:
-    return int(load_step1_filter_settings(digest_type).get("min_discovered_pages") or 20)
+def get_min_discovered_pages(digest_type: str | None = None, digest_topic: str | None = None) -> int:
+    return int(load_step1_filter_settings(digest_type, digest_topic=digest_topic).get("min_discovered_pages") or 20)
 
 
-def load_step1_filter_settings(digest_type: str | None = None) -> dict[str, Any]:
-    """Профиль фильтров для типа выпуска (serious / curious)."""
-    dtype = normalize_digest_type(digest_type)
+def load_step1_filter_settings(digest_type: str | None = None, *, digest_topic: str | None = None) -> dict[str, Any]:
+    """Профиль фильтров для типа/тематики выпуска (serious / curious / style)."""
+    profile = step1_filter_profile_key(digest_type, digest_topic)
     raw = _load_raw_settings_file()
-    section = raw.get(dtype)
+    if profile == "style" and "style" not in raw:
+        raw = _bootstrap_filter_config()
+    section = raw.get(profile)
     if not isinstance(section, dict):
-        section = _bootstrap_filter_config()[dtype]
-    return _normalize_section(section, digest_type=dtype)
+        section = _bootstrap_filter_config()[profile]
+    return _normalize_section(section, profile_key=profile)
 
 
 def save_step1_filter_settings(
     config: dict[str, Any],
     *,
     digest_type: str | None = None,
+    digest_topic: str | None = None,
 ) -> dict[str, Any]:
-    """Сохраняет только профиль указанного типа выпуска, не трогая другой."""
-    dtype = normalize_digest_type(digest_type)
-    normalized = _normalize_section(config, digest_type=dtype)
+    """Сохраняет только профиль указанного типа/тематики выпуска."""
+    profile = step1_filter_profile_key(digest_type, digest_topic)
+    normalized = _normalize_section(config, profile_key=profile)
     raw = _load_raw_settings_file()
     if int(raw.get("version") or 1) < 2:
         raw = _migrate_v1_to_v2(raw)
+    if profile == "style" and "style" not in raw:
+        raw["style"] = _bootstrap_filter_config()["style"]
     raw["version"] = 2
-    raw[dtype] = {
+    raw[profile] = {
         "min_discovered_pages": normalized["min_discovered_pages"],
         "min_collection_iterations": normalized["min_collection_iterations"],
         "filters": normalized["filters"],

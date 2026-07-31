@@ -233,6 +233,16 @@ from app.services.digest_type_policy import (
     step1_product_excludes_for_digest_type,
     step1_topic_terms_for_digest_type,
 )
+from app.services.digest_topic_policy import (
+    is_style_digest,
+    normalize_digest_topic,
+    resolve_source_tiers_path,
+    set_active_digest_topic,
+    set_active_source_tiers_path,
+    step1_product_excludes_for_topic,
+    step1_topic_terms_for_topic,
+    style_digest_topic_matches,
+)
 
 ASSET_PROXYAPI_BUDGET_ALERT = "step1_proxyapi_budget_exceeded"
 PROXYAPI_ZERO_BALANCE_USER_MESSAGE = (
@@ -249,6 +259,7 @@ STEP1_DISCOVERED_REASON_CODES = {
     "http_unreachable",
     "url_redirect_mismatch",
     "off_topic_not_ai",
+    "off_topic_not_style",
     "other",
 }
 
@@ -261,6 +272,8 @@ STEP1_POOL_PER_HOST_CAP = 3
 """0 = без лимита URL с одного домена в сырой выдаче web_search."""
 STEP1_SEARCH_MAX_URLS_PER_HOST = 0
 STEP1_MIN_AUTO_DISCOVERED = 5
+STEP1_MASS_HTTP_UNREACHABLE_MIN = 10
+STEP1_MASS_HTTP_UNREACHABLE_SHARE = 0.4
 STEP1_RU_SHARE_MIN = 0.30
 STEP1_RU_SHARE_MAX = 0.50
 STEP1_PRESS_SHARE_MIN = 0.20
@@ -782,6 +795,12 @@ def _extract_listing_article_urls(chunk: str, page_url: str, limit: int = 12) ->
         seen.add(key)
         path = (pu.path or "")
         score = len(path) + (20 if re.search(r"\d", path) else 0)
+        listing_path = (base.path or "").rstrip("/")
+        if listing_path and listing_path != "/" and path.startswith(listing_path + "/"):
+            score += 120
+        low_abs = abs_url.lower()
+        if "utm_source=buro_spec" in low_abs or "erid=" in low_abs:
+            score -= 80
         scored.append((score, abs_url))
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [u for _, u in scored[:limit]]
@@ -1321,6 +1340,8 @@ def _refresh_truncated_candidate_title(url: str, title: str) -> str | None:
         return None
     return headline[:500]
 
+
+def _rough_visible_text_from_html(chunk: str, limit: int = 4500) -> str:
     """Грубое снятие текста со страницы для тематической эвристики (без BeautifulSoup)."""
     t = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", chunk)
     t = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", t)
@@ -1422,6 +1443,13 @@ def _ai_digest_topic_matches(corpus: str, extra: str = "") -> bool:
     if len(merged.strip()) < 14:
         return False
     return any(rx.search(merged) for rx in _AI_TOPIC_RES)
+
+
+def _digest_topic_matches(corpus: str, extra: str = "", *, digest_topic: str | None = None) -> bool:
+    topic = normalize_digest_topic(digest_topic)
+    if is_style_digest(topic):
+        return style_digest_topic_matches(corpus, extra)
+    return _ai_digest_topic_matches(corpus, extra)
 
 
 def _has_article_markers(chunk: str, ld_pairs: list[tuple[str, str | None]]) -> bool:
@@ -1711,6 +1739,30 @@ def _candidate_date_window_reject_code(digest: Digest, item: dict[str, Any]) -> 
         digest,
         str(item.get("published_at") or ""),
         str(item.get("url") or ""),
+    )
+
+
+def _mass_http_unreachable_connectivity_hint(
+    reject_stats: dict[str, int] | None,
+    *,
+    min_count: int = STEP1_MASS_HTTP_UNREACHABLE_MIN,
+    min_share: float = STEP1_MASS_HTTP_UNREACHABLE_SHARE,
+) -> str:
+    """Предупреждение: массовый http_unreachable похож на проблему связи, а не на «надо перезапустить поиск»."""
+    if not reject_stats:
+        return ""
+    unreachable = int(reject_stats.get("http_unreachable") or 0)
+    if unreachable < min_count:
+        return ""
+    total = sum(int(v or 0) for v in reject_stats.values()) or 1
+    share = unreachable / total
+    if share < min_share and unreachable < max(min_count * 2, 20):
+        return ""
+    return (
+        f" Внимание: массово не открылись страницы источников ({unreachable} шт.) — "
+        "возможна проблема со связью, блокировка сети или временная недоступность сайтов. "
+        "Повторный запуск поиска без устранения связи, скорее всего, снова даст пустой результат; "
+        "проверьте интернет и доступ к новостным сайтам в браузере либо вставьте рабочие URL вручную."
     )
 
 
@@ -2522,6 +2574,7 @@ class DigestService:
         self._active_step1_filter_enabled: dict[str, bool] = {}
         self._active_step1_filter_order: dict[str, int] = {}
         self._active_step1_digest_type: str = "serious"
+        self._active_step1_digest_topic: str = "ai"
         self._active_recent_top5_fps: set[str] = set()
         self._active_unreachable_hosts: set[str] = set()
         self._active_unreachable_host_failures: dict[str, int] = {}
@@ -2534,6 +2587,14 @@ class DigestService:
         self._active_unreachable_host_failures[host] = failures
         if failures >= 2:
             self._active_unreachable_hosts.add(host)
+
+    def _refresh_workflow_contract_for_digest(self, digest: Digest) -> None:
+        tiers_path = resolve_source_tiers_path(getattr(digest, "digest_topic", None))
+        set_active_source_tiers_path(tiers_path)
+        set_active_digest_topic(getattr(digest, "digest_topic", None))
+        base = self.settings.prompts_path.read_text(encoding="utf-8")
+        tiers_prompt = get_source_tiers_policy(tiers_path).prompt_for_llm()
+        self.workflow.contract_prompt = base + "\n\n---\n" + tiers_prompt
 
     def _step1_maintain_url_registry(self, digest: Digest, filter_states: list[dict[str, Any]]) -> dict[str, Any]:
         """TTL-очистка, автоблок доменов, метаданные для UI."""
@@ -2644,11 +2705,21 @@ class DigestService:
         host = _host_from_url(url).lower()
         return bool(host and host in self._active_unreachable_hosts)
 
-    def _read_step1_filter_config(self, digest_type: str | None = None) -> dict[str, Any]:
-        return load_step1_filter_settings(digest_type)
+    def _read_step1_filter_config(
+        self,
+        digest_type: str | None = None,
+        *,
+        digest_topic: str | None = None,
+    ) -> dict[str, Any]:
+        return load_step1_filter_settings(digest_type, digest_topic=digest_topic)
 
-    def _read_step1_filter_states(self, digest_type: str | None = None) -> list[dict[str, Any]]:
-        return list(self._read_step1_filter_config(digest_type).get("filters") or [])
+    def _read_step1_filter_states(
+        self,
+        digest_type: str | None = None,
+        *,
+        digest_topic: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return list(self._read_step1_filter_config(digest_type, digest_topic=digest_topic).get("filters") or [])
 
     def _read_step1_filter_counters(self, digest_id: int) -> dict[str, int]:
         asset = (
@@ -2755,10 +2826,13 @@ class DigestService:
         states: list[dict[str, Any]],
         *,
         digest_type: str | None = None,
+        digest_topic: str | None = None,
     ) -> None:
         dtype = normalize_digest_type(digest_type)
+        dtopic = normalize_digest_topic(digest_topic)
         self._active_step1_digest_type = dtype
-        normalized = normalize_step1_filter_states(states, digest_type=dtype)
+        self._active_step1_digest_topic = dtopic
+        normalized = normalize_step1_filter_states(states, digest_type=dtype, digest_topic=dtopic)
         self._active_step1_filter_enabled = step1_enabled_map(normalized)
         self._active_step1_filter_order = {str(x["id"]): int(x["order"]) for x in normalized}
 
@@ -2766,6 +2840,7 @@ class DigestService:
         self._active_step1_filter_enabled = {}
         self._active_step1_filter_order = {}
         self._active_step1_digest_type = "serious"
+        self._active_step1_digest_topic = "ai"
         self._active_recent_top5_fps = set()
         self._step1_curious_mode = False
 
@@ -2786,7 +2861,11 @@ class DigestService:
         return None
 
     def _is_step1_filter_enabled(self, filter_id: str) -> bool:
-        if not filter_def_applies_to_digest_type(filter_id, self._active_step1_digest_type):
+        if not filter_def_applies_to_digest_type(
+            filter_id,
+            self._active_step1_digest_type,
+            digest_topic=self._active_step1_digest_topic,
+        ):
             return False
         if filter_id in self._active_step1_filter_enabled:
             return bool(self._active_step1_filter_enabled.get(filter_id))
@@ -2815,10 +2894,11 @@ class DigestService:
     def get_step1_filters_payload(self, digest_id: int) -> dict[str, Any]:
         digest = self.get_digest(digest_id)
         dtype = normalize_digest_type(digest.digest_type)
-        config = self._read_step1_filter_config(dtype)
+        dtopic = normalize_digest_topic(getattr(digest, "digest_topic", None))
+        config = self._read_step1_filter_config(dtype, digest_topic=dtopic)
         counters = self._effective_step1_filter_counters(digest_id)
         return {
-            "catalog": step1_filter_catalog_payload(dtype),
+            "catalog": step1_filter_catalog_payload(dtype, digest_topic=dtopic),
             "config": config,
             "counters": counters,
             **self._step1_filters_payload_extras(digest_id),
@@ -2827,10 +2907,11 @@ class DigestService:
     def save_step1_filters_payload(self, digest_id: int, payload: dict[str, Any]) -> dict[str, Any]:
         digest = self.get_digest(digest_id)
         dtype = normalize_digest_type(digest.digest_type)
-        config = save_step1_filter_settings(payload, digest_type=dtype)
+        dtopic = normalize_digest_topic(getattr(digest, "digest_topic", None))
+        config = save_step1_filter_settings(payload, digest_type=dtype, digest_topic=dtopic)
         counters = self._effective_step1_filter_counters(digest_id)
         return {
-            "catalog": step1_filter_catalog_payload(dtype),
+            "catalog": step1_filter_catalog_payload(dtype, digest_topic=dtopic),
             "config": config,
             "counters": counters,
             **self._step1_filters_payload_extras(digest_id),
@@ -3175,17 +3256,30 @@ class DigestService:
 
     def create_digest_for_today(self) -> Digest:
         today = datetime.now(MSK_TZ).date()
-        digest = self.db.query(Digest).filter(Digest.date == today).first()
-        if digest:
-            logger.info("Выпуск на сегодня уже существует | digest_id=%s date=%s", digest.id, today)
-            return digest
         from app.digest_defaults import get_digest_defaults
 
         d0 = get_digest_defaults().step0
+        digest = (
+            self.db.query(Digest)
+            .filter(
+                Digest.date == today,
+                Digest.digest_topic == normalize_digest_topic(d0.digest_topic_default),
+            )
+            .first()
+        )
+        if digest:
+            logger.info(
+                "Выпуск на сегодня уже существует | digest_id=%s date=%s topic=%s",
+                digest.id,
+                today,
+                digest.digest_topic,
+            )
+            return digest
         digest = Digest(
             date=today,
             status=STATUS_DRAFT,
             current_step=STATUS_DRAFT,
+            digest_topic=normalize_digest_topic(d0.digest_topic_default),
             news_window_days=d0.news_window_days_default,
             news_window_day_kind=d0.news_window_day_kind_default,
         )
@@ -3196,12 +3290,13 @@ class DigestService:
         return self.run_step_0(
             digest.id,
             d0.digest_type_default,
+            digest_topic=d0.digest_topic_default,
             news_window_days=d0.news_window_days_default,
             news_window_day_kind=d0.news_window_day_kind_default,
         )
 
     def list_digests(self) -> list[Digest]:
-        return self.db.query(Digest).order_by(Digest.date.desc()).all()
+        return self.db.query(Digest).order_by(Digest.date.desc(), Digest.id.desc()).all()
 
     def build_digest_list_items(self) -> list[dict]:
         from app.services.digest_list import build_digest_list_payload
@@ -3262,6 +3357,7 @@ class DigestService:
             "date": format_digest_date_ru(digest.date),
             "overall_analysis": self._step4_overall_analysis(digest),
             "digest_type": digest.digest_type or "serious",
+            "digest_topic": getattr(digest, "digest_topic", None) or "ai",
         }
         tg_lead = extract_lead_from_legacy_platform_text(by_platform.get("telegram", ""))
         if tg_lead:
@@ -3344,6 +3440,8 @@ class DigestService:
 
         d0 = get_digest_defaults().step0
         digest.digest_type = d0.digest_type_default
+        if not getattr(digest, "digest_topic", None):
+            digest.digest_topic = d0.digest_topic_default
         digest.digest_type_via_default = False
         digest.status = STATUS_STEP0
         digest.current_step = STATUS_STEP0
@@ -3356,23 +3454,117 @@ class DigestService:
             digest.digest_type,
         )
 
+    def _reset_pipeline_for_topic_change(self, digest: Digest) -> None:
+        """Сброс пула и шагов 1–4 при смене тематики (ИИ ↔ Стиль)."""
+        digest_id = int(digest.id)
+        for asset in self.db.query(Asset).filter(Asset.digest_id == digest_id).all():
+            if asset.path:
+                path = Path(asset.path)
+                if path.exists():
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
+        self.db.query(SelectedNews).filter(SelectedNews.digest_id == digest_id).delete()
+        self.db.query(Analytics).filter(Analytics.digest_id == digest_id).delete()
+        self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest_id).delete()
+        self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest_id).delete()
+        self.db.query(Asset).filter(Asset.digest_id == digest_id).delete()
+        self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest_id).delete()
+        self.db.query(Step1DiscoveredNews).filter(Step1DiscoveredNews.digest_id == digest_id).delete()
+        digest.step4_selected_image_variant = None
+        digest.step1_budget_capped = False
+        digest.step2_budget_capped = False
+        logger.info(
+            "Шаг 0: сброс пула и шагов 1–4 после смены тематики | digest_id=%s",
+            digest_id,
+        )
+
+    def _digest_has_topic_progress(self, digest: Digest) -> bool:
+        if digest.status not in {STATUS_DRAFT, STATUS_STEP0}:
+            return True
+        did = int(digest.id)
+        return (
+            self.db.query(NewsCandidate.id).filter(NewsCandidate.digest_id == did).first() is not None
+            or self.db.query(SelectedNews.id).filter(SelectedNews.digest_id == did).first() is not None
+            or self.db.query(Analytics.id).filter(Analytics.digest_id == did).first() is not None
+            or self.db.query(FinalOutput.id).filter(FinalOutput.digest_id == did).first() is not None
+            or self.db.query(Step1DiscoveredNews.id).filter(Step1DiscoveredNews.digest_id == did).first() is not None
+        )
+
+    def _get_digest_by_date_topic(self, digest_date: date, topic: str) -> Digest | None:
+        return (
+            self.db.query(Digest)
+            .filter(Digest.date == digest_date, Digest.digest_topic == normalize_digest_topic(topic))
+            .first()
+        )
+
     def run_step_0(
         self,
         digest_id: int,
         digest_type: str | None,
         *,
+        digest_topic: str | None = None,
         news_window_days: int = 3,
         news_window_day_kind: str = "working",
     ) -> Digest:
         digest = self.get_digest(digest_id)
-        via_default = digest_type is None
-        if via_default:
-            from app.digest_defaults import get_digest_defaults
+        source_digest_id = int(digest.id)
+        from app.digest_defaults import get_digest_defaults
 
-            digest_type = get_digest_defaults().step0.digest_type_default
+        d0 = get_digest_defaults().step0
+        via_default = digest_type is None
+        via_topic_default = digest_topic is None
+        if via_default:
+            digest_type = d0.digest_type_default
+        if via_topic_default:
+            digest_topic = d0.digest_topic_default
+        topic = normalize_digest_topic(digest_topic)
+        source_topic = normalize_digest_topic(getattr(digest, "digest_topic", None))
+        switch_requested = topic != source_topic
+        created_for_topic_switch = False
+        if switch_requested and self._digest_has_topic_progress(digest):
+            existing_same_topic = self._get_digest_by_date_topic(digest.date, topic)
+            if existing_same_topic is not None:
+                digest = existing_same_topic
+            else:
+                digest = Digest(
+                    date=digest.date,
+                    status=STATUS_DRAFT,
+                    current_step=STATUS_DRAFT,
+                    digest_topic=topic,
+                    news_window_days=d0.news_window_days_default,
+                    news_window_day_kind=d0.news_window_day_kind_default,
+                )
+                self.db.add(digest)
+                self.db.commit()
+                self.db.refresh(digest)
+                created_for_topic_switch = True
+        prev_topic = normalize_digest_topic(getattr(digest, "digest_topic", None))
+        topic_changed = prev_topic != topic
+        switched_to_another_digest = int(digest.id) != source_digest_id
+        apply_topic_defaults = topic_changed or created_for_topic_switch or (
+            switch_requested and switched_to_another_digest
+        )
+        if topic == "style":
+            digest_type = "serious"
+            via_default = False
+            if apply_topic_defaults:
+                # При переключении на «Стиль» — окно по умолчанию: 7 календарных дней.
+                news_window_days = 7
+                news_window_day_kind = "calendar"
+        elif apply_topic_defaults:
+            # При возврате к ИИ — окно по умолчанию из настроек шага 0.
+            news_window_days = d0.news_window_days_default
+            news_window_day_kind = d0.news_window_day_kind_default
         if digest_type not in {"serious", "curious"}:
             raise HTTPException(status_code=400, detail="digest_type must be serious or curious")
+        # Если пользователь переключает тему и открывается существующий выпуск этой темы,
+        # чистим его прошлые шаги, чтобы в UI не смешивались кандидаты/результаты другой темы.
+        if (topic_changed or (switch_requested and switched_to_another_digest)) and self._digest_has_topic_progress(digest):
+            self._reset_pipeline_for_topic_change(digest)
         digest.digest_type = digest_type
+        digest.digest_topic = topic
         digest.digest_type_via_default = via_default
         digest.news_window_days = max(1, min(90, int(news_window_days)))
         digest.news_window_day_kind = _normalize_news_window_day_kind(news_window_day_kind)
@@ -3382,11 +3574,13 @@ class DigestService:
         self.db.commit()
         self.db.refresh(digest)
         logger.info(
-            "Шаг 0: параметры выпуска | digest_id=%s type=%s window_days=%s window_kind=%s",
+            "Шаг 0: параметры выпуска | digest_id=%s type=%s topic=%s window_days=%s window_kind=%s topic_changed=%s",
             digest.id,
             digest_type,
+            topic,
             digest.news_window_days,
             digest.news_window_day_kind,
+            topic_changed,
         )
         return digest
 
@@ -4017,6 +4211,7 @@ class DigestService:
         digest = self.get_digest(digest_id)
         if digest.status == STATUS_DRAFT:
             raise HTTPException(status_code=400, detail="Step 1 requires step_0 (choose digest type first).")
+        self._refresh_workflow_contract_for_digest(digest)
         step1_allowed = {STATUS_STEP0, STATUS_STEP1, STATUS_SELECTED, STATUS_ANALYTICS, STATUS_FINAL}
         if digest.status not in step1_allowed:
             raise HTTPException(status_code=400, detail=f"Cannot run step 1 from status {digest.status!r}")
@@ -4132,7 +4327,10 @@ class DigestService:
                 detail="Нет веб-доступа (web.enable_fetch=false в pipeline_settings.json). Вставьте вручную 5-10 ссылок в поле manual_urls.",
             )
 
-        step1_filter_config = self._read_step1_filter_config(digest.digest_type)
+        step1_filter_config = self._read_step1_filter_config(
+            digest.digest_type,
+            digest_topic=getattr(digest, "digest_topic", None),
+        )
         step1_filter_states = list(step1_filter_config.get("filters") or [])
         step1_filter_enabled = step1_enabled_map(step1_filter_states)
         min_discovered_pages = int(step1_filter_config["min_discovered_pages"])
@@ -4193,7 +4391,11 @@ class DigestService:
         step1_skip_final_preview = False
         step1_proxyapi_depleted = False
         try:
-            self._activate_step1_filter_states(step1_filter_states, digest_type=digest.digest_type)
+            self._activate_step1_filter_states(
+                step1_filter_states,
+                digest_type=digest.digest_type,
+                digest_topic=getattr(digest, "digest_topic", None),
+            )
             reset_step1_filter_stats()
             self._active_recent_top5_fps = (
                 self._load_recent_top5_fingerprints(digest)
@@ -4212,11 +4414,18 @@ class DigestService:
                 )
             else:
                 self._step1_curious_tone_audit = None
-                logger.info(
-                    "Шаг 1: режим серьёзного выпуска (source_tiers) | digest_id=%s tier_strict=%s",
-                    digest.id,
-                    bool(getattr(self.settings, "step1_tier_strict_search", True)),
-                )
+                if is_style_digest(getattr(digest, "digest_topic", None)):
+                    logger.info(
+                        "Шаг 1: режим стиля (source_tiers_style) | digest_id=%s tier_strict=%s",
+                        digest.id,
+                        bool(getattr(self.settings, "step1_tier_strict_search", True)),
+                    )
+                else:
+                    logger.info(
+                        "Шаг 1: режим серьёзного выпуска (source_tiers) | digest_id=%s tier_strict=%s",
+                        digest.id,
+                        bool(getattr(self.settings, "step1_tier_strict_search", True)),
+                    )
             logger.info(
                 "Шаг 1: тип и фильтры | digest_id=%s digest_type=%s published_before_window=%s "
                 "published_date_undefined=%s recent_top5_fps=%s",
@@ -4839,6 +5048,12 @@ class DigestService:
                 details = ", ".join(f"{code}={count}" for code, count in items)
                 return f" Основные причины отбраковки: {details}."
 
+            def connectivity_hint() -> str:
+                return _mass_http_unreachable_connectivity_hint(reject_stats)
+
+            def reject_detail_tail(limit: int = 3) -> str:
+                return top_reject_reasons(limit) + connectivity_hint()
+
             def request_elapsed_tail() -> str:
                 return f" Время выполнения запроса: {int(time.monotonic() - started_monotonic)} сек."
     
@@ -5284,7 +5499,7 @@ class DigestService:
                     detail=(
                         "Пересборка сохранила только ручные новости и не добавила ни одной автоновости. "
                         "Проверьте окно дат шага 0 (лучше 5-7 календарных дней), затем повторите пересборку."
-                        + top_reject_reasons()
+                        + reject_detail_tail()
                     ),
                 )
 
@@ -5303,7 +5518,7 @@ class DigestService:
                         f"Найдено конкретных проверенных страниц {len(verified_pool)} из требуемых "
                         f"{min_discovered_pages}. Увеличьте окно дат на шаге 0, ослабьте фильтры в настройках "
                         f"шага 1 или снизьте порог «минимум найденных страниц»."
-                        + top_reject_reasons()
+                        + reject_detail_tail()
                     ),
                 )
 
@@ -5655,7 +5870,7 @@ class DigestService:
                             f"Не удалось добрать пул до {STEP1_MIN_VERIFIED} новостей (сохранено {len(verified_pool)} "
                             f"из {len(kept_rows)} отмеченных). Восстановлен прежний пул."
                             + rebuild_excluded_note
-                            + top_reject_reasons()
+                            + reject_detail_tail()
                             + request_elapsed_tail()
                         ),
                     )
@@ -5672,7 +5887,7 @@ class DigestService:
                             f"Пересборка не добавила новых подтверждённых материалов (получено {len(verified_pool)}, "
                             f"в прежнем пуле было {len(prev_verified_backup)}).{kept_note}{rebuild_excluded_note} "
                             f"Восстановлен прежний пул."
-                            + top_reject_reasons()
+                            + reject_detail_tail()
                             + request_elapsed_tail()
                         ),
                     )
@@ -5690,7 +5905,7 @@ class DigestService:
                             f"Подтверждено только {len(verified_pool)} материалов по страницам (нужно минимум {STEP1_MIN_VERIFIED}). "
                             f"Частичный пул из {len(verified_pool)} новостей сохранён — можно доработать вручную или пересобрать. "
                             f"Окно дат: {digest_news_window_hint_ru(digest)}."
-                            + top_reject_reasons()
+                            + reject_detail_tail()
                             + request_elapsed_tail()
                         ),
                     )
@@ -5725,7 +5940,7 @@ class DigestService:
                         f"Подтверждено только {len(verified_pool)} материалов по страницам (нужно минимум {STEP1_MIN_VERIFIED}). "
                         f"Окно дат: {window_hint}. "
                         "Добавьте прямые URL статей в поле шага 1 — автопоиск идёт через ProxyAPI web_search (и опционально SerpAPI/Tavily)."
-                        + top_reject_reasons()
+                        + reject_detail_tail()
                         + date_tail
                         + search_hint
                         + tail
@@ -6190,11 +6405,18 @@ class DigestService:
                 ),
             )
 
-        step1_filter_states = self._read_step1_filter_states(digest.digest_type)
+        step1_filter_states = self._read_step1_filter_states(
+            digest.digest_type,
+            digest_topic=getattr(digest, "digest_topic", None),
+        )
         now_msk = current_msk_iso()
         created_rows: list[dict[str, Any]] = []
         try:
-            self._activate_step1_filter_states(step1_filter_states, digest_type=digest.digest_type)
+            self._activate_step1_filter_states(
+                step1_filter_states,
+                digest_type=digest.digest_type,
+                digest_topic=getattr(digest, "digest_topic", None),
+            )
             built = self._build_manual_candidates(
                 digest,
                 to_add,
@@ -6636,7 +6858,10 @@ class DigestService:
             request_label="step_3_analytics",
             model=AGENT_MODEL_RECOMMENDATIONS["AnalyticsAgent"],
         ):
-            result = self.workflow.run_analytics(payload)
+            result = self.workflow.run_analytics(
+                payload,
+                digest_topic=getattr(digest, "digest_topic", None) or "ai",
+            )
         result = complete_analytics_result(result, payload)
         if len(result.get("items", [])) != len(payload):
             logger.warning(
@@ -6976,6 +7201,7 @@ class DigestService:
             "date": format_digest_date_ru(digest.date),
             "overall_analysis": self._step4_overall_analysis(digest),
             "digest_type": digest.digest_type or "serious",
+            "digest_topic": getattr(digest, "digest_topic", None) or "ai",
         }
         logger.info(
             "Шаг 4: тексты площадок | digest_id=%s hook=%s platforms=%s",
@@ -7446,17 +7672,47 @@ class DigestService:
                         "Откройте материал в браузере и вставьте URL страницы с нормальным заголовком в разметке."
                     )
                     logger.warning("Seed URL: отклонён технический заголовок | url=%s", stored[:120])
-                elif self._is_step1_filter_enabled("off_topic_not_ai") and not _ai_digest_topic_matches(
-                    str(bundle.get("topic_corpus") or ""), str(raw_headline)
+                elif (
+                    (
+                        self._is_step1_filter_enabled("off_topic_not_style")
+                        and is_style_digest(self._active_step1_digest_topic)
+                        and not _digest_topic_matches(
+                            str(bundle.get("topic_corpus") or ""),
+                            str(raw_headline),
+                            digest_topic=self._active_step1_digest_topic,
+                        )
+                    )
+                    or (
+                        self._is_step1_filter_enabled("off_topic_not_ai")
+                        and not is_style_digest(self._active_step1_digest_topic)
+                        and not _digest_topic_matches(
+                            str(bundle.get("topic_corpus") or ""),
+                            str(raw_headline),
+                            digest_topic=self._active_step1_digest_topic,
+                        )
+                    )
                 ):
-                    manual_reject = "off_topic_not_ai"
+                    manual_reject = (
+                        "off_topic_not_style"
+                        if is_style_digest(self._active_step1_digest_topic)
+                        else "off_topic_not_ai"
+                    )
                     raw_headline = None
                     title = f"Статья по ссылке ({host})"
                     desc = (
-                        "Страница не относится к теме искусственного интеллекта и нейросетей — "
-                        "в дайджест такой материал не берётся. Укажите ссылку на статью про ИИ/ML."
+                        "Страница не относится к теме моды и стиля — "
+                        "в дайджест такой материал не берётся. Укажите ссылку на fashion-материал."
+                        if is_style_digest(self._active_step1_digest_topic)
+                        else (
+                            "Страница не относится к теме искусственного интеллекта и нейросетей — "
+                            "в дайджест такой материал не берётся. Укажите ссылку на статью про ИИ/ML."
+                        )
                     )
-                    logger.warning("Seed URL: вне темы ИИ | url=%s", stored[:120])
+                    logger.warning(
+                        "Seed URL: вне темы %s | url=%s",
+                        "стиля" if is_style_digest(self._active_step1_digest_topic) else "ИИ",
+                        stored[:120],
+                    )
                 else:
                     if mandatory:
                         desc = (
@@ -7766,17 +8022,41 @@ class DigestService:
             f"Год публикации: {pub_year}. "
             "Приоритет — публикации за последние 1–3 дня. "
         )
-        product_excludes = step1_product_excludes_for_digest_type(digest.digest_type)
-        topic_terms = step1_topic_terms_for_digest_type(digest.digest_type)
+        topic = getattr(digest, "digest_topic", None)
+        if is_style_digest(topic):
+            product_excludes = step1_product_excludes_for_topic(topic, digest.digest_type)
+            topic_terms = step1_topic_terms_for_topic(topic)
+        else:
+            product_excludes = step1_product_excludes_for_digest_type(digest.digest_type)
+            topic_terms = step1_topic_terms_for_digest_type(digest.digest_type)
         return window_hint, topic_terms, product_excludes
 
     def _step1_search_query(self, digest: Digest) -> str:
         window_hint, topic_terms, product_excludes = self._step1_search_query_parts(digest)
-        if is_curious_digest(digest.digest_type):
+        if is_style_digest(getattr(digest, "digest_topic", None)):
+            source_hint = self._step1_style_source_seed_hint()
+        elif is_curious_digest(digest.digest_type):
             source_hint = self._step1_curious_source_seed_hint()
         else:
             source_hint = self._step1_source_seed_hint()
         return window_hint + source_hint + topic_terms + product_excludes
+
+    def _step1_style_source_seed_hint(self, max_urls: int = 30) -> str:
+        policy = get_source_tiers_policy(resolve_source_tiers_path(getattr(self, "_active_step1_digest_topic", "style")))
+        seeds = expand_search_seed_urls(
+            policy.search_seed_urls,
+            settings=self.settings,
+            digest_type="serious",
+        )
+        http_seeds = [u for u in seeds if u.startswith(("http://", "https://"))]
+        if not http_seeds:
+            return ""
+        primary = http_seeds[:max_urls]
+        return (
+            "Сначала ищи в проверенных fashion-разделах из tier-файла стиля: "
+            + ", ".join(primary)
+            + ". В ответе только прямые URL статей про моду и стиль, не ленты и не поисковые страницы. "
+        )
 
     def _step1_curious_source_seed_hint(self, max_urls: int = 24) -> str:
         policy = get_curious_source_policy()
@@ -7797,7 +8077,7 @@ class DigestService:
         )
 
     def _step1_source_seed_hint(self, max_urls: int = 30) -> str:
-        policy = get_source_tiers_policy(self.settings.source_tiers_path)
+        policy = get_source_tiers_policy(resolve_source_tiers_path(getattr(self, "_active_step1_digest_topic", "ai")))
         seeds = expand_search_seed_urls(
             policy.search_seed_urls,
             settings=self.settings,
@@ -8605,7 +8885,9 @@ class DigestService:
         if is_curious_digest(digest.digest_type):
             policy = get_curious_source_policy()
         else:
-            policy = get_source_tiers_policy(self.settings.source_tiers_path)
+            policy = get_source_tiers_policy(
+                resolve_source_tiers_path(getattr(digest, "digest_topic", None))
+            )
         expanded = expand_search_seed_urls(
             policy.search_seed_urls,
             settings=self.settings,
@@ -8862,6 +9144,7 @@ class DigestService:
         set_step1_strict_web_search_citations(False)
         search_route = resolve_step1_search_routing(
             digest.digest_type,
+            digest_topic=getattr(digest, "digest_topic", None),
             query_override=query_override,
             tier_strict_setting=bool(getattr(self.settings, "step1_tier_strict_search", True)),
             curious_use_serious_tiers=bool(getattr(self.settings, "step1_curious_use_serious_tiers", False)),
@@ -10000,8 +10283,15 @@ class DigestService:
             _reject("support_documentation_page")
             return
 
-        if not _ai_digest_topic_matches(topic_excerpt, h) and is_enabled("off_topic_not_ai"):
-            _reject("off_topic_not_ai")
+        off_topic_filter = (
+            "off_topic_not_style" if is_style_digest(self._active_step1_digest_topic) else "off_topic_not_ai"
+        )
+        if not _digest_topic_matches(
+            topic_excerpt,
+            h,
+            digest_topic=self._active_step1_digest_topic,
+        ) and is_enabled(off_topic_filter):
+            _reject(off_topic_filter)
             return
 
         promo_corpus = f"{final_title} {item.get('description', '')} {topic_excerpt}"
@@ -10187,9 +10477,16 @@ class DigestService:
             item["link_status"] = False
             _append_reject_reason(item, "support_documentation_page")
             return
-        if not _ai_digest_topic_matches(str(bundle.get("topic_corpus") or ""), h) and is_enabled("off_topic_not_ai"):
+        off_topic_filter = (
+            "off_topic_not_style" if is_style_digest(self._active_step1_digest_topic) else "off_topic_not_ai"
+        )
+        if not _digest_topic_matches(
+            str(bundle.get("topic_corpus") or ""),
+            h,
+            digest_topic=self._active_step1_digest_topic,
+        ) and is_enabled(off_topic_filter):
             item["link_status"] = False
-            _append_reject_reason(item, "off_topic_not_ai")
+            _append_reject_reason(item, off_topic_filter)
             return
         final_title = self._ensure_russian_candidate_title(digest.id, stored, h)[:500]
         topic_excerpt = str(bundle.get("topic_corpus") or "")

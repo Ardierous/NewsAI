@@ -108,6 +108,7 @@ def test_build_digest_list_payload_summary_top5_and_cost():
     assert len(rows) == 1
     row = rows[0]
     assert "регулирование ИИ" in row["summary_title"]
+    assert row["digest_topic"] == "ai"
     assert row["status_label_ru"] == "Аналитика готова"
     assert row["total_cost_rub"] == 3.75
     assert len(row["top5"]) == 2
@@ -229,3 +230,37 @@ def test_build_digest_list_payload_chains_prev_digest_balance():
     rows = build_digest_list_payload(db, [current, prev])
     by_id = {row["id"]: row["total_cost_rub"] for row in rows}
     assert by_id[current.id] == 141.3834
+
+
+def test_build_digest_list_payload_does_not_chain_balance_between_topics():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+    Session = sessionmaker(bind=engine)
+    Base.metadata.create_all(bind=engine)
+    db = Session()
+
+    ai_prev = Digest(
+        date=date(2026, 5, 27),
+        status=STATUS_SELECTED,
+        current_step=STATUS_SELECTED,
+        digest_topic="ai",
+        proxyapi_balance_after=579.4299,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    style_current = Digest(
+        date=date(2026, 5, 28),
+        status=STATUS_SELECTED,
+        current_step=STATUS_SELECTED,
+        digest_topic="style",
+        proxyapi_balance_after=438.0465,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add_all([ai_prev, style_current])
+    db.commit()
+    db.refresh(ai_prev)
+    db.refresh(style_current)
+
+    rows = build_digest_list_payload(db, [ai_prev, style_current])
+    by_id = {row["id"]: row["total_cost_rub"] for row in rows}
+    assert by_id[style_current.id] == 0.0

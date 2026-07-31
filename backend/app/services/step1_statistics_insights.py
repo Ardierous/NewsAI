@@ -176,13 +176,25 @@ def build_recommendations(
 
     if counts.get("http_unreachable", 0) >= 3 or "http_unreachable" in dominant_codes:
         share = 100 * counts.get("http_unreachable", 0) / total_rej
-        add(
-            "high",
-            "Снизить долю http_unreachable",
-            f"~{share:.0f}% отбраковок — страница не открылась. Дешевле: reuse проверенных URL из реестра; "
-            "не гонять Crew на сомнительные домены; при 20+ отказах домен уходит в autoblock tiers. "
-            "Добавьте 5–10 прямых рабочих URL вручную на шаге 1 — без web_search.",
-        )
+        unreachable = counts.get("http_unreachable", 0)
+        if unreachable >= 10 and share >= 40:
+            add(
+                "high",
+                "Возможна проблема со связью — не перезапускайте поиск зря",
+                f"~{share:.0f}% отбраковок ({unreachable} шт.) — страницы не открылись. "
+                "Это похоже на сбой сети, блокировку или недоступность сайтов. "
+                "Повторный запуск поиска без проверки связи, скорее всего, снова даст пустой пул. "
+                "Откройте несколько ссылок из журнала в браузере; если не открываются — чините связь "
+                "или вставьте 5–10 рабочих URL вручную на шаге 1.",
+            )
+        else:
+            add(
+                "high",
+                "Снизить долю http_unreachable",
+                f"~{share:.0f}% отбраковок — страница не открылась. Дешевле: reuse проверенных URL из реестра; "
+                "не гонять Crew на сомнительные домены; при 20+ отказах домен уходит в autoblock tiers. "
+                "Добавьте 5–10 прямых рабочих URL вручную на шаге 1 — без web_search.",
+            )
 
     halluc = counts.get("url_mutated_between_agents", 0) + counts.get("llm_hallucinated_url", 0)
     if halluc >= 2 or "url_mutated_between_agents" in dominant_codes or "llm_hallucinated_url" in dominant_codes:

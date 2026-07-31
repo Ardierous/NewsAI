@@ -10,8 +10,9 @@ class Digest(Base):
     __tablename__ = "digests"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
-    date: Mapped[datetime] = mapped_column(Date, nullable=False, unique=True, index=True)
+    date: Mapped[datetime] = mapped_column(Date, nullable=False, index=True)
     digest_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    digest_topic: Mapped[str] = mapped_column(String(16), default="ai", nullable=False)
     digest_type_via_default: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     status: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)
     current_step: Mapped[str] = mapped_column(String(40), default="draft", nullable=False)

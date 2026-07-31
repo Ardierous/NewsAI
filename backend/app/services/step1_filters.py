@@ -42,7 +42,7 @@ def record_step1_filter_reject(reason: str) -> None:
     if total % filter_stats_log_interval() == 0:
         logger.info("[FILTER_STATS] %s", dict(FILTER_STATS))
 
-DigestFilterScope = Literal["shared", "serious", "curious"]
+DigestFilterScope = Literal["shared", "serious", "curious", "style"]
 
 
 @dataclass(frozen=True)
@@ -129,6 +129,13 @@ STEP1_FILTER_CATALOG: tuple[Step1FilterDef, ...] = (
     Step1FilterDef("non_article_page", "Не статья", "Отсекает страницы без корректного заголовка материала.", "verify"),
     Step1FilterDef("off_topic_not_ai", "Не по теме ИИ", "Отсекает публикации вне тематики ИИ/нейросетей.", "verify"),
     Step1FilterDef(
+        "off_topic_not_style",
+        "Не по теме моды",
+        "Отсекает публикации вне fashion/моды/стиля (омонимы «стиль кода», «бизнес-модель» и т.п.).",
+        "verify",
+        digest_scope="style",
+    ),
+    Step1FilterDef(
         "off_topic_not_curious",
         "Критерий курьёзности",
         "Курьёзный тон: отсекает сухой официоз (релизы, регуляторику, инвестиции) и понижает приоритет "
@@ -152,22 +159,40 @@ STEP1_FILTER_CATALOG: tuple[Step1FilterDef, ...] = (
 STEP1_FILTER_DEF_BY_ID: dict[str, Step1FilterDef] = {x.id: x for x in STEP1_FILTER_CATALOG}
 
 
-def filter_def_applies_to_digest_type(filter_id: str, digest_type: str | None) -> bool:
+def filter_def_applies_to_digest_type(
+    filter_id: str,
+    digest_type: str | None,
+    *,
+    digest_topic: str | None = None,
+) -> bool:
+    from app.services.digest_topic_policy import is_style_digest
+
     fdef = STEP1_FILTER_DEF_BY_ID.get(filter_id)
     if not fdef:
+        return False
+    style = is_style_digest(digest_topic)
+    if filter_id == "off_topic_not_ai" and style:
+        return False
+    if filter_id == "off_topic_not_style" and not style:
         return False
     scope = fdef.digest_scope
     curious = is_curious_digest(digest_type)
     if scope == "shared":
         return True
+    if scope == "style":
+        return style
     if scope == "curious":
-        return curious
+        return curious and not style
     if scope == "serious":
-        return not curious
+        return not curious and not style
     return True
 
 
-def step1_filter_catalog_payload(digest_type: str | None = None) -> list[dict[str, Any]]:
+def step1_filter_catalog_payload(
+    digest_type: str | None = None,
+    *,
+    digest_topic: str | None = None,
+) -> list[dict[str, Any]]:
     dtype = normalize_digest_type(digest_type)
     return [
         {
@@ -180,7 +205,7 @@ def step1_filter_catalog_payload(digest_type: str | None = None) -> list[dict[st
             "digest_scope": f.digest_scope,
         }
         for f in STEP1_FILTER_CATALOG
-        if filter_def_applies_to_digest_type(f.id, dtype)
+        if filter_def_applies_to_digest_type(f.id, dtype, digest_topic=digest_topic)
     ]
 
 

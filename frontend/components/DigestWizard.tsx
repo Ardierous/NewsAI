@@ -971,6 +971,7 @@ export function DigestWizard({ digestId }: Props) {
   const [step4Elapsed, setStep4Elapsed] = useState(0);
   const [newsWindowDays, setNewsWindowDays] = useState(3);
   const [newsWindowDayKind, setNewsWindowDayKind] = useState<"calendar" | "working">("working");
+  const [digestTopic, setDigestTopic] = useState<"ai" | "style">("ai");
   const [showAllFoundNews, setShowAllFoundNews] = useState(false);
   const [showStep1Statistics, setShowStep1Statistics] = useState(false);
   const [step1StatsLoading, setStep1StatsLoading] = useState(false);
@@ -1084,6 +1085,8 @@ export function DigestWizard({ digestId }: Props) {
           setSelected(sorted.map((s: { candidate_id: number }) => s.candidate_id));
           pendingPreselectKeptUrlsRef.current = [];
           pendingManualUrlsRef.current = [];
+        } else if (!opts?.preserveSelection) {
+          setSelected([]);
         }
         // Иначе выбор восстановит useEffect: kept/manual URL или ручные карточки пула.
       } catch (e) {
@@ -1133,6 +1136,10 @@ export function DigestWizard({ digestId }: Props) {
     const kind = d.news_window_day_kind;
     if (kind === "working" || kind === "calendar") {
       setNewsWindowDayKind(kind);
+    }
+    const topic = d.digest_topic;
+    if (topic === "ai" || topic === "style") {
+      setDigestTopic(topic);
     }
   }, [digestId, digest?.digest]);
 
@@ -2142,6 +2149,26 @@ export function DigestWizard({ digestId }: Props) {
     return false;
   }, [candidatesSorted.length, digest?.digest?.status, step1CollectionInProgress]);
 
+  const isStyleTopic = digestTopic === "style";
+  const stepThemeAccent = isStyleTopic ? "#ec4899" : "#38bdf8";
+
+  const StepTopicDot = () => (
+    <span
+      aria-hidden="true"
+      title={isStyleTopic ? "Тема: Стиль" : "Тема: ИИ"}
+      style={{
+        display: "inline-block",
+        width: 10,
+        height: 10,
+        borderRadius: "50%",
+        marginRight: 8,
+        background: stepThemeAccent,
+        boxShadow: `0 0 0 2px ${isStyleTopic ? "rgba(236,72,153,0.25)" : "rgba(56,189,248,0.25)"}`,
+        verticalAlign: "middle",
+      }}
+    />
+  );
+
   const step0Active = useMemo((): "serious" | "curious" | "default" | null => {
     const row = digest?.digest;
     if (!row?.digest_type) return null;
@@ -2155,6 +2182,30 @@ export function DigestWizard({ digestId }: Props) {
     const t = digest?.digest?.digest_type;
     return t === "serious" || t === "curious" ? t : null;
   }, [digest?.digest?.digest_type]);
+
+  const step0ApiOpts = () => ({
+    digest_topic: digestTopic,
+    news_window_days: newsWindowDays,
+    news_window_day_kind: newsWindowDayKind,
+  });
+
+  const runStep0 = (
+    label: string,
+    payload: {
+      digest_type?: "serious" | "curious";
+      digest_topic?: "ai" | "style";
+      news_window_days?: number;
+      news_window_day_kind?: "calendar" | "working";
+    },
+  ) =>
+    run(label, async () => {
+      const resp = await api.step0(digestId, payload);
+      const nextId = Number(resp?.digest_id || 0);
+      if (nextId > 0 && nextId !== digestId) {
+        window.location.href = `/digests/${nextId}`;
+        return;
+      }
+    });
 
   const step0BtnStyle = (key: "serious" | "curious" | "default"): CSSProperties => {
     const on = step0Active === key;
@@ -2328,15 +2379,20 @@ export function DigestWizard({ digestId }: Props) {
 
       <div className="card">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0 }}>Шаг 0 — тип дайджеста и окно новостей</h3>
+          <h3 style={{ margin: 0 }}>
+            <StepTopicDot />
+            Шаг 0 — тематика, тон и окно новостей
+          </h3>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"
-              disabled={loading || !sourceTiersDigestType}
+              disabled={loading || !sourceTiersDigestType || isStyleTopic}
               title={
-                sourceTiersDigestType
-                  ? "Домены источников и счётчики за 30 дней"
-                  : "Сначала выберите тип дайджеста (серьёзный или курьёзный)"
+                isStyleTopic
+                  ? "Для темы «Стиль» используется отдельный файл source_tiers_style.txt"
+                  : sourceTiersDigestType
+                    ? "Домены источников и счётчики за 30 дней"
+                    : "Сначала выберите тип дайджеста (серьёзный или курьёзный)"
               }
               onClick={() => setShowSourceTiersModal(true)}
             >
@@ -2349,9 +2405,46 @@ export function DigestWizard({ digestId }: Props) {
         </div>
         <StepProgressBar active={runningStepKey === "0" || runningStepKey === "init"} />
         <p className="wizard-hint-do">
-          Задайте окно по дате публикации, затем нажмите <strong>одну</strong> кнопку тона и дождитесь полоски загрузки. После
-          успеха статус в шапке станет <code>step_0</code> — откроется шаг 1.
+          Выберите <strong>тематику</strong> выпуска и окно по дате публикации.
+          {isStyleTopic ? (
+            <>
+              {" "}
+              Для темы <strong>«Стиль»</strong> по умолчанию ставится окно{" "}
+              <strong>7 календарных дней</strong>; тон общий нейтральный — кнопки тона скрыты. Нажмите{" "}
+              <strong>«Сохранить тематику»</strong> и дождитесь полоски загрузки.
+            </>
+          ) : (
+            <>
+              {" "}
+              Затем нажмите <strong>одну</strong> кнопку тона и дождитесь полоски загрузки.
+            </>
+          )}{" "}
+          Если в выпуске уже есть собранные шаги, смена тематики создаст/откроет отдельный выпуск этой же даты под новую тему.
+          После успеха статус в шапке станет{" "}
+          <code>step_0</code> — откроется шаг 1.
         </p>
+        <label style={{ display: "block", marginBottom: 12 }}>
+          Тематика:{" "}
+          <select
+            value={digestTopic}
+            disabled={loading}
+            onChange={(e) => {
+              const next = e.target.value === "style" ? "style" : "ai";
+              setDigestTopic(next);
+              if (next === "style") {
+                setNewsWindowDays(7);
+                setNewsWindowDayKind("calendar");
+              } else {
+                setNewsWindowDays(3);
+                setNewsWindowDayKind("working");
+              }
+            }}
+            style={{ marginLeft: 6, padding: "6px 8px", borderRadius: 6 }}
+          >
+            <option value="ai">Искусственный интеллект</option>
+            <option value="style">Стиль (мода)</option>
+          </select>
+        </label>
         <label style={{ display: "block", marginBottom: 8 }}>
           Окно поиска (дней от даты выпуска):{" "}
           <input
@@ -2389,17 +2482,23 @@ export function DigestWizard({ digestId }: Props) {
             Календарные
           </label>
         </fieldset>
-        <WizardWhy summary="Зачем тип важен и как ведут себя кнопки">
+        <WizardWhy summary="Зачем тематика и тон важны">
           <p>
-            От выбора зависят промпты к ИИ на шагах 1–4 — это не просто «стиль оформления». Новый выпуск сразу
-            создаётся с типом <strong>серьёзный</strong> (подсветка на кнопке). Курьёзный или «по умолчанию из
-            настроек» можно выбрать до шага 1.
+            <strong>Тематика</strong> определяет, какие источники и ключевые слова использует поиск на шаге 1, и как
+            формируются тексты на шагах 3–4. <strong>ИИ</strong> — текущий режим про искусственный интеллект.{" "}
+            <strong>Стиль</strong> — отдельный пул fashion-источников и фильтры по моде/одежде.
           </p>
-          <p>
-            <strong>Серьёзный</strong> — нейтральный деловой стиль. <strong>Курьёзный</strong> — легче формулировки.{" "}
-            <strong>По умолчанию</strong> — тип из файла настроек сервера (<code>digest_defaults.json</code>, сейчас
-            серьёзный).
-          </p>
+          {!isStyleTopic ? (
+            <p>
+              <strong>Серьёзный</strong> — нейтральный деловой тон. <strong>Курьёзный</strong> — легче формулировки.{" "}
+              <strong>По умолчанию</strong> — тип из файла настроек сервера (<code>digest_defaults.json</code>).
+            </p>
+          ) : (
+            <p>
+              Для темы <strong>Стиль</strong> тон один — общий нейтральный; кнопки «Серьёзный/Курьёзный» не
+              показываются.
+            </p>
+          )}
           <p>
             <strong>Окно новостей</strong> ограничивает шаг 1: в пул попадают только материалы с датой публикации не раньше N
             дней от даты выпуска (календарных или рабочих). Слишком старые URL отсекаются с причиной{" "}
@@ -2407,6 +2506,18 @@ export function DigestWizard({ digestId }: Props) {
             <strong>запуске или пересборке шага 1</strong> сервер берёт текущие значения из полей шага 0.
           </p>
         </WizardWhy>
+        {isStyleTopic ? (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+            <button
+              type="button"
+              disabled={loading}
+              style={step0BtnStyle("serious")}
+              onClick={() => runStep0("Сохранение тематики: стиль…", { digest_type: "serious", ...step0ApiOpts() })}
+            >
+              Сохранить тематику
+            </button>
+          </div>
+        ) : (
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <button
             type="button"
@@ -2414,15 +2525,7 @@ export function DigestWizard({ digestId }: Props) {
             style={step0BtnStyle("serious")}
             aria-pressed={step0Active === "serious"}
             title="Деловой нейтральный тон; рекомендуется для будничных выпусков вручную."
-            onClick={() =>
-              run("Сохранение типа дайджеста: серьёзный…", () =>
-                api.step0(digestId, {
-                  digest_type: "serious",
-                  news_window_days: newsWindowDays,
-                  news_window_day_kind: newsWindowDayKind,
-                }),
-              )
-            }
+            onClick={() => runStep0("Сохранение типа дайджеста: серьёзный…", { digest_type: "serious", ...step0ApiOpts() })}
           >
             Серьёзный
           </button>
@@ -2432,15 +2535,7 @@ export function DigestWizard({ digestId }: Props) {
             style={step0BtnStyle("curious")}
             aria-pressed={step0Active === "curious"}
             title="Курьёзный выпуск: поиск и отбор забавных/неожиданных историй про ИИ (без делового официоза). Перед шагом 1 сохраните тип."
-            onClick={() =>
-              run("Сохранение типа дайджеста: курьёзный…", () =>
-                api.step0(digestId, {
-                  digest_type: "curious",
-                  news_window_days: newsWindowDays,
-                  news_window_day_kind: newsWindowDayKind,
-                }),
-              )
-            }
+            onClick={() => runStep0("Сохранение типа дайджеста: курьёзный…", { digest_type: "curious", ...step0ApiOpts() })}
           >
             Курьёзный
           </button>
@@ -2450,22 +2545,19 @@ export function DigestWizard({ digestId }: Props) {
             style={step0BtnStyle("default")}
             aria-pressed={step0Active === "default"}
             title="Тип из digest_defaults.json на сервере (сейчас — серьёзный)."
-            onClick={() =>
-              run("Сохранение типа дайджеста по умолчанию…", () =>
-                api.step0(digestId, {
-                  news_window_days: newsWindowDays,
-                  news_window_day_kind: newsWindowDayKind,
-                }),
-              )
-            }
+            onClick={() => runStep0("Сохранение типа дайджеста по умолчанию…", step0ApiOpts())}
           >
             По умолчанию
           </button>
         </div>
+        )}
       </div>
 
       <div className="card" ref={step1CardRef}>
-        <h3>Шаг 1 — кандидаты</h3>
+        <h3>
+          <StepTopicDot />
+          Шаг 1 — кандидаты
+        </h3>
         <StepProgressBar active={runningStepKey === "1"} />
         <p className="wizard-hint-do" style={{ fontSize: "0.95rem", margin: "0 0 10px" }}>
           Окно новостей (из шага 0):{" "}
@@ -3364,7 +3456,10 @@ export function DigestWizard({ digestId }: Props) {
             className="news-pick-toolbar"
             style={{ flexWrap: "wrap", gap: 10, alignItems: "center", justifyContent: "space-between" }}
           >
-            <h3 style={{ margin: 0 }}>Шаг 2 — выбор 5 новостей</h3>
+            <h3 style={{ margin: 0 }}>
+              <StepTopicDot />
+              Шаг 2 — выбор 5 новостей
+            </h3>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
               <span className="news-pick-counter">
                 Выбрано: <strong>{selected.length}</strong> / 5
@@ -3709,7 +3804,10 @@ export function DigestWizard({ digestId }: Props) {
 
       {digest?.selected?.length > 0 && (
         <div className="card" ref={step2OrderCardRef}>
-          <h3>Шаг 2 — порядок новостей (drag-and-drop)</h3>
+          <h3>
+            <StepTopicDot />
+            Шаг 2 — порядок новостей (drag-and-drop)
+          </h3>
           <StepProgressBar active={runningStepKey === "2order"} />
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
             {orderEditMode && canChangeOrderFromLaterSteps ? (
@@ -3819,7 +3917,10 @@ export function DigestWizard({ digestId }: Props) {
       )}
 
       <div ref={step3CardRef} className="card" style={{ opacity: canAnalytics ? 1 : 0.55 }}>
-        <h3>Шаг 3 — аналитика</h3>
+        <h3>
+          <StepTopicDot />
+          Шаг 3 — аналитика
+        </h3>
         <StepProgressBar active={runningStepKey === "3"} />
         {step3InProgress ? (
           <WizardStepStatus
@@ -3909,7 +4010,10 @@ export function DigestWizard({ digestId }: Props) {
       </div>
 
       <div ref={step4CardRef} className="card" style={{ opacity: canStep4 ? 1 : 0.55 }}>
-        <h3>Шаг 4 — обложки и тексты</h3>
+        <h3>
+          <StepTopicDot />
+          Шаг 4 — обложки и тексты
+        </h3>
         <StepProgressBar active={step4InProgress} />
         {step4InProgress ? (
           <WizardStepStatus
@@ -4083,7 +4187,10 @@ export function DigestWizard({ digestId }: Props) {
 
       {showStep4Results && (
         <div className="card">
-          <h3>Шаг 4 — результат</h3>
+          <h3>
+            <StepTopicDot />
+            Шаг 4 — результат
+          </h3>
           <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
             Все кнопки «Скопировать текст для …» — одной строкой над полями; вставляйте в редактор площадки (Ctrl+V).
             Обложку загружайте отдельно — ссылка ниже или <code>images/</code>. Telegram — markdown; MAX и Дzen — HTML

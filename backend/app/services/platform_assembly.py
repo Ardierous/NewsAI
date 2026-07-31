@@ -7,18 +7,21 @@ from datetime import date, datetime
 from typing import Any
 
 from app.services.digest_type_policy import is_curious_digest
+from app.services.digest_topic_policy import is_style_digest
 
 MAX_NEWS_SEP = "..."
 DZEN_NEWS_SEP = "—"
 SEP_VK = "· · ·"
 HEADER_TITLE_SERIOUS = "⚡Пять актуальных новостей про ИИ"
 HEADER_TITLE_CURIOUS = "⚡Пять забавных новостей про ИИ"
+HEADER_TITLE_STYLE = "⚡Пять актуальных новостей про моду и стиль"
 # Обратная совместимость для тестов и импортов.
 HEADER_TITLE = HEADER_TITLE_SERIOUS
 DEFAULT_LEAD_SERIOUS = "Коротко: главные сдвиги в мире ИИ и вокруг экосистемы продуктов за сегодня."
 DEFAULT_LEAD_CURIOUS = (
     "Коротко: пять забавных, странных и неожиданных историй про нейросети и ИИ за этот период."
 )
+DEFAULT_LEAD_STYLE = "Коротко: главные новости моды, стиля и fashion-индустрии за этот период."
 DEFAULT_LEAD = DEFAULT_LEAD_SERIOUS
 
 MAX_CHANNEL_URL = "https://max.ru/channel_extellect"
@@ -158,12 +161,16 @@ def subscription_vk_block() -> str:
 
 
 def resolve_header_title(payload: dict[str, Any]) -> str:
+    if is_style_digest(payload.get("digest_topic")):
+        return HEADER_TITLE_STYLE
     if is_curious_digest(payload.get("digest_type")):
         return HEADER_TITLE_CURIOUS
     return HEADER_TITLE_SERIOUS
 
 
 def resolve_default_lead(payload: dict[str, Any]) -> str:
+    if is_style_digest(payload.get("digest_topic")):
+        return DEFAULT_LEAD_STYLE
     if is_curious_digest(payload.get("digest_type")):
         return DEFAULT_LEAD_CURIOUS
     return DEFAULT_LEAD_SERIOUS
@@ -209,9 +216,6 @@ def needs_html_layout_refresh(platform: str, content: str) -> bool:
     lower = text.lower()
     if "<a href=" in lower and "<b>" in lower:
         if platform == "max":
-            sub = subscription_html_inline()
-            if sub not in text:
-                return True
             if not re.search(r"#\w", text):
                 return True
         return False
@@ -287,12 +291,15 @@ def _truncate_at_word(text: str, max_len: int) -> str:
 def _split_platform_html_footer(text: str) -> tuple[str, str]:
     sub = subscription_html_inline()
     idx = text.find(sub)
-    if idx < 0:
-        return text, ""
-    start = text.rfind("<br><br>", 0, idx)
-    if start < 0:
-        return text, ""
-    return text[:start], text[start:]
+    if idx >= 0:
+        start = text.rfind("<br><br>", 0, idx)
+        if start >= 0:
+            return text[:start], text[start:]
+    # Для выпусков без подписи (например, тема "Стиль") режем по блоку хэштегов.
+    hash_idx = text.rfind("<br><br>#")
+    if hash_idx >= 0:
+        return text[:hash_idx], text[hash_idx:]
+    return text, ""
 
 
 def _shrink_html_news_summaries(body: str, max_len: int) -> str:
@@ -404,13 +411,11 @@ def assemble_telegram(payload: dict[str, Any]) -> str:
         summary = _item_summary_short(item)
         news_blocks.append(f"{_news_link_line(item['title'], item['url'])}\n{summary}")
     body = "\n\n".join(news_blocks)
-    text = (
-        f"**{header_title} | {date_ru}**\n\n"
-        f"{lead}\n\n"
-        f"{body}\n\n"
-        f"{subscription_md_inline()}\n\n"
-        f"{tags}"
-    )
+    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_md_inline()
+    text = f"**{header_title} | {date_ru}**\n\n{lead}\n\n{body}\n\n"
+    if sub:
+        text += f"{sub}\n\n"
+    text += tags
     return truncate_platform_text(compress_paragraphs(fix_markdown_links(text)), TELEGRAM_MAX_CHARS)
 
 
@@ -420,7 +425,12 @@ def assemble_max(payload: dict[str, Any]) -> str:
     header_title = resolve_header_title(payload)
     lead = _truncate_at_word(resolve_lead(payload, "max"), 280)
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
-    footer = f"<br><br>{subscription_html_inline()}<br><br>{escape_html_text(tags)}"
+    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_html_inline()
+    footer = (
+        f"<br><br>{escape_html_text(tags)}"
+        if not sub
+        else f"<br><br>{sub}<br><br>{escape_html_text(tags)}"
+    )
     header = (
         f"<b>{escape_html_text(header_title)} | {escape_html_text(date_ru)}</b><br><br>"
         f"{escape_html_text(lead)}<br><br>"
@@ -448,14 +458,11 @@ def assemble_vk(payload: dict[str, Any]) -> str:
         url = str(item["url"]).strip()
         news_blocks.append(f"{title}\n{summary}\nПодробности: {url}")
     body = f"\n\n{SEP_VK}\n\n".join(news_blocks)
-    text = (
-        f"{header_title} | {date_ru}\n\n"
-        f"{lead}\n\n"
-        f"{SEP_VK}\n\n"
-        f"{body}\n\n"
-        f"{subscription_vk_block()}\n\n"
-        f"{tags}"
-    )
+    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_vk_block()
+    text = f"{header_title} | {date_ru}\n\n{lead}\n\n{SEP_VK}\n\n{body}\n\n"
+    if sub:
+        text += f"{sub}\n\n"
+    text += tags
     return compress_paragraphs(text)
 
 
@@ -468,7 +475,12 @@ def assemble_dzen(payload: dict[str, Any]) -> str:
     if not intro:
         intro = resolve_default_lead(payload)
     intro = _truncate_at_word(intro, 280)
-    footer = f"<br><br>{subscription_html_inline()}<br><br>{escape_html_text(tags)}"
+    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_html_inline()
+    footer = (
+        f"<br><br>{escape_html_text(tags)}"
+        if not sub
+        else f"<br><br>{sub}<br><br>{escape_html_text(tags)}"
+    )
     header = (
         f"<b>{escape_html_text(header_title)} | {escape_html_text(date_ru)}</b><br><br>"
         f"{escape_html_text(intro)}<br><br>"

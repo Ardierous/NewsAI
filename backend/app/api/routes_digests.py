@@ -303,13 +303,16 @@ def run_step0(digest_id: int, payload: Step0Request, db: Session = Depends(get_d
     digest = service.run_step_0(
         digest_id,
         payload.digest_type,
+        digest_topic=payload.digest_topic,
         news_window_days=payload.news_window_days,
         news_window_day_kind=payload.news_window_day_kind,
     )
     return Step0Response(
         digest_id=digest.id,
         digest_type=digest.digest_type or "serious",
+        digest_topic=digest.digest_topic or "ai",  # type: ignore[arg-type]
         default_applied=payload.digest_type is None,
+        topic_default_applied=payload.digest_topic is None,
         news_window_days=digest.news_window_days,
         news_window_day_kind=digest.news_window_day_kind,  # type: ignore[arg-type]
     )
@@ -326,7 +329,9 @@ def patch_digest_news_window(digest_id: int, payload: NewsWindowPatch, db: Sessi
     return Step0Response(
         digest_id=digest.id,
         digest_type=digest.digest_type or "serious",
+        digest_topic=digest.digest_topic or "ai",  # type: ignore[arg-type]
         default_applied=bool(digest.digest_type_via_default),
+        topic_default_applied=False,
         news_window_days=digest.news_window_days,
         news_window_day_kind=digest.news_window_day_kind,  # type: ignore[arg-type]
     )

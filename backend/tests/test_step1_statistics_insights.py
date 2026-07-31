@@ -31,6 +31,20 @@ def test_recommendations_http_unreachable_and_cap():
     assert any("http_unreachable" in r["detail"].lower() or "не открылась" in r["detail"].lower() for r in recs)
 
 
+def test_recommendations_mass_http_unreachable_warns_about_connectivity():
+    dominant = build_dominant_rejects({"http_unreachable": 66, "news_listing_page": 10})
+    recs = build_recommendations(
+        digest_type="serious",
+        rejected_summary={"http_unreachable": 66, "news_listing_page": 10},
+        dominant_rejects=dominant,
+        meta={"stop_reason": "hard_timeout"},
+        summary={"in_pool": 0, "rejected": 76, "total_links": 80},
+        registry_buckets={},
+    )
+    assert any("связ" in r["title"].lower() for r in recs)
+    assert any("не перезапускайте" in r["title"].lower() or "повторный запуск" in r["detail"].lower() for r in recs)
+
+
 def test_insights_headline_mentions_dominant():
     payload = build_step1_insights(
         digest_type="curious",

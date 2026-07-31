@@ -1,0 +1,147 @@
+Система приоритетов источников для дайджеста моды и стиля.
+
+Это список ресурсов, где нужно искать новости для fashion-выпуска. Поле tier относится к итоговому источнику новости.
+В пул попадает прямой URL отдельной HTML-статьи, не лента/поиск/тег агрегатора.
+
+Правила для поля tier в JSON кандидатов:
+- Используй строки: Tier-1, Tier-2, Tier-3, Tier-4, Tier-5.
+- Tier-1 и Tier-2 заполняй строго по спискам ниже.
+- Агрегаторы из aggregator_hosts участвуют в поиске; в пул — первоисточник статьи.
+- При равной значимости отдавай предпочтение более высокому tier.
+
+---
+
+Tier-1 (приоритет №1): мировые и российские эталоны моды
+
+Зарубежные:
+- The Business of Fashion — https://www.businessoffashion.com/
+- Vogue — https://www.vogue.com/fashion
+- Harper's Bazaar — https://www.harpersbazaar.com/
+
+Российские:
+- The Blueprint — https://theblueprint.ru/
+- PROfashion — https://profashion.ru/
+
+---
+
+Tier-2 (приоритет №2): оперативные fashion-медиа и агрегаторы
+
+Зарубежные:
+- Women's Wear Daily (WWD) — https://wwd.com/
+- Fashion Network — https://fashionnetwork.com/
+- Highsnobiety — https://www.highsnobiety.com/
+- Hypebeast — https://hypebeast.com/
+- Fashionista — https://fashionista.com/
+- The Cut — https://www.thecut.com/
+
+Российские:
+- Fashion Buzz — https://fashionbuzz.media/
+- FashionNetwork Россия — https://ru.fashionnetwork.com/
+- U MAGAZINE — https://umagazine.ru/
+- DRESS CODE — https://dresscodemag.ru/
+- Собака.ru (мода) — https://sobaka.ru/fashion
+- Милитта — https://mylitta.ru/
+- Woman.ru (мода) — https://woman.ru/fashion
+- BURO 24/7 (тренды) — https://m.buro247.ru/fashion/trends
+- ModaNews — https://modanews.ru/news
+
+---
+
+Tier-3: алгоритмические агрегаторы и дополнительные площадки
+
+- Google News (поиск по fashion) — https://news.google.com/search?q=fashion
+- Feedly — для мониторинга RSS fashion-изданий
+- Яндекс Дзен (раздел мода) — https://dzen.ru/topic/fashion
+
+--- HOST_RULES ---
+
+[aggregator_hosts]
+news.google.
+google.com/news
+feedly.com
+flipboard.com
+news.ycombinator.com
+reddit.com
+dzen.ru/topic
+yandex.ru/news
+
+[tier1_hosts]
+businessoffashion.com
+vogue.com
+harpersbazaar.com
+theblueprint.ru
+profashion.ru
+
+[tier2_hosts]
+wwd.com
+fashionnetwork.com
+highsnobiety.com
+hypebeast.com
+fashionista.com
+thecut.com
+fashionbuzz.media
+ru.fashionnetwork.com
+umagazine.ru
+dresscodemag.ru
+sobaka.ru
+mylitta.ru
+woman.ru
+buro247.ru
+modanews.ru
+
+[tier3_hosts]
+dzen.ru
+
+[tier4_hosts]
+
+[banned_media_hosts]
+meduza.io
+novayagazeta.eu
+tvrain.
+theins.ru
+i-stories.media
+agentura.ru
+activatica.org
+currenttime.tv
+svoboda.org
+
+[foreign_agent_hosts]
+meduza.io
+tvrain.
+currenttime.tv
+svoboda.org
+
+[russian_host_markers]
+.ru
+.su
+yandex.
+dzen.ru
+
+[blocked_search_hosts]
+wikipedia.org
+arxiv.org
+medium.com/tag/
+
+[search_seed_urls]
+https://m.buro247.ru/fashion/trends
+https://modanews.ru/news
+https://www.businessoffashion.com/
+https://www.vogue.com/fashion
+https://www.harpersbazaar.com/
+https://wwd.com/
+https://fashionnetwork.com/
+https://www.highsnobiety.com/
+https://hypebeast.com/
+https://fashionista.com/
+https://www.thecut.com/
+https://theblueprint.ru/
+https://profashion.ru/
+https://fashionbuzz.media/
+https://ru.fashionnetwork.com/
+https://umagazine.ru/
+https://dresscodemag.ru/
+https://sobaka.ru/fashion
+https://mylitta.ru/
+https://woman.ru/fashion
+https://news.google.com/search?q=fashion
+https://dzen.ru/topic/fashion
