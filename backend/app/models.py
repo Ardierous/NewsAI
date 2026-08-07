@@ -81,6 +81,7 @@ class NewsCandidate(Base):
     is_aggregator: Mapped[bool] = mapped_column(Boolean, default=False)
     is_duplicate: Mapped[bool] = mapped_column(Boolean, default=False)
     verification_comment: Mapped[str] = mapped_column(Text, default="")
+    seed_marker: Mapped[str] = mapped_column(String(500), default="", nullable=False)
 
     digest: Mapped["Digest"] = relationship("Digest", back_populates="candidates")
 
@@ -246,6 +247,7 @@ class Step1UrlRegistry(Base):
     title: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     source_stage: Mapped[str] = mapped_column(String(40), default="search", nullable=False)
     verification_comment: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    seed_marker: Mapped[str] = mapped_column(String(500), default="", nullable=False)
     last_digest_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)

@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from sqlalchemy.orm import Session
 
 from app.models import Step1FilterEnabledSnapshot, Step1UrlRegistry
+from app.services.seed_source_tracking import seed_marker_from_item, url_lookup_key
 from app.services.digest_type_policy import normalize_digest_type
 
 if TYPE_CHECKING:
@@ -220,6 +221,7 @@ def register_raw_urls(
     digest_type: str | None,
     digest_id: int,
     source_stage: str = "search",
+    seed_markers: dict[str, str] | None = None,
 ) -> int:
     dtype = normalize_digest_type(digest_type)
     now = datetime.utcnow()
@@ -234,6 +236,9 @@ def register_raw_urls(
         if not fp or fp in pending_fps:
             continue
         row = _find_registry_row(db, url)
+        seed_marker = ""
+        if seed_markers:
+            seed_marker = str(seed_markers.get(url_lookup_key(url)) or "").strip()[:500]
         if row is None:
             db.add(
                 Step1UrlRegistry(
@@ -246,6 +251,7 @@ def register_raw_urls(
                     title="",
                     source_stage=str(source_stage or "search")[:40],
                     verification_comment="",
+                    seed_marker=seed_marker,
                     last_digest_id=int(digest_id),
                     first_seen_at=now,
                     last_seen_at=now,
@@ -259,6 +265,8 @@ def register_raw_urls(
             row.expires_at = exp
             row.last_digest_id = int(digest_id)
             row.digest_type = dtype
+            if seed_marker:
+                row.seed_marker = seed_marker
     if added:
         db.flush()
     return added
@@ -343,6 +351,7 @@ def classify_registry_item(
     title = str(item.get("title") or "").strip()[:500]
     comment = str(item.get("verification_comment") or "").strip()
     stage = str(item.get("source_stage") or item.get("category") or "search")[:40]
+    seed_marker = seed_marker_from_item(item)
     row = _find_registry_row(db, url)
     if row is None:
         db.add(
@@ -356,6 +365,7 @@ def classify_registry_item(
                 title=title,
                 source_stage=stage,
                 verification_comment=comment[:4000],
+                seed_marker=seed_marker[:500],
                 last_digest_id=int(digest_id),
                 first_seen_at=now,
                 last_seen_at=now,
@@ -374,6 +384,8 @@ def classify_registry_item(
         row.last_digest_id = int(digest_id)
         row.last_seen_at = now
         row.expires_at = exp
+        if seed_marker:
+            row.seed_marker = seed_marker[:500]
         if row.url_fingerprint != fp:
             row.url_fingerprint = fp
     db.flush()
@@ -433,4 +445,5 @@ def registry_row_to_skeleton(row: Step1UrlRegistry, *, seq: int) -> dict[str, An
         "page_verified": False,
         "verification_comment": "",
         "source_stage": "registry_reverify",
+        "seed_marker": str(row.seed_marker or "").strip()[:500],
     }

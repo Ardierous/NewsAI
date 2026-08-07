@@ -177,6 +177,59 @@ def test_raw_count_includes_verified_bucket(db_session: Session, tiers_rules_tmp
     assert vc.stats.raw_count >= 1
 
 
+def test_telegram_channel_seed_stats(db_session: Session, tiers_rules_tmp):
+    serious, curious = tiers_rules_tmp
+    settings = type(
+        "S",
+        (),
+        {
+            "source_tiers_path": serious,
+            "curious_source_hosts_path": curious,
+            "step1_telegram_monitor_enabled": True,
+            "step1_telegram_monitor_channels": "technokratos",
+        },
+    )()
+    now = datetime.utcnow()
+    tg_marker = "https://t.me/s/technokratos"
+    db_session.add(
+        Step1UrlRegistry(
+            url_fingerprint="habr.com/news/tg1",
+            url="https://habr.com/news/tg1",
+            host="habr.com",
+            digest_type="serious",
+            bucket="raw",
+            seed_marker=tg_marker,
+            last_seen_at=now,
+            expires_at=now + timedelta(days=90),
+        )
+    )
+    digest = Digest(date=now.date(), digest_type="serious", status="step_1_candidates", current_step="step_1_candidates")
+    db_session.add(digest)
+    db_session.flush()
+    cand = NewsCandidate(
+        digest_id=digest.id,
+        original_number=1,
+        title="t",
+        url="https://habr.com/news/tg2",
+        source="Habr",
+        published_at="2026-06-18",
+        category="technology",
+        description="d",
+        page_verified=True,
+        link_status=True,
+        headline_editorial_ok=True,
+        seed_marker=tg_marker,
+    )
+    db_session.add(cand)
+    db_session.commit()
+
+    payload = build_source_tiers_editor(db_session, settings, "serious", window_days=30)
+    seeds = next(g for g in payload.groups if g.id == "search_seed_urls")
+    tg = next(h for h in seeds.hosts if h.marker == tg_marker)
+    assert tg.stats.raw_count >= 1
+    assert tg.stats.pool_count >= 1
+
+
 def test_search_seed_urls_includes_telegram_monitor(db_session: Session, tiers_rules_tmp):
     serious, curious = tiers_rules_tmp
     settings = type(

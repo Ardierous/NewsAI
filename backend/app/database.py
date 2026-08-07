@@ -95,6 +95,11 @@ def ensure_digest_schema_migrations() -> None:
                     )
                 )
                 conn.commit()
+            rows_nc = conn.execute(text("PRAGMA table_info(news_candidates)")).fetchall()
+            nc_names = {row[1] for row in rows_nc}
+            if nc_names and "seed_marker" not in nc_names:
+                conn.execute(text("ALTER TABLE news_candidates ADD COLUMN seed_marker VARCHAR(500) NOT NULL DEFAULT ''"))
+                conn.commit()
             if "step1_budget_capped" not in names:
                 conn.execute(text("ALTER TABLE digests ADD COLUMN step1_budget_capped INTEGER NOT NULL DEFAULT 0"))
                 conn.commit()
@@ -389,6 +394,12 @@ def ensure_digest_schema_migrations() -> None:
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_step1_url_registry_expires ON step1_url_registry (expires_at)"))
                 conn.commit()
             _normalize_step1_url_registry_unified_keys(conn)
+            reg_cols = {row[1] for row in conn.execute(text("PRAGMA table_info(step1_url_registry)")).fetchall()}
+            if reg_cols and "seed_marker" not in reg_cols:
+                conn.execute(
+                    text("ALTER TABLE step1_url_registry ADD COLUMN seed_marker VARCHAR(500) NOT NULL DEFAULT ''")
+                )
+                conn.commit()
             if "step1_host_unreachable_stats" not in {
                 r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
             }:
@@ -494,6 +505,12 @@ def ensure_digest_schema_migrations() -> None:
             with engine.begin() as conn:
                 conn.execute(
                     text("ALTER TABLE news_candidates ADD COLUMN article_excerpt TEXT NOT NULL DEFAULT ''")
+                )
+        nc_cols = {c["name"] for c in insp.get_columns("news_candidates")}
+        if "seed_marker" not in nc_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE news_candidates ADD COLUMN seed_marker VARCHAR(500) NOT NULL DEFAULT ''")
                 )
     if "step1_budget_capped" not in cols:
         with engine.begin() as conn:
@@ -698,6 +715,12 @@ def ensure_digest_schema_migrations() -> None:
     if insp.has_table("step1_url_registry"):
         with engine.begin() as conn:
             _normalize_step1_url_registry_unified_keys(conn)
+        reg_cols = {c["name"] for c in insp.get_columns("step1_url_registry")}
+        if "seed_marker" not in reg_cols:
+            with engine.begin() as conn:
+                conn.execute(
+                    text("ALTER TABLE step1_url_registry ADD COLUMN seed_marker VARCHAR(500) NOT NULL DEFAULT ''")
+                )
     if not insp.has_table("step1_host_unreachable_stats"):
         with engine.begin() as conn:
             conn.execute(

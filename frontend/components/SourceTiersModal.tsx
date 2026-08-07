@@ -200,9 +200,9 @@ export function SourceTiersModal({ digestType, open, onClose }: Props) {
                       <tr>
                         <th aria-label="Порядок" />
                         <th>Домен / маркер</th>
-                        <th title="Ссылок с этого домена (или seed-URL) нашли на шаге 1 за окно">Найдено</th>
-                        <th title="Подтверждённые статьи в пуле кандидатов">В пуле</th>
-                        <th title="Попали в ваш топ‑5 на шаге 2">В топ‑5</th>
+                        <th title="Для доменов — по сайту статьи; для Telegram и seed-лент — по источнику, откуда ссылка пришла">Найдено</th>
+                        <th title="Для доменов — по сайту статьи; для Telegram и seed-лент — по источнику сбора">В пуле</th>
+                        <th title="Для доменов — по сайту статьи; для Telegram и seed-лент — по источнику сбора">В топ‑5</th>
                         <th aria-label="Действия" />
                       </tr>
                     </thead>

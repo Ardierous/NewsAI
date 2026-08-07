@@ -132,7 +132,16 @@ from app.services.step1_cancellation import (
 )
 from app.services.candidate_origin import apply_resolved_origin
 from app.services.source_tiers_editor import expand_search_seed_urls
-from app.services.telegram_channel_monitor import collect_telegram_seed_urls_for_digest
+from app.services.telegram_channel_monitor import (
+    collect_telegram_seed_bundle_for_digest,
+    collect_telegram_seed_urls_for_digest,
+)
+from app.services.seed_source_tracking import (
+    attach_seed_marker,
+    lookup_seed_marker,
+    seed_marker_from_item,
+    url_lookup_key,
+)
 from app.services.step1_filters import (
     CURIOUS_PREFILTER_DEFAULT_ORDER,
     STEP1_FILTER_DEF_BY_ID,
@@ -3843,6 +3852,7 @@ class DigestService:
                     is_aggregator=bool(item.get("is_aggregator", False)),
                     is_duplicate=is_duplicate,
                     verification_comment=str(item.get("verification_comment", "")),
+                    seed_marker=seed_marker_from_item(item)[:500],
                 )
             )
         self.db.commit()
@@ -3935,6 +3945,7 @@ class DigestService:
                     is_aggregator=bool(item.get("is_aggregator", False)),
                     is_duplicate=bool(item.get("is_duplicate", False)),
                     verification_comment=str(item.get("verification_comment", "")),
+                    seed_marker=seed_marker_from_item(item)[:500],
                 )
             )
         if not entities:
@@ -4319,6 +4330,7 @@ class DigestService:
                     len(carried_manual_urls),
                 )
         telegram_seed_urls: list[str] = []
+        telegram_seed_markers: dict[str, str] = {}
         normalized_manual_urls: list[str] = list(user_manual_urls)
         telegram_only_urls: list[str] = []
         if not self.settings.enable_web_fetch and not user_manual_urls:
@@ -4439,7 +4451,7 @@ class DigestService:
             if self.settings.step1_telegram_monitor_enabled:
                 try:
                     with step1_phase("telegram"):
-                        telegram_seed_urls = collect_telegram_seed_urls_for_digest(
+                        telegram_seed_urls, telegram_seed_markers = collect_telegram_seed_bundle_for_digest(
                             self.settings,
                             earliest_date=digest_earliest_news_date(digest),
                             proxy=self.proxy,
@@ -4487,7 +4499,13 @@ class DigestService:
                 )
             if telegram_only_urls:
                 manual_candidates.extend(
-                    self._build_manual_candidates(digest, telegram_only_urls, now_msk, mandatory=False)
+                    self._build_manual_candidates(
+                        digest,
+                        telegram_only_urls,
+                        now_msk,
+                        mandatory=False,
+                        seed_markers=telegram_seed_markers,
+                    )
                 )
             valid_manual_candidates = [x for x in manual_candidates if x.get("page_verified")]
             failed_manual_candidates = [x for x in manual_candidates if not x.get("page_verified")]
@@ -4597,6 +4615,7 @@ class DigestService:
             )
             step1_collection_meta["estimated_raw_for_10"] = estimated_raw_for_10
             self._step1_raw_urls_registry: set[str] = set()
+            self._step1_seed_markers: dict[str, str] = dict(telegram_seed_markers)
             self._step1_min_fetch_limit: int | None = (
                 estimated_raw_for_10 if self.settings.enable_web_fetch else None
             )
@@ -6198,6 +6217,7 @@ class DigestService:
                     is_aggregator=bool(item.get("is_aggregator", False)),
                     is_duplicate=is_duplicate,
                     verification_comment=str(item.get("verification_comment", "")),
+                    seed_marker=seed_marker_from_item(item)[:500],
                 )
                 entities.append(entity)
                 self.db.add(entity)
@@ -6455,6 +6475,7 @@ class DigestService:
                     is_aggregator=bool(item.get("is_aggregator", False)),
                     is_duplicate=bool(item.get("is_duplicate", False)),
                     verification_comment=str(item.get("verification_comment", "")),
+                    seed_marker=seed_marker_from_item(item)[:500],
                 )
                 self.db.add(entity)
                 self.db.flush()
@@ -7500,6 +7521,7 @@ class DigestService:
         *,
         mandatory: bool = True,
         manual_step: int = 1,
+        seed_markers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for idx, url in enumerate(manual_urls, start=1):
@@ -7510,6 +7532,7 @@ class DigestService:
                 stored = url.strip()
             host = _host_from_url(stored)
             link_ok = bool(bundle.get("ok"))
+            row_seed = lookup_seed_marker(stored, seed_markers, stored_url=url)
 
             if mandatory:
                 comment = "MANUAL_REQUIRED: добавлено пользователем"
@@ -7546,6 +7569,7 @@ class DigestService:
                             "page_verified": False,
                         }
                     )
+                    attach_seed_marker(result[-1], row_seed)
                     continue
 
                 if _manual_seed_page_is_listing(stored, bundle):
@@ -7581,6 +7605,7 @@ class DigestService:
                             "page_verified": False,
                         }
                     )
+                    attach_seed_marker(result[-1], row_seed)
                     continue
 
                 if not _manual_seed_page_is_article(stored, bundle):
@@ -7616,6 +7641,7 @@ class DigestService:
                             "page_verified": False,
                         }
                     )
+                    attach_seed_marker(result[-1], row_seed)
                     continue
 
                 result.append(
@@ -7628,6 +7654,7 @@ class DigestService:
                     )
                 )
                 row = result[-1]
+                attach_seed_marker(row, row_seed)
                 corpus = f"{row.get('title', '')} {bundle.get('topic_corpus', '')}"
                 _apply_material_form_to_candidate(row, extra=corpus, digest_type=digest.digest_type)
                 continue
@@ -7815,6 +7842,7 @@ class DigestService:
                         candidate_row["page_verified"] = False
                         comment = f"{comment} {REJECT_REASON_PREFIX}{manual_reject}"
                         candidate_row["verification_comment"] = comment
+            attach_seed_marker(candidate_row, row_seed)
             result.append(candidate_row)
         return result
 
@@ -8945,6 +8973,13 @@ class DigestService:
                     continue
                 seen_raw.add(key)
                 raw_unique.append(str(resolved_url).strip())
+                seed_key = url_lookup_key(str(resolved_url))
+                if seed_key:
+                    markers = getattr(self, "_step1_seed_markers", None)
+                    if markers is None:
+                        self._step1_seed_markers = {}
+                        markers = self._step1_seed_markers
+                    markers[seed_key] = str(seed_url).strip()[:500]
                 added += 1
         if added:
             logger.info(
@@ -9019,6 +9054,7 @@ class DigestService:
                 work["title"] = ""
                 work["headline_editorial_ok"] = False
                 work["link_status"] = False
+                attach_seed_marker(work, str(seed_url).strip())
                 try:
                     self._verify_llm_candidate_dict(
                         digest,
@@ -9559,6 +9595,7 @@ class DigestService:
                 digest_type=digest.digest_type,
                 digest_id=digest_id,
                 source_stage="search",
+                seed_markers=getattr(self, "_step1_seed_markers", None),
             )
             if registered:
                 self.db.commit()

@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from app.services.seed_source_tracking import telegram_channel_marker, url_lookup_key
+
 if TYPE_CHECKING:
     from app.config import Settings
 
@@ -252,12 +254,12 @@ def _collect_via_proxyapi(
     max_digest_posts: int,
     post_text_filter: str | None,
     proxy: Any | None = None,
-) -> list[str]:
+) -> tuple[list[str], dict[str, str]]:
     if not getattr(settings, "proxyapi_web_search_enabled", True):
         logger.info("Telegram monitor (ProxyAPI): web_search отключён, пропуск")
-        return []
+        return [], {}
     if not getattr(settings, "step1_telegram_via_proxyapi", True):
-        return []
+        return [], {}
 
     from app.proxyapi_client import ProxyApiClient
 
@@ -271,10 +273,12 @@ def _collect_via_proxyapi(
         ctx_size = "high"
 
     ordered: list[str] = []
+    markers: dict[str, str] = {}
     seen: set[str] = set()
     for channel in channels:
         if len(ordered) >= max_links:
             break
+        channel_marker = telegram_channel_marker(channel)
         try:
             raw_urls, html_pages = client.fetch_telegram_digest_seed_urls(
                 channel,
@@ -308,10 +312,13 @@ def _collect_via_proxyapi(
             max_links=max_links,
         )
         for url in channel_urls:
-            if url in seen:
+            key = url_lookup_key(url)
+            if not key or key in seen:
                 continue
-            seen.add(url)
+            seen.add(key)
             ordered.append(url)
+            if channel_marker:
+                markers[key] = channel_marker
             if len(ordered) >= max_links:
                 break
 
@@ -323,7 +330,7 @@ def _collect_via_proxyapi(
         post_text_filter or "",
         max_digest_posts,
     )
-    return ordered
+    return ordered, markers
 
 
 def collect_external_links_from_channels(
@@ -335,21 +342,23 @@ def collect_external_links_from_channels(
     max_digest_posts: int = 3,
     post_text_filter: str | None = _DIGEST_TEXT_MARKER,
     timeout: float = 10.0,
-) -> list[str]:
+) -> tuple[list[str], dict[str, str]]:
     """
     Собрать уникальные внешние URL из последних постов каналов (новые посты первыми).
     По умолчанию — только max_digest_posts последних постов с «Дайджест» в тексте.
     Посты старше earliest_date не учитываются; при необходимости подгружается предыдущая страница t.me/s/.
     """
     if not channels:
-        return []
+        return [], {}
     max_pages = max(1, min(max_pages, 5))
     max_links = max(1, min(max_links, 80))
     max_digest_posts = max(1, min(max_digest_posts, 10))
     ordered: list[str] = []
+    markers: dict[str, str] = {}
     seen: set[str] = set()
 
     for channel in channels:
+        channel_marker = telegram_channel_marker(channel)
         before: int | None = None
         pages = 0
         digest_posts_used = 0
@@ -380,12 +389,15 @@ def collect_external_links_from_channels(
                 max_links=max_links - len(ordered),
             )
             for url in page_urls:
-                if url in seen:
+                key = url_lookup_key(url)
+                if not key or key in seen:
                     continue
-                seen.add(url)
+                seen.add(key)
                 ordered.append(url)
+                if channel_marker:
+                    markers[key] = channel_marker
                 if len(ordered) >= max_links:
-                    return ordered
+                    return ordered, markers
 
             for post in sorted(posts, key=lambda p: p.published_at, reverse=True):
                 if digest_posts_used >= max_digest_posts:
@@ -415,20 +427,20 @@ def collect_external_links_from_channels(
         post_text_filter or "",
         max_digest_posts,
     )
-    return ordered
+    return ordered, markers
 
 
-def collect_telegram_seed_urls_for_digest(
+def collect_telegram_seed_bundle_for_digest(
     settings: Settings,
     *,
     earliest_date: date | None,
     proxy: Any | None = None,
-) -> list[str]:
+) -> tuple[list[str], dict[str, str]]:
     if not getattr(settings, "step1_telegram_monitor_enabled", True):
-        return []
+        return [], {}
     channels = parse_monitor_channels(getattr(settings, "step1_telegram_monitor_channels", "") or "")
     if not channels:
-        return []
+        return [], {}
     text_filter = getattr(settings, "step1_telegram_post_text_filter", _DIGEST_TEXT_MARKER) or ""
     max_pages = int(getattr(settings, "step1_telegram_max_pages", 2) or 2)
     max_links = int(getattr(settings, "step1_telegram_max_links", 30) or 30)
@@ -444,11 +456,39 @@ def collect_telegram_seed_urls_for_digest(
     )
 
     if getattr(settings, "step1_telegram_via_proxyapi", True):
-        proxy_urls = _collect_via_proxyapi(settings, channels, proxy=proxy, **kwargs)
+        proxy_urls, proxy_markers = _collect_via_proxyapi(settings, channels, proxy=proxy, **kwargs)
         if proxy_urls:
-            return proxy_urls
+            return proxy_urls, proxy_markers
         if not getattr(settings, "step1_telegram_direct_fallback", True):
-            return []
+            return [], {}
         logger.info("Telegram monitor: ProxyAPI не вернул URL, пробуем direct t.me")
 
     return collect_external_links_from_channels(channels, timeout=timeout, **kwargs)
+
+
+def collect_telegram_seed_url_markers_for_digest(
+    settings: Settings,
+    *,
+    earliest_date: date | None,
+    proxy: Any | None = None,
+) -> dict[str, str]:
+    _urls, markers = collect_telegram_seed_bundle_for_digest(
+        settings,
+        earliest_date=earliest_date,
+        proxy=proxy,
+    )
+    return markers
+
+
+def collect_telegram_seed_urls_for_digest(
+    settings: Settings,
+    *,
+    earliest_date: date | None,
+    proxy: Any | None = None,
+) -> list[str]:
+    urls, _markers = collect_telegram_seed_bundle_for_digest(
+        settings,
+        earliest_date=earliest_date,
+        proxy=proxy,
+    )
+    return urls

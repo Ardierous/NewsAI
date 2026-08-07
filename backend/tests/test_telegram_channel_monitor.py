@@ -48,7 +48,7 @@ def test_post_matches_digest_filter(sample_html: str):
 
 def test_collect_only_digest_posts(sample_html: str):
     with patch.object(tcm, "fetch_channel_html", return_value=sample_html):
-        urls = tcm.collect_external_links_from_channels(
+        urls, _markers = tcm.collect_external_links_from_channels(
             ("technokratos",),
             earliest_date=date(2026, 4, 1),
             max_pages=1,
@@ -62,7 +62,7 @@ def test_collect_only_digest_posts(sample_html: str):
 
 def test_collect_respects_earliest_date(sample_html: str):
     with patch.object(tcm, "fetch_channel_html", return_value=sample_html):
-        urls = tcm.collect_external_links_from_channels(
+        urls, _markers = tcm.collect_external_links_from_channels(
             ("technokratos",),
             earliest_date=date(2026, 5, 5),
             max_pages=1,
@@ -105,6 +105,41 @@ def test_collect_skips_old_posts_without_blocking_newer_digest_links():
     assert "https://habr.com/ru/news/1049262/" in urls
     assert any("2984485" in u for u in urls)
     assert not any("old.example.com" in u for u in urls)
+
+
+def test_telegram_seed_markers_from_proxyapi(monkeypatch: pytest.MonkeyPatch, sample_html: str):
+    from types import SimpleNamespace
+
+    settings = SimpleNamespace(
+        step1_telegram_monitor_enabled=True,
+        step1_telegram_monitor_channels="technokratos",
+        step1_telegram_max_pages=1,
+        step1_telegram_max_links=20,
+        step1_telegram_max_digest_posts=3,
+        step1_telegram_post_text_filter="Дайджест",
+        step1_telegram_timeout_sec=10.0,
+        step1_telegram_via_proxyapi=True,
+        step1_telegram_direct_fallback=False,
+        proxyapi_web_search_enabled=True,
+        proxyapi_web_search_context_size="high",
+        step1_telegram_proxyapi_context_size="high",
+    )
+
+    class FakeProxy:
+        def fetch_telegram_digest_seed_urls(self, channel, **kwargs):
+            assert channel == "technokratos"
+            return (
+                ["https://vc.ru/chatgpt/2913363-openai-chatgpt", "https://habr.com/ru/news/1032110/"],
+                [sample_html],
+            )
+
+    markers = tcm.collect_telegram_seed_url_markers_for_digest(
+        settings,
+        earliest_date=date(2026, 5, 1),
+        proxy=FakeProxy(),
+    )
+    assert markers
+    assert all(v == "https://t.me/s/technokratos" for v in markers.values())
 
 
 def test_collect_telegram_seed_prefers_proxyapi(monkeypatch: pytest.MonkeyPatch, sample_html: str):

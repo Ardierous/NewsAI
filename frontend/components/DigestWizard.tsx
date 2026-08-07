@@ -198,6 +198,296 @@ function formatRunWhen(iso: string | null | undefined): string {
   });
 }
 
+/** Подзаголовки в тексте аналитики шага 3 (часто идут inline через « — » в одном абзаце). */
+const EDITOR_SECTION_LABEL =
+  "(?:Аудитория|Польза\\s*/\\s*вред|Польза\\s+и\\s+вред|Польза(?:\\s+(?:от|для)\\s+[\\wа-яА-ЯёЁ«»\\s]{0,55})?|Вред|Последствия|Риски?|Рекомендации?(?:\\s+[\\wа-яА-ЯёЁ\\s]{0,40})?|Контекст|Вывод|Итог|Практическая\\s+польза|Ограничения?|Возможности?|читателям|Редакции(?:\\s+стоит)?|Важность(?:\\s+в\\s+том,\\s+что)?|Для\\s+(?:бизнеса|рынка|редактора)|Почему\\s+важно|Что\\s+это\\s+значит)";
+
+const EDITOR_SECTION_DELIM = "(?:—|:|-)";
+const EDITOR_NEXT_SECTION = `(?=\\s+(?:${EDITOR_SECTION_LABEL})\\s*${EDITOR_SECTION_DELIM}|$)`;
+const EDITOR_INLINE_SECTION_SPLIT_RE = new RegExp(`\\s+(?=${EDITOR_SECTION_LABEL}\\s*${EDITOR_SECTION_DELIM})`, "gi");
+const EDITOR_SECTION_TITLE_BODY_RE = new RegExp(
+  `^(${EDITOR_SECTION_LABEL})\\s*${EDITOR_SECTION_DELIM}\\s*(.*?)${EDITOR_NEXT_SECTION}`,
+  "is",
+);
+const EDITOR_IMPORTANCE_SPLIT_RE = /(?<=[.!?])\s+(?=Важность\s+в\s+том,\s+что\s)/gi;
+
+type EditorReadableBlock =
+  | { kind: "paragraph"; text: string }
+  | { kind: "section"; title: string; text: string }
+  | { kind: "list"; items: string[] };
+
+function normalizeEditorSectionTitle(title: string): string {
+  const raw = title.trim();
+  if (/^польза\s*\/\s*вред$/i.test(raw)) return "Польза и вред";
+  if (/^польза\s+и\s+вред$/i.test(raw)) return "Польза и вред";
+  return raw;
+}
+
+function splitInlineEditorSections(chunk: string): string[] {
+  const text = chunk.trim();
+  if (!text) return [];
+  EDITOR_INLINE_SECTION_SPLIT_RE.lastIndex = 0;
+  const hasMarkers = EDITOR_INLINE_SECTION_SPLIT_RE.test(text);
+  EDITOR_INLINE_SECTION_SPLIT_RE.lastIndex = 0;
+  if (!hasMarkers && !EDITOR_IMPORTANCE_SPLIT_RE.test(text)) {
+    EDITOR_IMPORTANCE_SPLIT_RE.lastIndex = 0;
+    return [text];
+  }
+  EDITOR_IMPORTANCE_SPLIT_RE.lastIndex = 0;
+  const withImportance = text.split(EDITOR_IMPORTANCE_SPLIT_RE).map((p) => p.trim()).filter(Boolean);
+  const out: string[] = [];
+  for (const part of withImportance) {
+    EDITOR_INLINE_SECTION_SPLIT_RE.lastIndex = 0;
+    const pieces = part.split(EDITOR_INLINE_SECTION_SPLIT_RE).map((p) => p.trim()).filter(Boolean);
+    out.push(...pieces);
+  }
+  return out;
+}
+
+function parseSectionPiece(piece: string): EditorReadableBlock[] {
+  const sectionMatch = piece.match(EDITOR_SECTION_TITLE_BODY_RE);
+  if (sectionMatch) {
+    const title = normalizeEditorSectionTitle(sectionMatch[1]);
+    const body = sectionMatch[2].trim();
+    const nested = splitInlineEditorSections(body);
+    if (nested.length <= 1) {
+      return [{ kind: "section", title, text: body }];
+    }
+    const blocks: EditorReadableBlock[] = [{ kind: "section", title, text: nested[0] ?? "" }];
+    for (const tail of nested.slice(1)) {
+      blocks.push(...parseSectionPiece(tail));
+    }
+    return blocks;
+  }
+
+  if (piece.startsWith("Важность в том, что")) {
+    return [
+      {
+        kind: "section",
+        title: "Важность",
+        text: piece.replace(/^Важность\s+в\s+том,\s+что\s+/i, "В том, что "),
+      },
+    ];
+  }
+
+  return [{ kind: "paragraph", text: piece }];
+}
+
+function parseEditorReadableBlocks(raw: string): EditorReadableBlock[] {
+  const normalized = raw.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return [];
+
+  const blocks: EditorReadableBlock[] = [];
+  const paragraphs = normalized.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+
+  for (const paragraph of paragraphs) {
+    const lines = paragraph.split("\n").map((line) => line.trim()).filter(Boolean);
+    const bulletLines = lines.filter((line) => /^([•\-*]|\d+[.)])\s+/.test(line));
+    const isList = bulletLines.length >= Math.max(2, lines.length - 1);
+    if (isList) {
+      blocks.push({
+        kind: "list",
+        items: lines.map((line) => line.replace(/^([•\-*]|\d+[.)])\s+/, "")),
+      });
+      continue;
+    }
+
+    const sectionLines = lines.filter((line) => EDITOR_SECTION_TITLE_BODY_RE.test(line));
+    if (lines.length >= 2 && sectionLines.length === lines.length) {
+      for (const line of lines) {
+        blocks.push(...parseSectionPiece(line));
+      }
+      continue;
+    }
+
+    const inlinePieces = splitInlineEditorSections(paragraph);
+    for (const piece of inlinePieces) {
+      if (lines.length >= 2 && /^[-:–—]+$/.test(lines[1]) && piece === paragraph) {
+        blocks.push({ kind: "section", title: lines[0], text: lines.slice(2).join("\n") });
+        continue;
+      }
+      blocks.push(...parseSectionPiece(piece));
+    }
+  }
+
+  return blocks;
+}
+
+function renderEditorBlocks(blocks: EditorReadableBlock[], keyPrefix: string) {
+  return blocks.map((block, idx) => {
+    if (block.kind === "list") {
+      return (
+        <ul key={`${keyPrefix}-ul-${idx}`}>
+          {block.items.map((line, liIdx) => (
+            <li key={`${keyPrefix}-li-${idx}-${liIdx}`}>{line}</li>
+          ))}
+        </ul>
+      );
+    }
+    if (block.kind === "section") {
+      return (
+        <div className="step3-readable-section" key={`${keyPrefix}-sec-${idx}`}>
+          <div className="step3-readable-subtitle">{normalizeEditorSectionTitle(block.title)}</div>
+          {block.text ? <p>{block.text}</p> : null}
+        </div>
+      );
+    }
+    return (
+      <p className="step3-readable-intro" key={`${keyPrefix}-p-${idx}`}>
+        {block.text}
+      </p>
+    );
+  });
+}
+
+function ReadableTextBlock({ text }: { text: string | undefined | null }) {
+  const blocks = parseEditorReadableBlocks(String(text || ""));
+  if (!blocks.length) return <div className="step3-readable-empty">—</div>;
+
+  return <div className="step3-readable-text">{renderEditorBlocks(blocks, "readable")}</div>;
+}
+
+type Step3StructuredSections = {
+  audience: string[];
+  whyImportant: string[];
+  benefit: string[];
+  harm: string[];
+  consequences: string[];
+};
+
+const STEP3_ANALYSIS_MARKER_RE =
+  /(Аудитория|Для\s+кого\s+важно|Кому\s+важно|Почему\s+важно|Важность(?:\s+в\s+том,\s*что)?|Польза(?:\s+и\s+вред|\s*\/\s*вред)?|Вред|Риски?|Последствия|Возможные\s+последствия)\s*(?:—|:|-)\s*/gi;
+
+function _cleanStep3Paragraphs(text: string): string[] {
+  return text
+    .split(/\n+/)
+    .map((line) => line.replace(/^([•\-*]|\d+[.)])\s+/, "").trim())
+    .filter(Boolean);
+}
+
+function _sectionKeyByTitle(title: string): keyof Step3StructuredSections | "mixed_benefit_harm" | null {
+  const t = title.trim().toLowerCase();
+  if (/аудитори|для\s+кого|кому\s+важно/.test(t)) return "audience";
+  if (/почему\s+важно|важность/.test(t)) return "whyImportant";
+  if (/польза\s*(?:и|\/)\s*вред/.test(t)) return "mixed_benefit_harm";
+  if (/польз/.test(t)) return "benefit";
+  if (/вред|риск/.test(t)) return "harm";
+  if (/последств/.test(t)) return "consequences";
+  return null;
+}
+
+function _splitBenefitAndHarm(text: string): { benefit: string[]; harm: string[] } {
+  const cleaned = text.trim();
+  if (!cleaned) return { benefit: [], harm: [] };
+  const harmMatch = /(?:^|\s)(?:Вред|Риски?)\s*(?:—|:|-)\s*/i.exec(cleaned);
+  if (!harmMatch || harmMatch.index === undefined) {
+    return { benefit: _cleanStep3Paragraphs(cleaned), harm: [] };
+  }
+  const splitAt = harmMatch.index;
+  const harmStart = splitAt + harmMatch[0].length;
+  const benefitRaw = cleaned.slice(0, splitAt).trim();
+  const harmRaw = cleaned.slice(harmStart).trim();
+  return {
+    benefit: _cleanStep3Paragraphs(benefitRaw),
+    harm: _cleanStep3Paragraphs(harmRaw),
+  };
+}
+
+function parseStep3StructuredAnalysis(text: string | undefined | null): Step3StructuredSections {
+  const normalized = String(text || "").replace(/\r\n/g, "\n").trim();
+  const sections: Step3StructuredSections = {
+    audience: [],
+    whyImportant: [],
+    benefit: [],
+    harm: [],
+    consequences: [],
+  };
+  if (!normalized) return sections;
+
+  const markers = [...normalized.matchAll(STEP3_ANALYSIS_MARKER_RE)];
+  if (!markers.length) {
+    sections.whyImportant.push(..._cleanStep3Paragraphs(normalized));
+    return sections;
+  }
+
+  const firstIdx = markers[0].index ?? 0;
+  if (firstIdx > 0) {
+    sections.whyImportant.push(..._cleanStep3Paragraphs(normalized.slice(0, firstIdx)));
+  }
+
+  markers.forEach((m, idx) => {
+    const rawTitle = String(m[1] || "").trim();
+    const key = _sectionKeyByTitle(rawTitle);
+    if (!key) return;
+    const bodyStart = (m.index ?? 0) + m[0].length;
+    const bodyEnd = idx + 1 < markers.length ? (markers[idx + 1].index ?? normalized.length) : normalized.length;
+    const body = normalized.slice(bodyStart, bodyEnd).trim();
+    if (!body) return;
+
+    if (key === "mixed_benefit_harm") {
+      const split = _splitBenefitAndHarm(body);
+      sections.benefit.push(...split.benefit);
+      sections.harm.push(...split.harm);
+      if (!split.harm.length && split.benefit.length) {
+        sections.harm.push("Риски и ограничения стоит уточнить по первоисточнику.");
+      }
+      return;
+    }
+
+    if (key === "benefit") {
+      const split = _splitBenefitAndHarm(body);
+      sections.benefit.push(...split.benefit);
+      sections.harm.push(...split.harm);
+      return;
+    }
+
+    sections[key].push(..._cleanStep3Paragraphs(body));
+  });
+
+  return sections;
+}
+
+function renderStep3SectionBody(paragraphs: string[]) {
+  if (!paragraphs.length) {
+    return <div className="step3-readable-empty">—</div>;
+  }
+  return (
+    <div className="step3-readable-text">
+      {paragraphs.map((line, idx) => (
+        <p key={`line-${idx}`}>{line}</p>
+      ))}
+    </div>
+  );
+}
+
+function AnalysisEditorView({ text }: { text: string | undefined | null }) {
+  const parts = parseStep3StructuredAnalysis(text);
+  return (
+    <>
+      <div className="step3-analytics-block step3-analytics-block--section">
+        <small className="step3-analytics-label">Аудитория (кому важно)</small>
+        {renderStep3SectionBody(parts.audience)}
+      </div>
+      <div className="step3-analytics-block step3-analytics-block--section">
+        <small className="step3-analytics-label step3-analytics-label--why-important">Почему важно</small>
+        {renderStep3SectionBody(parts.whyImportant)}
+      </div>
+      <div className="step3-analytics-block step3-analytics-block--section">
+        <small className="step3-analytics-label step3-analytics-label--benefit">Польза</small>
+        {renderStep3SectionBody(parts.benefit)}
+      </div>
+      <div className="step3-analytics-block step3-analytics-block--section">
+        <small className="step3-analytics-label step3-analytics-label--harm">Вред</small>
+        {renderStep3SectionBody(parts.harm)}
+      </div>
+      <div className="step3-analytics-block step3-analytics-block--section">
+        <small className="step3-analytics-label step3-analytics-label--consequences">Возможные последствия</small>
+        {renderStep3SectionBody(parts.consequences)}
+      </div>
+    </>
+  );
+}
+
 function StackedShareBar({
   segments,
   ariaLabel,
@@ -877,6 +1167,71 @@ function htmlToPlainText(html: string): string {
   return (doc.body.textContent ?? html).replace(/\u00a0/g, " ").trim();
 }
 
+function escapeHtml(text: string): string {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function candidateChecksSummary(c: Step2PickCandidate): string {
+  const reliability = String(c.reliability_status || "статус не задан");
+  const headline = headlineEditorialOk(c) ? "заголовок читабельный" : "заголовок не готов";
+  const link = linkOkForStep1(c) ? "ссылка рабочая" : "ссылка не подтверждена";
+  const top5 = candidateSelectableForStep2(c) ? "можно в топ-5" : "в топ-5 нельзя";
+  return `${reliability}; ${headline}; ${link}; ${top5}`;
+}
+
+function buildStep2CandidatesTelegramText(candidates: Step2PickCandidate[]): string {
+  const dt = new Date().toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const lines: string[] = [`Кандидаты шага 2 — ${dt}`, ""];
+  candidates.forEach((c, idx) => {
+    const title = displayCandidateTitle((c as any).title);
+    const desc = truncateText(String(c.description || "Краткое описание не заполнено."), 260);
+    const checks = candidateChecksSummary(c);
+    const canOpen = Boolean(c.url) && linkOkForStep1(c);
+    const linkLine = canOpen ? `🔗 ${String(c.url)}` : "🔗 Ссылка не подтверждена";
+    lines.push(`${idx + 1}. ${title}`);
+    lines.push(`Кратко: ${desc}`);
+    lines.push(`Проверка: ${checks}`);
+    lines.push(linkLine);
+    lines.push("");
+  });
+  return lines.join("\n").trim();
+}
+
+function buildStep2CandidatesMaxHtml(candidates: Step2PickCandidate[]): string {
+  const dt = new Date().toLocaleString("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  const blocks: string[] = [`<b>Кандидаты шага 2 — ${escapeHtml(dt)}</b>`];
+  candidates.forEach((c, idx) => {
+    const title = escapeHtml(displayCandidateTitle((c as any).title));
+    const desc = escapeHtml(truncateText(String(c.description || "Краткое описание не заполнено."), 260));
+    const checks = escapeHtml(candidateChecksSummary(c));
+    const linkHtml =
+      c.url && linkOkForStep1(c)
+        ? `🔗 <a href="${escapeHtml(String(c.url))}">Открыть новость</a>`
+        : "🔗 Ссылка не подтверждена";
+    blocks.push(
+      `${idx + 1}. <b>${title}</b><br>Кратко: ${desc}<br>Проверка: ${checks}<br>${linkHtml}`,
+    );
+  });
+  return blocks.join("<br><br>");
+}
+
 async function copyHtmlToClipboard(html: string, plainFallback: string): Promise<void> {
   const wrapped = `<!DOCTYPE html><html><body><!--StartFragment-->${html}<!--EndFragment--></body></html>`;
   try {
@@ -1044,16 +1399,17 @@ export function DigestWizard({ digestId }: Props) {
   }, []);
 
   const handleCopyPlatform = useCallback(
-    async (platform: string, text: string) => {
+    async (platform: string, text: string, feedbackKey?: string) => {
+      const key = feedbackKey || platform;
       try {
         if ((platform === "max" || platform === "dzen") && /<a\s+href=/i.test(text)) {
           await copyHtmlToClipboard(text, htmlToPlainText(text));
         } else {
           await copyPlainTextToClipboard(text);
         }
-        flashCopyFeedback(platform, true);
+        flashCopyFeedback(key, true);
       } catch {
-        flashCopyFeedback(platform, false);
+        flashCopyFeedback(key, false);
       }
     },
     [flashCopyFeedback],
@@ -1205,6 +1561,14 @@ export function DigestWizard({ digestId }: Props) {
   const candidatesSorted = useMemo(
     () => [...(digest?.candidates || [])].sort((a, b) => a.original_number - b.original_number),
     [digest],
+  );
+  const step2CandidatesTelegramText = useMemo(
+    () => buildStep2CandidatesTelegramText(candidatesSorted as Step2PickCandidate[]),
+    [candidatesSorted],
+  );
+  const step2CandidatesMaxHtml = useMemo(
+    () => buildStep2CandidatesMaxHtml(candidatesSorted as Step2PickCandidate[]),
+    [candidatesSorted],
   );
 
   const candidatesGroupedByDomain = useMemo(() => {
@@ -3585,6 +3949,62 @@ export function DigestWizard({ digestId }: Props) {
               </p>
             </WizardWhy>
           ) : null}
+          {candidatesSorted.length > 0 ? (
+            <div className="step4-copy-all-bar" style={{ marginTop: 0 }}>
+              <div className="step4-copy-all-buttons">
+                <button
+                  type="button"
+                  className="step4-copy-btn"
+                  disabled={loading}
+                  title="Скопировать список кандидатов шага 2 в формате Telegram"
+                  onClick={() => void handleCopyPlatform("telegram", step2CandidatesTelegramText, "step2_telegram")}
+                >
+                  Скопировать кандидатов для Telegram
+                </button>
+                <button
+                  type="button"
+                  className="step4-copy-btn"
+                  disabled={loading}
+                  title="Скопировать список кандидатов шага 2 в формате MAX (HTML)"
+                  onClick={() => void handleCopyPlatform("max", step2CandidatesMaxHtml, "step2_max")}
+                >
+                  Скопировать кандидатов для MAX
+                </button>
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+                <div
+                  className="step4-copy-all-feedback"
+                  style={{
+                    color:
+                      copyStatus.step2_telegram === "ok"
+                        ? "#86efac"
+                        : copyStatus.step2_telegram === "err"
+                          ? "#fca5a5"
+                          : "#94a3b8",
+                  }}
+                >
+                  {copyStatus.step2_telegram === "ok"
+                    ? "Telegram: скопировано"
+                    : copyStatus.step2_telegram === "err"
+                      ? "Telegram: ошибка копирования"
+                      : "Telegram: список кандидатов с проверками и ссылками"}
+                </div>
+                <div
+                  className="step4-copy-all-feedback"
+                  style={{
+                    color:
+                      copyStatus.step2_max === "ok" ? "#86efac" : copyStatus.step2_max === "err" ? "#fca5a5" : "#94a3b8",
+                  }}
+                >
+                  {copyStatus.step2_max === "ok"
+                    ? "MAX: скопировано (HTML)"
+                    : copyStatus.step2_max === "err"
+                      ? "MAX: ошибка копирования"
+                      : "MAX: список кандидатов с проверками и ссылками"}
+                </div>
+              </div>
+            </div>
+          ) : null}
           {step2StubsShown ? (
             <div
               role="alert"
@@ -3931,8 +4351,8 @@ export function DigestWizard({ digestId }: Props) {
           />
         ) : null}
         <p className="wizard-hint-do" style={{ fontSize: "0.98rem" }}>
-          Аналитика — материал <strong>для редактора</strong> (суть, заметки, разбор по каждой новости). Обычно запускается
-          после кнопки «Применить порядок» на шаге 2; дождитесь заполнения блоков ниже (несколько минут).
+          Аналитика — материал <strong>для редактора</strong> в фиксированной структуре: суть новости, аудитория, почему
+          важно, польза, вред, возможные последствия. Обычно запускается после кнопки «Применить порядок» на шаге 2.
         </p>
         {!canOrder && !analyticsDone ? (
           <p className="wizard-hint-wait">
@@ -3971,35 +4391,42 @@ export function DigestWizard({ digestId }: Props) {
           <div style={{ marginTop: 12 }}>
             <WizardWhy summary="Как читать блоки по новостям и хэштеги">
               <p>
-                Блоки шага 3 — для редактора: <strong>суть</strong>, <strong>заметка</strong>, <strong>анализ</strong> (можно
-                развёрнуто). Тексты для публикации читателям — на шаге 4: коротко, простым языком, до 450 символов под
-                заголовком. Хэштеги внизу — для соцсетей.
+                Блоки шага 3 — для редактора: <strong>суть новости</strong> и структурированный разбор (аудитория, почему
+                важно, польза, вред, возможные последствия). Тексты для публикации читателям — на шаге 4: коротко, простым
+                языком, до 450 символов под заголовком. Хэштеги внизу — для соцсетей.
               </p>
             </WizardWhy>
             {digest.analytics.map((a: any) => (
-              <div className="card" key={a.candidate_id}>
-                <div>
+              <div className="card step3-analytics-item" key={a.candidate_id}>
+                <div className="step3-analytics-head">
                   <strong>{a.source_name}</strong>
                   <span> · {formatNewsPublishedAt(a.published_at)}</span>
                 </div>
-                <div>
-                  <small style={{ color: "#94a3b8" }}>Суть (редактор)</small>
-                  <div>{a.essence}</div>
-                </div>
-                {a.comment ? (
-                  <div>
-                    <small style={{ color: "#94a3b8" }}>Заметка редактора</small>
-                    <div>{a.comment}</div>
+                {a.title ? (
+                  <div className="step3-analytics-title">
+                    <strong>{a.title}</strong>
                   </div>
                 ) : null}
-                <div>
-                  <small style={{ color: "#94a3b8" }}>Анализ (редактор)</small>
-                  <div>{a.analysis}</div>
+                {a.url ? (
+                  <a className="step3-analytics-link" href={a.url} target="_blank" rel="noopener noreferrer">
+                    {a.url}
+                  </a>
+                ) : null}
+                <div className="step3-analytics-block">
+                  <small className="step3-analytics-label step3-analytics-label--essence">Суть новости</small>
+                  <ReadableTextBlock text={a.essence} />
                 </div>
+                {a.comment ? (
+                  <div className="step3-analytics-block">
+                    <small className="step3-analytics-label">Заметка редактора</small>
+                    <ReadableTextBlock text={a.comment} />
+                  </div>
+                ) : null}
+                <AnalysisEditorView text={a.analysis} />
                 {a.reader_text ? (
-                  <div style={{ marginTop: 8 }}>
-                    <small style={{ color: "#94a3b8" }}>Текст для читателя</small>
-                    <div>{a.reader_text}</div>
+                  <div className="step3-analytics-block">
+                    <small className="step3-analytics-label">Текст для читателя</small>
+                    <ReadableTextBlock text={a.reader_text} />
                   </div>
                 ) : null}
               </div>

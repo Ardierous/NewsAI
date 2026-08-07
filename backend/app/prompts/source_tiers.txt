@@ -109,6 +109,7 @@ Tier-5 (запрещённые источники и недопустимые UR
 
 
 
+
 # Правила для кода (шаг 1, поиск). Один хост/маркер на строку; подстрока в hostname.
 # Секции: aggregator_hosts (поиск Tier-2, не blacklist), tier1_hosts, tier2_hosts, tier3_hosts, tier4_hosts,
 # banned_media_hosts, foreign_agent_hosts, russian_host_markers, blocked_search_hosts, search_seed_urls.
@@ -307,3 +308,4 @@ https://t.co/
 https://telegram.me/
 https://therundown.ai/
 https://tldr.tech/
+https://t.me/dbeskromny

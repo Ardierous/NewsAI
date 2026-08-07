@@ -21,6 +21,7 @@ from app.schemas_source_tiers import (
     SourceTiersEditorUpdate,
 )
 from app.services.digest_type_policy import is_curious_digest, normalize_digest_type
+from app.services.seed_source_tracking import marker_matches_seed
 from app.services.step1_tiers_autoblock import _AUTO_MARKER
 from app.source_tiers_policy import _HOST_RULES_MARKER, _parse_host_rules, invalidate_policy_cache
 
@@ -292,66 +293,99 @@ def _load_section_entries(path: Path) -> dict[str, list[tuple[str, bool]]]:
     return {key: _section_entries(lines) for key, lines in sections.items()}
 
 
+def _marker_uses_seed_tracking(marker: str) -> bool:
+    m = str(marker or "").strip().lower()
+    return m.startswith(("http://", "https://")) or "t.me/" in m
+
+
+def _sum_seed_bucket(aggregates: dict[str, dict[str, int]], bucket_key: str, marker: str) -> int:
+    total = 0
+    for stored_marker, cnt in aggregates.get(bucket_key, {}).items():
+        if marker_matches_seed(marker, stored_marker):
+            total += int(cnt or 0)
+    return total
+
+
 def _collect_host_stats(db: Session, *, window_days: int) -> dict[str, dict[str, int]]:
     since = datetime.utcnow() - timedelta(days=max(1, int(window_days)))
     raw_by_host: dict[str, int] = {}
+    raw_by_seed: dict[str, int] = {}
 
     registry_rows = (
-        db.query(Step1UrlRegistry.host, Step1UrlRegistry.bucket, func.count(Step1UrlRegistry.id))
+        db.query(Step1UrlRegistry.host, Step1UrlRegistry.seed_marker, func.count(Step1UrlRegistry.id))
         .filter(Step1UrlRegistry.last_seen_at >= since)
-        .group_by(Step1UrlRegistry.host, Step1UrlRegistry.bucket)
+        .group_by(Step1UrlRegistry.host, Step1UrlRegistry.seed_marker)
         .all()
     )
-    for host, _bucket, cnt in registry_rows:
+    for host, seed_marker, cnt in registry_rows:
         h = str(host or "").lower()
         n = int(cnt or 0)
         raw_by_host[h] = raw_by_host.get(h, 0) + n
+        sm = str(seed_marker or "").strip()
+        if sm:
+            raw_by_seed[sm] = raw_by_seed.get(sm, 0) + n
 
     pool_by_host: dict[str, int] = {}
+    pool_by_seed: dict[str, int] = {}
     from app.models import Digest
 
     pool_rows = (
-        db.query(NewsCandidate.url)
+        db.query(NewsCandidate.url, NewsCandidate.seed_marker)
         .join(Digest, Digest.id == NewsCandidate.digest_id)
         .filter(NewsCandidate.page_verified.is_(True), Digest.updated_at >= since)
         .all()
     )
-    for (url,) in pool_rows:
+    for url, seed_marker in pool_rows:
         h = _host_from_url(url)
         if h:
             pool_by_host[h] = pool_by_host.get(h, 0) + 1
+        sm = str(seed_marker or "").strip()
+        if sm:
+            pool_by_seed[sm] = pool_by_seed.get(sm, 0) + 1
 
     selected_by_host: dict[str, int] = {}
+    selected_by_seed: dict[str, int] = {}
     selected_rows = (
-        db.query(NewsCandidate.url)
+        db.query(NewsCandidate.url, NewsCandidate.seed_marker)
         .join(SelectedNews, SelectedNews.candidate_id == NewsCandidate.id)
         .join(Digest, Digest.id == NewsCandidate.digest_id)
         .filter(Digest.updated_at >= since)
         .all()
     )
-    for (url,) in selected_rows:
+    for url, seed_marker in selected_rows:
         h = _host_from_url(url)
         if h:
             selected_by_host[h] = selected_by_host.get(h, 0) + 1
+        sm = str(seed_marker or "").strip()
+        if sm:
+            selected_by_seed[sm] = selected_by_seed.get(sm, 0) + 1
 
     return {
         "raw": raw_by_host,
         "pool": pool_by_host,
         "selected": selected_by_host,
+        "raw_by_seed": raw_by_seed,
+        "pool_by_seed": pool_by_seed,
+        "selected_by_seed": selected_by_seed,
     }
 
 
 def _stats_for_marker(marker: str, aggregates: dict[str, dict[str, int]]) -> SourceHostStatsOut:
-    raw = pool = selected = 0
-    for host, cnt in aggregates["raw"].items():
-        if _marker_matches_host(marker, host):
-            raw += cnt
-    for host, cnt in aggregates["pool"].items():
-        if _marker_matches_host(marker, host):
-            pool += cnt
-    for host, cnt in aggregates["selected"].items():
-        if _marker_matches_host(marker, host):
-            selected += cnt
+    if _marker_uses_seed_tracking(marker):
+        raw = _sum_seed_bucket(aggregates, "raw_by_seed", marker)
+        pool = _sum_seed_bucket(aggregates, "pool_by_seed", marker)
+        selected = _sum_seed_bucket(aggregates, "selected_by_seed", marker)
+    else:
+        raw = pool = selected = 0
+        for host, cnt in aggregates["raw"].items():
+            if _marker_matches_host(marker, host):
+                raw += cnt
+        for host, cnt in aggregates["pool"].items():
+            if _marker_matches_host(marker, host):
+                pool += cnt
+        for host, cnt in aggregates["selected"].items():
+            if _marker_matches_host(marker, host):
+                selected += cnt
     if pool > raw:
         raw = pool
     return SourceHostStatsOut(raw_count=raw, pool_count=pool, selected_count=selected)

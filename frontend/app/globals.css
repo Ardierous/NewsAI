@@ -1419,3 +1419,136 @@ details.wizard-hint-why {
   align-items: center;
   padding-top: 10px !important;
 }
+
+/* Шаг 3 — читаемые блоки аналитики */
+.step3-analytics-item {
+  border-color: #334155;
+  background: #0f172a;
+}
+
+.step3-analytics-head {
+  color: #cbd5e1;
+  margin-bottom: 8px;
+}
+
+.step3-analytics-title {
+  font-size: 1rem;
+  line-height: 1.45;
+  color: #e2e8f0;
+  margin-bottom: 8px;
+}
+
+.step3-analytics-link {
+  display: block;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+  color: #93c5fd;
+  word-break: break-all;
+}
+
+.step3-analytics-block {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #273449;
+  border-radius: 8px;
+  background: #111827;
+}
+
+.step3-analytics-label {
+  color: #94a3b8;
+  display: inline-block;
+  margin-bottom: 6px;
+}
+
+.step3-analytics-block--section .step3-analytics-label {
+  color: #e2e8f0;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.step3-analytics-label.step3-analytics-label--essence {
+  color: #60a5fa;
+  font-weight: 700;
+}
+
+.step3-analytics-label.step3-analytics-label--why-important {
+  color: #fb923c;
+  font-weight: 700;
+}
+
+.step3-analytics-label.step3-analytics-label--benefit {
+  color: #4ade80;
+  font-weight: 700;
+}
+
+.step3-analytics-label.step3-analytics-label--harm {
+  color: #f87171;
+  font-weight: 700;
+}
+
+.step3-analytics-label.step3-analytics-label--consequences {
+  color: #c084fc;
+  font-weight: 700;
+}
+
+.step3-readable-text {
+  color: #e5e7eb;
+  font-size: 0.96rem;
+  line-height: 1.62;
+}
+
+.step3-readable-text p {
+  margin: 0 0 10px;
+  white-space: pre-line;
+}
+
+.step3-readable-intro {
+  margin-bottom: 14px !important;
+  color: #f1f5f9;
+}
+
+.step3-readable-text p:last-child {
+  margin-bottom: 0;
+}
+
+.step3-readable-text ul {
+  margin: 0 0 10px 1.15rem;
+  padding: 0;
+}
+
+.step3-readable-text ul:last-child {
+  margin-bottom: 0;
+}
+
+.step3-readable-text li {
+  margin-bottom: 6px;
+}
+
+.step3-readable-section {
+  margin: 0 0 14px;
+  padding: 10px 0 0;
+  border-top: 1px solid #334155;
+}
+
+.step3-readable-section:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.step3-readable-subtitle {
+  display: inline-block;
+  margin-bottom: 6px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  color: #bfdbfe;
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.step3-readable-empty {
+  color: #94a3b8;
+}
