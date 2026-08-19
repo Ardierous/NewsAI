@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 BUCKET_RAW = "raw"
 BUCKET_VERIFIED = "verified"
 BUCKET_MULTI = "reject:multi"
+BUCKET_USER_EXCLUDED = "user_excluded"
 
 
 def registry_ttl_days(settings: Any) -> int:
@@ -211,6 +212,79 @@ def registry_bucket_counts(db: Session, digest_type: str | None = None) -> dict[
     for bucket, _ in rows:
         out[bucket] = out.get(bucket, 0) + 1
     return out
+
+
+def user_excluded_fingerprints(db: Session) -> set[str]:
+    now = datetime.utcnow()
+    rows = (
+        db.query(Step1UrlRegistry.url_fingerprint)
+        .filter(
+            Step1UrlRegistry.bucket == BUCKET_USER_EXCLUDED,
+            Step1UrlRegistry.expires_at >= now,
+        )
+        .all()
+    )
+    return {str(fp or "").strip() for (fp,) in rows if str(fp or "").strip()}
+
+
+def mark_url_user_excluded(
+    db: Session,
+    settings: "Settings",
+    *,
+    url: str,
+    digest_type: str | None,
+    digest_id: int | None = None,
+    source_stage: str = "ui_exclude",
+    title: str = "",
+    verification_comment: str = "",
+) -> str:
+    raw = str(url or "").strip()
+    fp = _url_fingerprint(raw)
+    if not fp:
+        return ""
+    now = datetime.utcnow()
+    # Почти бессрочно: пользователь вручную запретил URL.
+    exp = now + timedelta(days=36500)
+    dtype = normalize_digest_type(digest_type)
+    row = _find_registry_row(db, raw)
+    host = _host_from_url(raw)[:255]
+    if row is None:
+        db.add(
+            Step1UrlRegistry(
+                url_fingerprint=fp,
+                url=raw[:1000],
+                host=host,
+                digest_type=dtype,
+                bucket=BUCKET_USER_EXCLUDED,
+                reject_codes="user_excluded",
+                title=str(title or "").strip()[:500],
+                source_stage=str(source_stage or "ui_exclude")[:40],
+                verification_comment=str(verification_comment or "").strip()[:4000],
+                seed_marker="",
+                last_digest_id=int(digest_id) if digest_id is not None else None,
+                first_seen_at=now,
+                last_seen_at=now,
+                expires_at=exp,
+            )
+        )
+    else:
+        row.url = raw[:1000]
+        row.host = host
+        row.digest_type = dtype
+        row.bucket = BUCKET_USER_EXCLUDED
+        row.reject_codes = "user_excluded"
+        row.source_stage = str(source_stage or row.source_stage or "ui_exclude")[:40]
+        if title:
+            row.title = str(title).strip()[:500]
+        if verification_comment:
+            row.verification_comment = str(verification_comment).strip()[:4000]
+        row.last_digest_id = int(digest_id) if digest_id is not None else row.last_digest_id
+        row.last_seen_at = now
+        row.expires_at = exp
+        if row.url_fingerprint != fp:
+            row.url_fingerprint = fp
+    db.flush()
+    return fp
 
 
 def register_raw_urls(

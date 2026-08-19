@@ -8,7 +8,16 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
-from app.models import Analytics, Asset, Digest, NewsCandidate, SelectedNews, Step1DiscoveredNews, Step1ManualRatingLog
+from app.models import (
+    Analytics,
+    Asset,
+    Digest,
+    NewsCandidate,
+    SelectedNews,
+    Step1DiscoveredNews,
+    Step1ManualRatingLog,
+    Step1UrlRegistry,
+)
 from app.services import digest_service as ds
 from app.services.digest_service import (
     DigestService,
@@ -299,6 +308,144 @@ def test_manual_ai_section_path_is_rejected_even_without_listing_flag(monkeypatc
     assert row["page_verified"] is False
     assert row["headline_editorial_ok"] is False
     assert "REJECT_REASON:news_listing_page" in str(row.get("verification_comment") or "")
+
+
+def test_headline_from_article_bundle_prefers_page_sources():
+    bundle = {
+        "headline": None,
+        "raw_h1": "OpenAI запустила расширение ChatGPT",
+        "raw_og_title": "Короткий",
+        "raw_html_title": "OpenAI — vc.ru",
+    }
+    assert ds._headline_from_article_bundle(bundle) == "OpenAI запустила расширение ChatGPT"
+
+
+def test_telegram_seed_uses_article_page_headline(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    article_url = "https://habr.com/ru/news/1032110/"
+    article_title = "Нейросеть Grok: новость про искусственный интеллект на Habr"
+
+    monkeypatch.setattr(service, "_ensure_russian_candidate_title", lambda _d, _u, title: title)
+    monkeypatch.setattr(
+        ds,
+        "_fetch_external_article_bundle",
+        lambda _url: {
+            "ok": True,
+            "final_url": article_url,
+            "display_url": article_url,
+            "headline": article_title,
+            "raw_h1": article_title,
+            "topic_corpus": "искусственный интеллект нейросеть машинное обучение " * 40,
+            "article_markers": True,
+            "is_listing_page": False,
+            "published_at": "2026-05-14T10:00:00+03:00",
+        },
+    )
+
+    rows = service._build_manual_candidates(
+        digest,
+        [article_url],
+        "2026-08-12T09:00:00+03:00",
+        mandatory=False,
+        seed_markers={article_url: "https://t.me/s/technokratos"},
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["page_verified"] is True
+    assert row["headline_editorial_ok"] is True
+    assert article_title in str(row.get("title") or "")
+    assert "TELEGRAM_SEED" in str(row.get("verification_comment") or "")
+
+
+def test_telegram_seed_rejects_unreachable_llm_style_url(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    bad_url = "https://kod.ru/news/2026/8/3/fake-slug-from-model"
+
+    monkeypatch.setattr(
+        ds,
+        "_fetch_external_article_bundle",
+        lambda _url: {"ok": False, "headline": None},
+    )
+
+    rows = service._build_manual_candidates(
+        digest,
+        [bad_url],
+        "2026-08-12T09:00:00+03:00",
+        mandatory=False,
+    )
+    assert len(rows) == 1
+    assert rows[0]["page_verified"] is False
+    assert "seed_unverified" in str(rows[0].get("verification_comment") or "")
+
+
+def test_channel_seed_llm_url_is_article_requires_headline(monkeypatch: pytest.MonkeyPatch):
+    good = "https://habr.com/ru/news/1032110/"
+    monkeypatch.setattr(
+        ds,
+        "_fetch_external_article_bundle",
+        lambda url: {
+            "ok": True,
+            "final_url": url,
+            "display_url": url,
+            "headline": "Заголовок статьи с Habr достаточной длины",
+            "topic_corpus": "x" * 800,
+            "article_markers": True,
+            "is_listing_page": False,
+        },
+    )
+    assert ds.channel_seed_llm_url_is_article(good) is True
+
+    monkeypatch.setattr(
+        ds,
+        "_fetch_external_article_bundle",
+        lambda _url: {"ok": False},
+    )
+    assert ds.channel_seed_llm_url_is_article("https://kod.ru/news/404") is False
+
+
+def test_exclude_candidate_url_from_pool_marks_registry_and_removes_row(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    row = NewsCandidate(
+        digest_id=digest.id,
+        original_number=1,
+        title="Тестовая новость",
+        url="https://habr.com/ru/news/1032110/",
+        source="habr.com",
+        tier="Tier-3",
+        published_at="2026-05-14T10:00:00+03:00",
+        category="search",
+        description="desc",
+        article_excerpt="",
+        significance_score=3,
+        novelty_score=3,
+        impact_score=3,
+        total_score=9,
+        reliability_status="✅ подтверждено",
+        link_status=True,
+        headline_editorial_ok=True,
+        page_verified=True,
+        is_foreign_agent=False,
+        is_aggregator=False,
+        is_duplicate=False,
+        verification_comment="",
+        seed_marker="",
+    )
+    service.db.add(row)
+    service.db.commit()
+    service.db.refresh(row)
+    row_id = int(row.id)
+
+    result = service.exclude_candidate_url_from_pool(digest_id=digest.id, candidate_id=row_id)
+    assert result["removed_from_pool"] == 1
+    assert service.db.query(NewsCandidate).filter(NewsCandidate.id == row_id).first() is None
+
+    reg = (
+        service.db.query(Step1UrlRegistry)
+        .filter(Step1UrlRegistry.url_fingerprint == "habr.com/ru/news/1032110")
+        .first()
+    )
+    assert reg is not None
+    assert reg.bucket == "user_excluded"
 
 
 def test_step1_persists_reject_reasons_on_502(monkeypatch: pytest.MonkeyPatch):

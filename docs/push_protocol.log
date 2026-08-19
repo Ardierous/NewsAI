@@ -22,3 +22,4 @@
 [2026-07-30_17-48-08] update: refresh docs and environment setup
 [2026-07-31_18-16-58] update: update backend api and data models; improve digest wizard ui flow; refine digest pipeline and validations
 [2026-08-07_16-21-49] update: improve crewai orchestration logic; refine digest pipeline and validations; update backend api and data models
+[2026-08-19_09-55-22] update: refine digest pipeline and validations; update backend api and data models; improve digest wizard ui flow

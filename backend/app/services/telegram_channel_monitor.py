@@ -244,6 +244,32 @@ def filter_telegram_external_urls(urls: list[str], *, max_links: int = 30) -> li
     return ordered
 
 
+def _merge_seed_bundles(
+    primary_urls: list[str],
+    primary_markers: dict[str, str],
+    secondary_urls: list[str],
+    secondary_markers: dict[str, str],
+    *,
+    max_links: int,
+) -> tuple[list[str], dict[str, str]]:
+    ordered: list[str] = []
+    markers: dict[str, str] = {}
+    seen: set[str] = set()
+    for urls, src_markers in ((primary_urls, primary_markers), (secondary_urls, secondary_markers)):
+        for url in filter_telegram_external_urls(urls, max_links=max_links):
+            key = url_lookup_key(url)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            ordered.append(url)
+            marker = src_markers.get(key)
+            if marker:
+                markers[key] = marker
+            if len(ordered) >= max(1, max_links):
+                return ordered, markers
+    return ordered, markers
+
+
 def _collect_via_proxyapi(
     settings: Settings,
     channels: tuple[str, ...],
@@ -275,9 +301,10 @@ def _collect_via_proxyapi(
     ordered: list[str] = []
     markers: dict[str, str] = {}
     seen: set[str] = set()
+    html_urls: list[str] = []
+    llm_pool: list[str] = []
+    url_channel_markers: dict[str, str] = {}
     for channel in channels:
-        if len(ordered) >= max_links:
-            break
         channel_marker = telegram_channel_marker(channel)
         try:
             raw_urls, html_pages = client.fetch_telegram_digest_seed_urls(
@@ -285,7 +312,7 @@ def _collect_via_proxyapi(
                 earliest_date=earliest_date,
                 max_digest_posts=max_digest_posts,
                 post_text_filter=post_text_filter or _DIGEST_TEXT_MARKER,
-                max_links=max_links - len(ordered),
+                max_links=max_links,
                 search_context_size=ctx_size,
                 max_pages=max_pages,
             )
@@ -293,34 +320,54 @@ def _collect_via_proxyapi(
             logger.exception("Telegram monitor (ProxyAPI): ошибка channel=%s", channel)
             continue
 
-        channel_urls: list[str] = []
+        llm_pool.extend(raw_urls or [])
         for html_text in html_pages:
             if "tgme_widget_message" not in html_text:
                 continue
             posts = parse_channel_posts_html(html_text, channel)
-            channel_urls.extend(
-                collect_urls_from_digest_posts(
-                    posts,
-                    earliest_date=earliest_date,
-                    max_digest_posts=max_digest_posts,
-                    post_text_filter=post_text_filter,
-                    max_links=max_links,
-                )
-            )
-        channel_urls = filter_telegram_external_urls(
-            [*channel_urls, *raw_urls],
-            max_links=max_links,
-        )
-        for url in channel_urls:
-            key = url_lookup_key(url)
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            ordered.append(url)
-            if channel_marker:
-                markers[key] = channel_marker
-            if len(ordered) >= max_links:
-                break
+            for post_url in collect_urls_from_digest_posts(
+                posts,
+                earliest_date=earliest_date,
+                max_digest_posts=max_digest_posts,
+                post_text_filter=post_text_filter,
+                max_links=max_links,
+            ):
+                html_urls.append(post_url)
+                if channel_marker:
+                    key = url_lookup_key(post_url)
+                    if key:
+                        url_channel_markers[key] = channel_marker
+
+    html_urls = filter_telegram_external_urls(html_urls, max_links=max_links)
+    html_keys = {url_lookup_key(u) for u in html_urls if url_lookup_key(u)}
+    validated_llm: list[str] = []
+    from app.services.digest_service import channel_seed_llm_url_is_article
+
+    for url in filter_telegram_external_urls(llm_pool, max_links=max_links):
+        key = url_lookup_key(url)
+        if not key or key in html_keys:
+            continue
+        if channel_seed_llm_url_is_article(url):
+            validated_llm.append(url)
+            html_keys.add(key)
+        else:
+            logger.info("Telegram monitor: URL модели отброшен (не статья) | url=%s", url[:120])
+
+    for url in filter_telegram_external_urls([*html_urls, *validated_llm], max_links=max_links):
+        key = url_lookup_key(url)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(url)
+        marker = url_channel_markers.get(key)
+        if marker:
+            markers[key] = marker
+        elif channels:
+            fallback = telegram_channel_marker(channels[0])
+            if fallback:
+                markers[key] = fallback
+        if len(ordered) >= max_links:
+            break
 
     logger.info(
         "Telegram monitor (ProxyAPI): собрано внешних URL=%s channels=%s earliest=%s filter=%r max_digest_posts=%s",
@@ -457,11 +504,30 @@ def collect_telegram_seed_bundle_for_digest(
 
     if getattr(settings, "step1_telegram_via_proxyapi", True):
         proxy_urls, proxy_markers = _collect_via_proxyapi(settings, channels, proxy=proxy, **kwargs)
+        # Надёжность важнее: всегда дополняем/проверяем прямым парсингом канала.
+        # Это защищает от ситуаций, когда ProxyAPI вернул «левые» или неполные URL.
+        direct_urls, direct_markers = collect_external_links_from_channels(channels, timeout=timeout, **kwargs)
+        if direct_urls:
+            merged_urls, merged_markers = _merge_seed_bundles(
+                direct_urls,
+                direct_markers,
+                proxy_urls,
+                proxy_markers,
+                max_links=max_links,
+            )
+            logger.info(
+                "Telegram monitor: merged direct+proxy | direct=%s proxy=%s total=%s",
+                len(direct_urls),
+                len(proxy_urls),
+                len(merged_urls),
+            )
+            return merged_urls, merged_markers
         if proxy_urls:
             return proxy_urls, proxy_markers
         if not getattr(settings, "step1_telegram_direct_fallback", True):
             return [], {}
         logger.info("Telegram monitor: ProxyAPI не вернул URL, пробуем direct t.me")
+        return direct_urls, direct_markers
 
     return collect_external_links_from_channels(channels, timeout=timeout, **kwargs)
 

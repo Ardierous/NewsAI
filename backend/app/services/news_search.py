@@ -502,7 +502,7 @@ def url_suspected_hallucinated(url: str) -> bool:
         host = (parsed.hostname or "").lower()
     except Exception:
         return True
-    if host in ("example.com", "www.example.com") or host.endswith(".example") or "invented" in host:
+    if host.endswith(".example") or "invented" in host:
         return True
     if not path or path == "/":
         return True

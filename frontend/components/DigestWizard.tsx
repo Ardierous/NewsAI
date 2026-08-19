@@ -18,7 +18,7 @@ import { DigestHintsAccordion } from "./DigestHintsAccordion";
 import { isProxyapiBudgetError, ProxyapiBudgetAlert } from "./ProxyapiBudgetAlert";
 import { Step1LivePanel, type Step1LiveProgress } from "./Step1LivePanel";
 import { SourceTiersModal } from "./SourceTiersModal";
-import { api, assetUrl } from "../lib/api";
+import { api, assetUrl, type Step1ExcludedUrl } from "../lib/api";
 
 const PLATFORM_ORDER = ["telegram", "max", "vk", "dzen"] as const;
 
@@ -1306,6 +1306,9 @@ export function DigestWizard({ digestId }: Props) {
   const [selectedImageVariant, setSelectedImageVariant] = useState<number | null>(null);
   const [draggedId, setDraggedId] = useState<number | null>(null);
   const [copyStatus, setCopyStatus] = useState<Record<string, "idle" | "ok" | "err">>({});
+  const [excludingCandidateIds, setExcludingCandidateIds] = useState<Record<number, boolean>>({});
+  const [excludedUrls, setExcludedUrls] = useState<Step1ExcludedUrl[]>([]);
+  const [restoringExcludedIds, setRestoringExcludedIds] = useState<Record<number, boolean>>({});
   const copyTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const step1CardRef = useRef<HTMLDivElement | null>(null);
   const step2CardRef = useRef<HTMLDivElement | null>(null);
@@ -1459,9 +1462,23 @@ export function DigestWizard({ digestId }: Props) {
     [digestId],
   );
 
+  const loadExcludedUrls = useCallback(async () => {
+    try {
+      const res = await api.listStep1ExcludedUrls(digestId);
+      setExcludedUrls(Array.isArray(res?.items) ? res.items : []);
+    } catch {
+      // Не блокируем UI выпуска, если раздел исключений временно недоступен.
+      setExcludedUrls([]);
+    }
+  }, [digestId]);
+
   useEffect(() => {
     void loadDigest({ label: "Загрузка выпуска…" }).catch(() => undefined);
   }, [digestId, loadDigest]);
+
+  useEffect(() => {
+    void loadExcludedUrls();
+  }, [loadExcludedUrls]);
 
   useEffect(() => {
     if (manualUrls.trim()) return;
@@ -1903,18 +1920,21 @@ export function DigestWizard({ digestId }: Props) {
       const res = await api.step2AddManualUrls(digestId, urls);
       setStep2ManualUrls("");
       await loadDigest({ skipProgress: true, preserveSelection: true });
+      const selectionLimit = 5;
       const addedIds = (res?.added || [])
         .filter((row) => row.id && candidateSelectableForStep2(row))
         .map((row) => row.id);
       if (addedIds.length) {
-        setSelected((prev) => {
-          const next = [...prev];
-          for (const id of addedIds) {
-            if (next.length >= 5) break;
-            if (!next.includes(id)) next.push(id);
-          }
-          return next;
-        });
+        const alreadySelected = Array.from(new Set(selected));
+        const freshAdded = Array.from(new Set(addedIds)).filter((id) => !alreadySelected.includes(id));
+        if (alreadySelected.length + freshAdded.length > selectionLimit) {
+          setSelected([]);
+          setError(
+            "После добавления ссылок получилось бы больше 5 выбранных новостей, поэтому выбор сброшен. Отметьте нужные 5 заново.",
+          );
+        } else if (freshAdded.length) {
+          setSelected([...alreadySelected, ...freshAdded]);
+        }
       }
       if (res?.skipped_duplicates?.length) {
         setError(`Уже в пуле: ${res.skipped_duplicates.join(", ")}`);
@@ -1927,6 +1947,83 @@ export function DigestWizard({ digestId }: Props) {
       }
     });
   };
+
+  const renderStep2ManualUrlBlock = (opts?: { marginTop?: number; marginBottom?: number }) =>
+    canAddStep2ManualUrl ? (
+      <div style={{ marginBottom: opts?.marginBottom ?? 14, marginTop: opts?.marginTop ?? 0 }}>
+        <p className="wizard-hint-do" style={{ fontSize: "0.95rem", margin: "0 0 8px" }}>
+          Не хватает новостей в пуле? Вставьте прямую ссылку на статью — она пройдёт ту же проверку, что и на шаге 1,
+          и <strong>обязательно</strong> попадёт в итоговую пятёрку при подтверждении.
+        </p>
+        <textarea
+          rows={2}
+          placeholder="Ссылка на статью (каждая с новой строки). Должна открываться и вести на материал про ИИ."
+          value={step2ManualUrls}
+          onChange={(e) => setStep2ManualUrls(e.target.value)}
+        />
+        <div style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            disabled={loading || !step2ManualUrls.trim()}
+            title="Проверить страницу и добавить в список кандидатов без пересборки пула"
+            onClick={() => void addStep2ManualUrls()}
+          >
+            Добавить ссылку в пул
+          </button>
+        </div>
+      </div>
+    ) : null;
+
+  const excludeCandidateFromPool = useCallback(
+    async (candidateId: number, candidateUrl?: string) => {
+      const sure = window.confirm(
+        "Исключить эту новость из пула навсегда?\n\nЭта конкретная ссылка больше не будет попадать в кандидаты в следующих запусках.",
+      );
+      if (!sure) return;
+      setExcludingCandidateIds((prev) => ({ ...prev, [candidateId]: true }));
+      try {
+        await api.excludeStep1CandidateUrl(digestId, candidateId);
+        setSelected((prev) => prev.filter((id) => id !== candidateId));
+        await loadDigest({ skipProgress: true, preserveError: true, preserveSelection: true });
+        await loadExcludedUrls();
+        if (candidateUrl) {
+          setError(`Ссылка исключена из пула: ${candidateUrl}`);
+        }
+      } catch (e) {
+        setError((e as Error).message || "Не удалось исключить ссылку из пула.");
+      } finally {
+        setExcludingCandidateIds((prev) => {
+          const next = { ...prev };
+          delete next[candidateId];
+          return next;
+        });
+      }
+    },
+    [digestId, loadDigest, loadExcludedUrls],
+  );
+
+  const restoreExcludedUrl = useCallback(
+    async (excludedId: number) => {
+      setRestoringExcludedIds((prev) => ({ ...prev, [excludedId]: true }));
+      try {
+        const res = await api.restoreStep1ExcludedUrl(digestId, excludedId);
+        await loadExcludedUrls();
+        await loadDigest({ skipProgress: true, preserveError: true, preserveSelection: true });
+        if (res?.restored_url) {
+          setError(`Ссылка разблокирована: ${res.restored_url}`);
+        }
+      } catch (e) {
+        setError((e as Error).message || "Не удалось разблокировать ссылку.");
+      } finally {
+        setRestoringExcludedIds((prev) => {
+          const next = { ...prev };
+          delete next[excludedId];
+          return next;
+        });
+      }
+    },
+    [digestId, loadDigest, loadExcludedUrls],
+  );
 
   const confirmSelectedFive = async () => {
     const validSelected = selected.filter((id) => {
@@ -3902,30 +3999,7 @@ export function DigestWizard({ digestId }: Props) {
               )}
             </p>
           ) : null}
-          {canAddStep2ManualUrl ? (
-            <div style={{ marginBottom: 14 }}>
-              <p className="wizard-hint-do" style={{ fontSize: "0.95rem", margin: "0 0 8px" }}>
-                Не хватает новостей в пуле? Вставьте прямую ссылку на статью — она пройдёт ту же проверку, что и на шаге 1,
-                и <strong>обязательно</strong> попадёт в итоговую пятёрку при подтверждении.
-              </p>
-              <textarea
-                rows={2}
-                placeholder="Ссылка на статью (каждая с новой строки). Должна открываться и вести на материал про ИИ."
-                value={step2ManualUrls}
-                onChange={(e) => setStep2ManualUrls(e.target.value)}
-              />
-              <div style={{ marginTop: 8 }}>
-                <button
-                  type="button"
-                  disabled={loading || !step2ManualUrls.trim()}
-                  title="Проверить страницу и добавить в список кандидатов без пересборки пула"
-                  onClick={() => void addStep2ManualUrls()}
-                >
-                  Добавить ссылку в пул
-                </button>
-              </div>
-            </div>
-          ) : null}
+          {renderStep2ManualUrlBlock()}
           {candidatesSorted.length > 0 ? (
             poolCollection?.pool?.total || poolCollection?.last_run ? (
               <PoolCollectionStatsPanel stats={poolCollection} showHistory />
@@ -4028,6 +4102,54 @@ export function DigestWizard({ digestId }: Props) {
               Либо вставьте не менее 10 прямых URL на статьи (при{" "}
               <code style={{ color: "#e2e8f0" }}>ENABLE_WEB_FETCH=false</code>
               ) и снова тот же шаг.
+            </div>
+          ) : null}
+          {excludedUrls.length > 0 ? (
+            <div
+              style={{
+                marginBottom: 14,
+                padding: "12px 14px",
+                borderRadius: 8,
+                border: "1px solid #334155",
+                background: "rgba(15, 23, 42, 0.55)",
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>Исключённые ссылки</div>
+              <div style={{ color: "#94a3b8", fontSize: "0.92rem", marginBottom: 10 }}>
+                Эти URL не попадают в пул кандидатов. Нажмите «Вернуть в пул», чтобы снова разрешить их в следующих запусках.
+              </div>
+              <div style={{ display: "grid", gap: 8 }}>
+                {excludedUrls.map((row) => (
+                  <div
+                    key={row.id}
+                    style={{
+                      border: "1px solid #1f2937",
+                      borderRadius: 8,
+                      padding: "8px 10px",
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 8,
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <div style={{ minWidth: 240, flex: "1 1 360px" }}>
+                      <div style={{ fontWeight: 600 }}>{row.title || truncateText(row.url || "—", 72)}</div>
+                      <div style={{ color: "#94a3b8", fontSize: "0.88rem" }}>
+                        {(row.host || "—") + " · " + truncateText(row.url || "—", 110)}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="news-chip"
+                      disabled={!!restoringExcludedIds[row.id] || loading}
+                      onClick={() => void restoreExcludedUrl(row.id)}
+                    >
+                      {restoringExcludedIds[row.id] ? "Возвращаем..." : "Вернуть в пул"}
+                    </button>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : null}
           <div className="news-pick-list">
@@ -4156,6 +4278,18 @@ export function DigestWizard({ digestId }: Props) {
                           Открыть в новой вкладке
                         </a>
                       ) : null}
+                      <button
+                        type="button"
+                        className="news-chip warn"
+                        disabled={!!excludingCandidateIds[c.id] || loading}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          void excludeCandidateFromPool(c.id, c.url);
+                        }}
+                        title="Скрыть эту конкретную ссылку из всех будущих пулов"
+                      >
+                        {excludingCandidateIds[c.id] ? "Исключаем..." : "Не включать больше"}
+                      </button>
                     </div>
                     {(c.description || c.verification_comment) && (
                       <details className="news-pick-details" open={demoRow} onClick={(e) => e.stopPropagation()}>
@@ -4181,6 +4315,7 @@ export function DigestWizard({ digestId }: Props) {
               ));
             })()}
           </div>
+          {renderStep2ManualUrlBlock({ marginTop: 16, marginBottom: 14 })}
           {showRebuildPoolButton ? (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 14, marginTop: 4 }}>
               <button
@@ -4396,41 +4531,46 @@ export function DigestWizard({ digestId }: Props) {
                 языком, до 450 символов под заголовком. Хэштеги внизу — для соцсетей.
               </p>
             </WizardWhy>
-            {digest.analytics.map((a: any) => (
-              <div className="card step3-analytics-item" key={a.candidate_id}>
-                <div className="step3-analytics-head">
-                  <strong>{a.source_name}</strong>
-                  <span> · {formatNewsPublishedAt(a.published_at)}</span>
-                </div>
-                {a.title ? (
-                  <div className="step3-analytics-title">
-                    <strong>{a.title}</strong>
+            {digest.analytics.map((a: any) => {
+              const analyticsHeadline = displayCandidateTitle(
+                String(a.title || candidatesSorted.find((c: any) => c.id === a.candidate_id)?.title || ""),
+              );
+              return (
+                <div className="card step3-analytics-item" key={a.candidate_id}>
+                  <div className="step3-analytics-head">
+                    <strong>{a.source_name}</strong>
+                    <span> · {formatNewsPublishedAt(a.published_at)}</span>
                   </div>
-                ) : null}
-                {a.url ? (
-                  <a className="step3-analytics-link" href={a.url} target="_blank" rel="noopener noreferrer">
-                    {a.url}
-                  </a>
-                ) : null}
-                <div className="step3-analytics-block">
-                  <small className="step3-analytics-label step3-analytics-label--essence">Суть новости</small>
-                  <ReadableTextBlock text={a.essence} />
-                </div>
-                {a.comment ? (
+                  {a.url ? (
+                    <a className="step3-analytics-link" href={a.url} target="_blank" rel="noopener noreferrer">
+                      {a.url}
+                    </a>
+                  ) : null}
                   <div className="step3-analytics-block">
-                    <small className="step3-analytics-label">Заметка редактора</small>
-                    <ReadableTextBlock text={a.comment} />
+                    {analyticsHeadline ? (
+                      <div className="step3-analytics-title">
+                        <strong>{analyticsHeadline}</strong>
+                      </div>
+                    ) : null}
+                    <small className="step3-analytics-label step3-analytics-label--essence">Суть новости</small>
+                    <ReadableTextBlock text={a.essence} />
                   </div>
-                ) : null}
-                <AnalysisEditorView text={a.analysis} />
-                {a.reader_text ? (
-                  <div className="step3-analytics-block">
-                    <small className="step3-analytics-label">Текст для читателя</small>
-                    <ReadableTextBlock text={a.reader_text} />
-                  </div>
-                ) : null}
-              </div>
-            ))}
+                  {a.comment ? (
+                    <div className="step3-analytics-block">
+                      <small className="step3-analytics-label">Заметка редактора</small>
+                      <ReadableTextBlock text={a.comment} />
+                    </div>
+                  ) : null}
+                  <AnalysisEditorView text={a.analysis} />
+                  {a.reader_text ? (
+                    <div className="step3-analytics-block">
+                      <small className="step3-analytics-label">Текст для читателя</small>
+                      <ReadableTextBlock text={a.reader_text} />
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
             <div>Хэштеги: {(digest.hashtags || []).join(" ")}</div>
           </div>
         )}

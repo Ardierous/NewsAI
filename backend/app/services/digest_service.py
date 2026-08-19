@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -57,6 +57,7 @@ from app.models import (
     Step1DiscoveredNews,
     Step1DiscoveryRun,
     Step1ManualRatingLog,
+    Step1UrlRegistry,
 )
 from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_export
 from app.proxyapi_client import ProxyApiClient, set_proxyapi_log_context
@@ -163,17 +164,20 @@ from app.services.step1_curious_yield import (
 from app.services.step1_search_routing import resolve_step1_search_routing
 from app.services.step1_tiers_autoblock import record_host_unreachable, sync_autoblocked_hosts
 from app.services.step1_url_registry import (
+    BUCKET_USER_EXCLUDED,
     classify_registry_item,
     detect_newly_disabled_filters,
     enabled_map_from_filter_states,
     load_registry_raw_urls,
     list_urls_for_reverify,
+    mark_url_user_excluded,
     purge_expired_registry,
     purge_registry_urls_outside_window,
     register_raw_urls,
     registry_bucket_counts,
     registry_row_to_skeleton,
     save_filter_snapshot,
+    user_excluded_fingerprints,
 )
 from app.services.step1_web_search_stats import (
     current_step1_web_search_stats,
@@ -461,13 +465,30 @@ def _titles_are_near_duplicates(left: str, right: str) -> bool:
 
 def _strip_site_branding(title: str) -> str:
     """Убирает хвост « | Сайт » / « — Сайт », если основная часть достаточно длинная."""
+
+    def looks_like_branding_tail(tail: str) -> bool:
+        t = tail.strip()
+        if not t or len(t) > 48:
+            return False
+        if re.search(r"[?!,:;]", t):
+            return False
+        if re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", t.lower()):
+            return True
+        words = re.findall(r"[A-Za-zА-Яа-яЁё0-9+#&.]+", t)
+        if not words or len(words) > 4:
+            return False
+        has_lower = any(re.match(r"[a-zа-яё]", w) for w in words)
+        if has_lower:
+            return False
+        return all(w.isupper() or bool(re.match(r"[A-ZА-ЯЁ]", w)) for w in words)
+
     t = title.strip()
     for sep in (" | ", " – ", " — ", " - "):
         if sep not in t:
             continue
-        left, right = t.split(sep, 1)
+        left, right = t.rsplit(sep, 1)
         left, right = left.strip(), right.strip()
-        if len(left) >= 12 and len(right) <= 48 and len(left) >= len(right):
+        if len(left) >= 12 and len(left) >= len(right) and looks_like_branding_tail(right):
             return left
     return t
 
@@ -515,6 +536,19 @@ def _url_fingerprint(url: str) -> str:
     host = (p.hostname or "").lower().removeprefix("www.")
     path = (p.path or "").rstrip("/") or "/"
     return f"{host}{path.lower()}"
+
+
+def _strip_url_query_and_fragment(url: str) -> str:
+    """Оставляет только схему/хост/путь, убирая UTM и любые query/hash-параметры."""
+    raw = str(url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+    except Exception:
+        return raw.split("#", 1)[0].split("?", 1)[0].strip()
+    clean = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+    return clean.strip()
 
 
 def _candidate_url_fingerprint_sets(urls: list[str]) -> tuple[set[str], set[str]]:
@@ -922,8 +956,10 @@ def _expand_aggregator_seed_urls(initial_url: str, max_children: int = 10) -> li
         child_urls = filter_telegram_external_urls(outbound, max_links=max_children)
         out: list[tuple[str, dict[str, Any]]] = []
         for child in child_urls[:max_children]:
-            child_bundle = _fetch_article_page_bundle(child)
+            child_bundle = _fetch_external_article_bundle(child)
             if not child_bundle.get("ok") or child_bundle.get("is_listing_page"):
+                continue
+            if not _headline_from_article_bundle(child_bundle):
                 continue
             stored = str(child_bundle.get("final_url") or child_bundle.get("display_url") or child).strip()
             if not stored or is_curious_aggregator_source(stored) or _is_aggregator_source(stored):
@@ -962,8 +998,10 @@ def _expand_aggregator_seed_urls(initial_url: str, max_children: int = 10) -> li
             break
     out = []
     for child in child_urls:
-        child_bundle = _fetch_article_page_bundle(child)
+        child_bundle = _fetch_external_article_bundle(child)
         if not child_bundle.get("ok") or child_bundle.get("is_listing_page"):
+            continue
+        if not _headline_from_article_bundle(child_bundle):
             continue
         stored = str(child_bundle.get("final_url") or child_bundle.get("display_url") or child).strip()
         if not stored or is_curious_aggregator_source(stored) or _is_aggregator_source(stored):
@@ -1194,13 +1232,14 @@ def _link_rel_canonical_href(chunk: str, base_url: str) -> str | None:
 
 def _pick_display_url(final_url: str, canonical: str | None, og_url: str | None) -> str:
     """Если canonical/og:url указывают на ту же страницу — берём «чистый» URL из разметки."""
-    ff = _url_fingerprint(final_url)
+    final_clean = _strip_url_query_and_fragment(final_url)
+    ff = _url_fingerprint(final_clean)
     for cand in (canonical, og_url):
         if not cand or not str(cand).strip().startswith("http"):
             continue
-        cu = str(cand).strip().split("#")[0]
+        cu = _strip_url_query_and_fragment(str(cand).strip())
         try:
-            p1, p2 = urlparse(final_url), urlparse(cu)
+            p1, p2 = urlparse(final_clean), urlparse(cu)
         except Exception:
             continue
         h1 = (p1.hostname or "").lower().removeprefix("www.")
@@ -1209,7 +1248,7 @@ def _pick_display_url(final_url: str, canonical: str | None, og_url: str | None)
             continue
         if _url_fingerprint(cu) == ff:
             return cu
-    return final_url.split("#")[0]
+    return final_clean
 
 
 def _headline_extends(longer: str, shorter: str) -> bool:
@@ -1317,6 +1356,54 @@ def _choose_coherent_headline(
     return headline, source, strict
 
 
+def _headline_from_article_bundle(bundle: dict[str, Any]) -> str | None:
+    """Заголовок со страницы целевой статьи (h1, og:title, <title>), не из агрегатора/канала."""
+    primary = str(bundle.get("headline") or "").strip()
+    if len(primary) >= 8:
+        return primary[:480]
+    for key in ("raw_h1", "raw_og_title", "raw_twitter_title", "raw_html_title"):
+        raw = str(bundle.get(key) or "").strip()
+        if not raw:
+            continue
+        polished = _strip_site_branding(_clean_headline_text(raw))
+        if len(polished) >= 8:
+            return polished[:480]
+    return None
+
+
+def _fetch_external_article_bundle(initial_url: str) -> dict[str, Any]:
+    """
+    Загрузка страницы внешней статьи (ссылка из канала/агрегатора).
+    Заголовок берётся только с целевой страницы; при нехватке пробуем reader proxy.
+    """
+    bundle = _fetch_article_page_bundle(initial_url)
+    if bundle.get("ok") and _headline_from_article_bundle(bundle):
+        return bundle
+    reader_bundle = _fetch_article_bundle_via_reader_proxy(initial_url)
+    if reader_bundle and reader_bundle.get("ok"):
+        if _headline_from_article_bundle(reader_bundle):
+            return reader_bundle
+        if not bundle.get("ok"):
+            return reader_bundle
+    return bundle
+
+
+def channel_seed_llm_url_is_article(url: str) -> bool:
+    """ProxyAPI-URL из TG: открывается ли отдельная статья с заголовком на её странице."""
+    u = str(url or "").strip()
+    if not u.startswith("http"):
+        return False
+    bundle = _fetch_external_article_bundle(u)
+    if not bundle.get("ok"):
+        return False
+    stored = str(bundle.get("final_url") or bundle.get("display_url") or u).strip()
+    if _manual_seed_page_is_listing(stored, bundle):
+        return False
+    if not _manual_seed_page_is_article(stored, bundle):
+        return False
+    return bool(_headline_from_article_bundle(bundle))
+
+
 def _title_looks_truncated(title: str) -> bool:
     """Эвристика: заголовок оборван meta-тегом или лимитом CMS (часто ~60 символов)."""
     t = (title or "").strip()
@@ -1328,7 +1415,7 @@ def _title_looks_truncated(title: str) -> bool:
         return True
     if re.search(r"[\wа-яё]$", t, re.IGNORECASE) and not re.search(r"[.!?»\"')\]:]$", t):
         tail = t.rsplit(" ", 1)[-1]
-        if len(tail) <= 2:
+        if len(tail) <= 3:
             return True
     return False
 
@@ -2081,7 +2168,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
                 return reader_bundle
             return empty
         r.encoding = r.apparent_encoding or getattr(r, "encoding", None) or "utf-8"
-        final_url = str(r.url).split("#")[0]
+        final_url = _strip_url_query_and_fragment(str(r.url))
         chunk = r.text[:400_000]
         rough_vis_early = _rough_visible_text_from_html(chunk, 6500)
         if _is_bot_challenge_html(chunk) or looks_like_antibot_shell(chunk, visible_text=rough_vis_early):
@@ -2094,7 +2181,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
         og_url_abs: str | None = None
         if og_url_raw:
             try:
-                og_url_abs = urljoin(final_url, og_url_raw.strip()).split("#")[0]
+                og_url_abs = _strip_url_query_and_fragment(urljoin(final_url, og_url_raw.strip()))
             except Exception:
                 og_url_abs = None
         display = _pick_display_url(final_url, canonical, og_url_abs)
@@ -2106,6 +2193,18 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
         headline, headline_source, headline_strict = _choose_coherent_headline(
             display, og_title, og_url_abs, tw, ld_pairs, h1, html_t
         )
+        headline_raw_fields = {
+            "raw_h1": h1,
+            "raw_og_title": og_title,
+            "raw_twitter_title": tw,
+            "raw_html_title": html_t,
+        }
+        if not headline:
+            relaxed = _headline_from_article_bundle({"headline": None, **headline_raw_fields})
+            if relaxed:
+                headline = relaxed
+                headline_source = "article_page_relaxed"
+                headline_strict = False
         article_markers = _has_article_markers(chunk, ld_pairs)
         topic_corpus = _topic_corpus_from_article_chunk(
             chunk, html_title=html_t, og_title=og_title, h1=h1
@@ -2131,6 +2230,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
             "article_markers": article_markers,
             "soft_article_signals": soft_article_signals,
             "topic_corpus": topic_corpus,
+            **headline_raw_fields,
         }
         is_listing = _is_news_listing_page(display or final_url, chunk, partial_bundle)
         listing_urls = _extract_listing_article_urls(chunk, display or final_url, limit=14) if is_listing else []
@@ -3320,8 +3420,74 @@ class DigestService:
         self._repair_orphan_step1_status(digest)
         self._ensure_step0_type_for_draft(digest)
         self._dedupe_digest_candidate_rows(digest_id)
+        self._purge_user_excluded_pool_rows(digest_id)
         self._purge_invalid_step1_pool_rows(digest_id)
+        self._repair_truncated_pool_titles(digest_id)
         return digest
+
+    def _repair_truncated_pool_titles(self, digest_id: int, *, max_refresh: int = 3) -> int:
+        rows = (
+            self.db.query(NewsCandidate)
+            .filter(NewsCandidate.digest_id == digest_id)
+            .order_by(NewsCandidate.original_number.asc(), NewsCandidate.id.asc())
+            .all()
+        )
+        if not rows:
+            return 0
+        refreshed_attempts = 0
+        updated = 0
+        for row in rows:
+            if refreshed_attempts >= max(1, max_refresh):
+                break
+            title = str(row.title or "").strip()
+            url = str(row.url or "").strip()
+            if not title or not url or not _title_looks_truncated(title):
+                continue
+            refreshed_attempts += 1
+            refreshed = _refresh_truncated_candidate_title(url, title)
+            if not refreshed:
+                continue
+            refreshed_title = str(refreshed).strip()[:500]
+            if not refreshed_title:
+                continue
+            if len(refreshed_title) <= len(title):
+                continue
+            row.title = refreshed_title
+            updated += 1
+        if updated:
+            self.db.commit()
+            logger.info(
+                "Пул кандидатов: восстановлены обрезанные заголовки | digest_id=%s updated=%s",
+                digest_id,
+                updated,
+            )
+        return updated
+
+    def _purge_user_excluded_pool_rows(self, digest_id: int) -> bool:
+        blocked = user_excluded_fingerprints(self.db)
+        if not blocked:
+            return False
+        rows = (
+            self.db.query(NewsCandidate)
+            .filter(NewsCandidate.digest_id == digest_id)
+            .order_by(NewsCandidate.original_number.asc(), NewsCandidate.id.asc())
+            .all()
+        )
+        drop_ids: list[int] = []
+        for row in rows:
+            fp = _url_fingerprint(str(row.url or "").strip())
+            if fp and fp in blocked:
+                drop_ids.append(int(row.id))
+        if not drop_ids:
+            return False
+        self.db.query(NewsCandidate).filter(NewsCandidate.id.in_(drop_ids)).delete(synchronize_session=False)
+        self._renumber_digest_candidate_rows(digest_id)
+        logger.info(
+            "Пул кандидатов: удалены URL из стоп-листа пользователя | digest_id=%s removed=%s",
+            digest_id,
+            len(drop_ids),
+        )
+        return True
 
     def _purge_invalid_step1_pool_rows(self, digest_id: int) -> bool:
         """Удаляет из сохранённого пула ссылки, которые больше не проходят фильтры (справка и т.п.)."""
@@ -3727,6 +3893,24 @@ class DigestService:
             out.append(item)
         return out
 
+    @staticmethod
+    def _drop_user_excluded_items(
+        pool: list[dict[str, Any]],
+        *,
+        blocked_fps: set[str],
+    ) -> tuple[list[dict[str, Any]], int]:
+        if not pool or not blocked_fps:
+            return pool, 0
+        kept: list[dict[str, Any]] = []
+        removed = 0
+        for item in pool:
+            fp = _url_fingerprint(str(item.get("url") or "").strip())
+            if fp and fp in blocked_fps:
+                removed += 1
+                continue
+            kept.append(item)
+        return kept, removed
+
     def _dedupe_digest_candidate_rows(self, digest_id: int) -> bool:
         """Удаляет дубликаты URL в пуле (после сбоев пересборки). Возвращает True, если что-то удалили."""
         rows = (
@@ -3811,6 +3995,14 @@ class DigestService:
             max(STEP1_MIN_VERIFIED, int(getattr(self.settings, "step1_max_candidates_for_ui", 15) or 15)),
         )
         digest = self.get_digest(digest_id)
+        blocked_fps = user_excluded_fingerprints(self.db)
+        items, removed_blocked = self._drop_user_excluded_items(items, blocked_fps=blocked_fps)
+        if removed_blocked:
+            logger.info(
+                "Шаг 1: backup-пул очищен от URL из стоп-листа | digest_id=%s removed=%s",
+                digest_id,
+                removed_blocked,
+            )
         items = (
             _rebalance_verified_pool(
                 items,
@@ -3879,6 +4071,17 @@ class DigestService:
             and x.get("link_status")
             and (not self._is_step1_filter_enabled("aggregator_source") or not bool(x.get("is_aggregator")))
         ]
+        blocked_fps = user_excluded_fingerprints(self.db)
+        verified_preview, removed_blocked = self._drop_user_excluded_items(
+            verified_preview,
+            blocked_fps=blocked_fps,
+        )
+        if removed_blocked:
+            logger.info(
+                "Шаг 1: превью-пул очищен от URL из стоп-листа | digest_id=%s removed=%s",
+                digest_id,
+                removed_blocked,
+            )
         digest = self.get_digest(digest_id)
         preview_target = min(
             max(STEP1_MIN_VERIFIED, int(getattr(self.settings, "step1_max_candidates_for_ui", 15) or 15)),
@@ -4171,6 +4374,122 @@ class DigestService:
         except Exception:
             logger.exception("Не удалось обновить файл ручных оценок шага 1")
         return row
+
+    def exclude_candidate_url_from_pool(self, *, digest_id: int, candidate_id: int) -> dict[str, Any]:
+        digest = self.get_digest(digest_id)
+        candidate = (
+            self.db.query(NewsCandidate)
+            .filter(
+                NewsCandidate.id == candidate_id,
+                NewsCandidate.digest_id == digest_id,
+            )
+            .first()
+        )
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Кандидат не найден в текущем выпуске.")
+        blocked_url = str(candidate.url or "").strip()
+        blocked_fp = mark_url_user_excluded(
+            self.db,
+            self.settings,
+            url=blocked_url,
+            digest_type=digest.digest_type,
+            digest_id=digest.id,
+            source_stage="ui_exclude",
+            title=str(candidate.title or ""),
+            verification_comment=f"Пользователь исключил URL из пула ({BUCKET_USER_EXCLUDED}).",
+        )
+        if not blocked_fp:
+            raise HTTPException(status_code=400, detail="Не удалось определить URL для исключения.")
+
+        pool_rows = (
+            self.db.query(NewsCandidate)
+            .filter(NewsCandidate.digest_id == digest_id)
+            .all()
+        )
+        drop_candidate_ids = [
+            int(row.id)
+            for row in pool_rows
+            if _url_fingerprint(str(row.url or "").strip()) == blocked_fp
+        ]
+        selected_removed = 0
+        if drop_candidate_ids:
+            selected_removed = (
+                self.db.query(SelectedNews)
+                .filter(
+                    SelectedNews.digest_id == digest_id,
+                    SelectedNews.candidate_id.in_(drop_candidate_ids),
+                )
+                .count()
+            )
+            self.db.query(SelectedNews).filter(
+                SelectedNews.digest_id == digest_id,
+                SelectedNews.candidate_id.in_(drop_candidate_ids),
+            ).delete(synchronize_session=False)
+            self.db.query(NewsCandidate).filter(NewsCandidate.id.in_(drop_candidate_ids)).delete(
+                synchronize_session=False
+            )
+            digest.status = STATUS_STEP1
+            digest.current_step = STATUS_STEP1
+            self.db.commit()
+            self._renumber_digest_candidate_rows(digest_id)
+        else:
+            self.db.commit()
+
+        if selected_removed:
+            # Если ссылка уже была в топ-5, сбрасываем downstream шаги как при перевыборе.
+            self._clear_downstream_for_reselect(digest)
+            self.db.commit()
+
+        logger.info(
+            "Пул кандидатов: URL исключён пользователем | digest_id=%s candidate_id=%s removed=%s",
+            digest_id,
+            candidate_id,
+            len(drop_candidate_ids),
+        )
+        return {
+            "blocked_url": blocked_url,
+            "removed_from_pool": len(drop_candidate_ids),
+            "removed_from_selected": selected_removed,
+        }
+
+    def list_step1_user_excluded_urls(self, *, digest_id: int) -> list[dict[str, Any]]:
+        self.get_digest(digest_id)
+        rows = (
+            self.db.query(Step1UrlRegistry)
+            .filter(Step1UrlRegistry.bucket == BUCKET_USER_EXCLUDED)
+            .order_by(Step1UrlRegistry.last_seen_at.desc(), Step1UrlRegistry.id.desc())
+            .all()
+        )
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            out.append(
+                {
+                    "id": int(row.id),
+                    "url": str(row.url or ""),
+                    "host": str(row.host or ""),
+                    "title": str(row.title or ""),
+                    "fingerprint": str(row.url_fingerprint or ""),
+                    "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
+                }
+            )
+        return out
+
+    def restore_step1_user_excluded_url(self, *, digest_id: int, excluded_id: int) -> dict[str, Any]:
+        self.get_digest(digest_id)
+        row = (
+            self.db.query(Step1UrlRegistry)
+            .filter(
+                Step1UrlRegistry.id == excluded_id,
+                Step1UrlRegistry.bucket == BUCKET_USER_EXCLUDED,
+            )
+            .first()
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Исключённая ссылка не найдена.")
+        restored_url = str(row.url or "")
+        self.db.delete(row)
+        self.db.commit()
+        return {"restored_url": restored_url}
 
     def cancel_step1_run(self, digest_id: int) -> dict[str, str]:
         self.get_digest(digest_id)
@@ -6138,6 +6457,20 @@ class DigestService:
                 )
                 step1_collection_meta["pool_outside_window_removed_after_rebalance"] = removed_after_topup
 
+            blocked_fps = user_excluded_fingerprints(self.db)
+            verified_pool, removed_blocked = self._drop_user_excluded_items(
+                verified_pool,
+                blocked_fps=blocked_fps,
+            )
+            if removed_blocked:
+                logger.info(
+                    "Шаг 1: из финального пула удалены URL из стоп-листа | digest_id=%s removed=%s",
+                    digest.id,
+                    removed_blocked,
+                )
+                reject_stats["user_excluded"] = int(reject_stats.get("user_excluded", 0)) + int(removed_blocked)
+                step1_collection_meta["user_excluded_removed"] = int(removed_blocked)
+
             # Кандидатов удаляем только после успешного rebalance.
             self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
 
@@ -7389,7 +7722,7 @@ class DigestService:
         cleaned: list[str] = []
         seen: set[str] = set()
         for url in urls:
-            value = url.strip()
+            value = _strip_url_query_and_fragment(url.strip())
             if not value or value in seen:
                 continue
             seen.add(value)
@@ -7464,9 +7797,9 @@ class DigestService:
     ) -> dict[str, Any]:
         host = _host_from_url(stored)
         comment = "MANUAL_REQUIRED: добавлено пользователем"
-        raw_headline = bundle.get("headline")
+        raw_headline = _headline_from_article_bundle(bundle) if bundle.get("ok") else None
         if raw_headline:
-            title = self._ensure_russian_candidate_title(digest.id, stored, str(raw_headline))
+            title = self._ensure_russian_candidate_title(digest.id, stored, raw_headline)
         else:
             title = f"Статья по ссылке ({host})"
         if listing_seed:
@@ -7524,8 +7857,9 @@ class DigestService:
         seed_markers: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
+        fetch_page = _fetch_external_article_bundle if not mandatory else _fetch_article_page_bundle
         for idx, url in enumerate(manual_urls, start=1):
-            bundle = _fetch_article_page_bundle(url)
+            bundle = fetch_page(url)
             if bundle.get("ok") and (bundle.get("final_url") or bundle.get("display_url")):
                 stored = str(bundle.get("final_url") or bundle.get("display_url") or url).strip()
             else:
@@ -7659,8 +7993,32 @@ class DigestService:
                 _apply_material_form_to_candidate(row, extra=corpus, digest_type=digest.digest_type)
                 continue
 
-            raw_headline = bundle.get("headline") if bundle.get("ok") else None
+            raw_headline = _headline_from_article_bundle(bundle) if bundle.get("ok") else None
             manual_reject: str | None = None
+            link_ok = bool(bundle.get("ok"))
+            if not mandatory and not link_ok:
+                title = f"Статья по ссылке ({host})"
+                desc = (
+                    "Ссылка из мониторинга канала: страница статьи не открылась — "
+                    "возможно, URL устарел или недоступен."
+                )
+                logger.warning("Seed URL (канал): страница не открылась | url=%s", stored[:120])
+            elif not mandatory and link_ok and _manual_seed_page_is_listing(stored, bundle):
+                manual_reject = "news_listing_page"
+                raw_headline = None
+                title = f"Статья по ссылке ({host})"
+                desc = (
+                    "Ссылка из канала ведёт на ленту/раздел, а не на отдельную статью. "
+                    "Такие URL из мониторинга не принимаются."
+                )
+            elif not mandatory and link_ok and not _manual_seed_page_is_article(stored, bundle):
+                manual_reject = "non_article_page"
+                raw_headline = None
+                title = f"Статья по ссылке ({host})"
+                desc = (
+                    "Ссылка из канала открывается, но это не отдельная статья (раздел или сервис). "
+                    "Заголовок берётся только со страницы материала."
+                )
             pre_reason = search_url_prefilter_reason(
                 stored,
                 is_enabled=self._is_step1_filter_enabled,
@@ -7749,7 +8107,7 @@ class DigestService:
                     else:
                         desc = (
                             "Собрано Telegram-монитором (канал из pipeline_settings.json). "
-                            "Заголовок извлечён со страницы по ссылке; при необходимости показан перевод на русский."
+                            "Заголовок извлечён со страницы статьи по ссылке; при необходимости показан перевод на русский."
                         )
                     logger.info(
                         "Seed URL: заголовок извлечён | url=%s raw_len=%s title_len=%s",
@@ -7759,12 +8117,18 @@ class DigestService:
                     )
             else:
                 title = f"Статья по ссылке ({host})"
-                desc = (
-                    "Материал по ссылке пользователя: заголовок публикации не удалось извлечь автоматически "
-                    "(часто это раздел сайта вроде /news, а не конкретная статья). "
-                    "Вставьте прямую ссылку на страницу материала — тогда заголовок подтянется из разметки страницы."
-                )
-                logger.warning("Seed URL: заголовок не извлечён | url=%s", stored[:120])
+                if mandatory:
+                    desc = (
+                        "Материал по ссылке пользователя: заголовок публикации не удалось извлечь автоматически "
+                        "(часто это раздел сайта вроде /news, а не конкретная статья). "
+                        "Вставьте прямую ссылку на страницу материала — тогда заголовок подтянется из разметки страницы."
+                    )
+                else:
+                    desc = (
+                        "Ссылка из мониторинга канала: не удалось извлечь заголовок со страницы статьи "
+                        "(не из поста Telegram). Проверьте, что URL ведёт на открывающийся материал."
+                    )
+                logger.warning("Seed URL: заголовок не извлечён со страницы статьи | url=%s", stored[:120])
             # Для ручных URL используем тот же результат GET, что и для LLM-кандидатов (без отдельного HEAD).
             pub_fields: dict[str, Any] = {}
             _apply_bundle_published_at(pub_fields, bundle if bundle.get("ok") else {}, seed_url=url)
@@ -8771,7 +9135,8 @@ class DigestService:
                 no_progress_limit = max(no_progress_limit, 6)
             if no_progress_rounds >= no_progress_limit and may_stop_early:
                 if len(verified_pool) < target_min_verified:
-                    stop_reason = "no_progress_below_minimum"
+                    # Совместимость: внешний код и тесты ожидают единый stop_reason.
+                    stop_reason = "no_progress"
                 else:
                     stop_reason = (
                         "no_progress_target_met"

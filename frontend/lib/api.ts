@@ -91,6 +91,15 @@ export type SourceTierGroup = {
   hosts: SourceHost[];
 };
 
+export type Step1ExcludedUrl = {
+  id: number;
+  url: string;
+  host: string;
+  title: string;
+  fingerprint: string;
+  last_seen_at?: string | null;
+};
+
 export type SourceTiersEditor = {
   digest_type: string;
   window_days: number;
@@ -243,6 +252,22 @@ export const api = {
     request<any>(`/digests/${id}/step1/discovered/${newsId}/feedback`, {
       method: "POST",
       body: JSON.stringify(payload),
+    }),
+  excludeStep1CandidateUrl: (id: number, candidateId: number) =>
+    request<{
+      blocked_url: string;
+      removed_from_pool: number;
+      removed_from_selected: number;
+    }>(`/digests/${id}/step1/candidates/${candidateId}/exclude`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
+  listStep1ExcludedUrls: (id: number) =>
+    request<{ items: Step1ExcludedUrl[] }>(`/digests/${id}/step1/excluded-urls`),
+  restoreStep1ExcludedUrl: (id: number, excludedId: number) =>
+    request<{ restored_url: string }>(`/digests/${id}/step1/excluded-urls/${excludedId}/restore`, {
+      method: "POST",
+      body: JSON.stringify({}),
     }),
   downloadStep1ManualRatings: async () => {
     const res = await fetch(`${API_BASE}/digests/step1/manual-ratings/export`, { cache: "no-store" });

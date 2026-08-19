@@ -420,6 +420,35 @@ def save_step1_discovered_feedback(
     }
 
 
+@router.post("/{digest_id}/step1/candidates/{candidate_id}/exclude")
+def exclude_step1_candidate_url(
+    digest_id: int,
+    candidate_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    service = DigestService(db)
+    return service.exclude_candidate_url_from_pool(digest_id=digest_id, candidate_id=candidate_id)
+
+
+@router.get("/{digest_id}/step1/excluded-urls")
+def list_step1_excluded_urls(
+    digest_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    service = DigestService(db)
+    return {"items": service.list_step1_user_excluded_urls(digest_id=digest_id)}
+
+
+@router.post("/{digest_id}/step1/excluded-urls/{excluded_id}/restore")
+def restore_step1_excluded_url(
+    digest_id: int,
+    excluded_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    service = DigestService(db)
+    return service.restore_step1_user_excluded_url(digest_id=digest_id, excluded_id=excluded_id)
+
+
 @router.post("/{digest_id}/step2/manual-url")
 def step2_add_manual_url(digest_id: int, payload: Step2AddManualUrlRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
