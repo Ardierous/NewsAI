@@ -95,6 +95,37 @@ _RIA_PRODUCT_LISTING_RE = re.compile(r"^/product_[\w-]+$", re.IGNORECASE)
 _INVESTING_ARTICLE_ID_SUFFIX_RE = re.compile(r"-\d{5,}$", re.IGNORECASE)
 
 
+def is_investing_com_url(url: str) -> bool:
+    """Любой URL на домене investing.com (в т.ч. ru.investing.com)."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    try:
+        host = (urlparse(u).hostname or "").lower()
+    except Exception:
+        return False
+    return "investing.com" in host
+
+
+def is_investing_com_article_url(url: str) -> bool:
+    """Отдельная статья Investing.com: /news/…/slug-1234567 или /analysis/article-200323069."""
+    u = (url or "").strip()
+    if not u.startswith("http"):
+        return False
+    try:
+        host = (urlparse(u).hostname or "").lower()
+        path = (urlparse(u).path or "").rstrip("/") or "/"
+    except Exception:
+        return False
+    if "investing.com" not in host:
+        return False
+    segments = [s for s in path.split("/") if s]
+    if not segments or segments[0] not in ("news", "analysis"):
+        return False
+    last = segments[-1]
+    return bool(_INVESTING_ARTICLE_ID_SUFFIX_RE.search(last) or last.isdigit())
+
+
 def is_investing_com_listing_url(url: str) -> bool:
     """Рубрика/лента Investing.com (/news/… или /analysis/… из двух сегментов), не отдельная статья."""
     u = (url or "").strip()

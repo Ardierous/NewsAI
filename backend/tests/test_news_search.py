@@ -253,6 +253,16 @@ def test_investing_com_listing_urls():
     assert news_search.is_investing_com_listing_url(
         "https://ru.investing.com/analysis/ai-chips-market-outlook-1234567"
     ) is False
+    assert news_search.is_investing_com_article_url(
+        "https://ru.investing.com/analysis/article-200323069"
+    ) is True
+    assert news_search.is_investing_com_listing_url(
+        "https://ru.investing.com/analysis/article-200323069"
+    ) is False
+    assert news_search.is_investing_com_article_url(
+        "https://ru.investing.com/news/stock-market-news/nvidia-ai-rally-1234567"
+    ) is True
+    assert news_search.is_investing_com_url("https://ru.investing.com/analysis/bonds") is True
 
 
 def test_editorial_listing_titles():

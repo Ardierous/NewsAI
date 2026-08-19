@@ -179,6 +179,23 @@ _PRODUCT_TOOL_PROMO_RES = (
     ),
 )
 
+_PRACTICAL_REVIEW_SIGNAL_RES = (
+    re.compile(
+        r"\b(?:обзор|сравнени[ея]|подборк[аи]|топ[- ]?\d+|"
+        r"для (?:работы|учёбы|учебы|офиса|бизнеса|дом[ау]|повседневных задач)|"
+        r"как использовать|как применять|пошагов(?:о|ая)|"
+        r"что выбрать|какой сервис выбрать|кейс использования|"
+        r"эконом(?:ит|ия) времени|автоматизац(?:ия|ии) рутин(?:ы|ных задач))\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:review|comparison|best ai tools|top ai tools|"
+        r"for work|for students|for small business|use cases?|"
+        r"hands-on|practical guide|workflow automation|time saving)\b",
+        re.IGNORECASE,
+    ),
+)
+
 _NEWS_EVENT_SIGNAL_RES = (
     re.compile(
         r"\b(?:прорыв|breakthrough|открыти[ея]|исследовани[ея]|study|published|paper|"
@@ -284,6 +301,7 @@ def should_reject_commercial_non_article(
 ) -> bool:
     """Вакансии, карьера и рекламные лендинги — не новостная статья для пула."""
     url = str(item.get("url") or "")
+    practical_review = has_practical_review_signal(item, extra)
     if is_participation_invite_candidate(item, extra):
         return True
     if material_form == MATERIAL_FORM_SERVICE:
@@ -292,7 +310,11 @@ def should_reject_commercial_non_article(
         return True
     if is_product_tool_landing_url(url) and not has_substantive_news_event_signal(item, extra):
         return True
-    if looks_like_product_tool_promo(item, extra) and not has_substantive_news_event_signal(item, extra):
+    if (
+        looks_like_product_tool_promo(item, extra)
+        and not has_substantive_news_event_signal(item, extra)
+        and not practical_review
+    ):
         return True
     return False
 
@@ -316,6 +338,14 @@ def has_substantive_news_event_signal(item: dict[str, Any], extra: str = "") -> 
     if len(text) < 12:
         return False
     return any(rx.search(text) for rx in _NEWS_EVENT_SIGNAL_RES)
+
+
+def has_practical_review_signal(item: dict[str, Any], extra: str = "") -> bool:
+    """Прикладной обзор/сравнение для обычного пользователя (работа/быт), не лендинг."""
+    text = _text_blob(item, extra)
+    if len(text) < 12:
+        return False
+    return any(rx.search(text) for rx in _PRACTICAL_REVIEW_SIGNAL_RES)
 
 
 def is_corporate_official_announcement_url(url: str) -> bool:

@@ -75,6 +75,8 @@ from app.services.news_search import (
     fetch_tier_prioritized_raw_urls,
     is_curated_list_url,
     is_editorial_listing_title,
+    is_investing_com_article_url,
+    is_investing_com_url,
     is_listing_page_url,
     is_search_noise_url,
     is_step1_listing_seed_url,
@@ -637,7 +639,10 @@ def _reader_topic_corpus(markdown_text: str) -> str:
 
 
 def _fetch_article_bundle_via_reader_proxy(initial_url: str) -> dict[str, Any] | None:
-    return fetch_article_bundle_via_reader_proxy(initial_url)
+    bundle = fetch_article_bundle_via_reader_proxy(initial_url)
+    if not bundle:
+        return None
+    return _attach_reader_listing_urls(initial_url, bundle)
 
 
 def _try_reader_article_bundle(initial_url: str) -> dict[str, Any] | None:
@@ -780,6 +785,10 @@ def _looks_like_article_url_from_listing(url: str, listing_url: str) -> bool:
     low = url.lower()
     if is_search_noise_url(url):
         return False
+    if is_listing_page_url(url):
+        return False
+    if is_investing_com_article_url(url):
+        return True
     if any(x in low for x in ("?page=", "/page/", "/search", "/login", "/subscribe", "/rss", "/feed")):
         return False
     if re.search(r"\.(jpg|jpeg|png|gif|webp|pdf|zip)(\?|$)", low):
@@ -847,6 +856,58 @@ def _extract_listing_article_urls(chunk: str, page_url: str, limit: int = 12) ->
         scored.append((score, abs_url))
     scored.sort(key=lambda x: (-x[0], x[1]))
     return [u for _, u in scored[:limit]]
+
+
+def _listing_urls_from_reader_hrefs(page_url: str, bundle: dict[str, Any], limit: int = 32) -> list[str]:
+    hrefs = [str(u).strip() for u in (bundle.get("reader_hrefs") or []) if str(u).strip()]
+    if not hrefs:
+        return [str(u).strip() for u in (bundle.get("listing_article_urls") or []) if str(u).strip()][:limit]
+    children: list[str] = []
+    seen: set[str] = set()
+    for href in hrefs:
+        if is_listing_page_url(href) or is_search_noise_url(href):
+            continue
+        if not _looks_like_article_url_from_listing(href, page_url):
+            continue
+        key = _url_fingerprint(href)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        children.append(href)
+        if len(children) >= limit:
+            break
+    return children
+
+
+def _attach_reader_listing_urls(page_url: str, bundle: dict[str, Any]) -> dict[str, Any]:
+    """После jina: из markdown-ссылок собрать дочерние статьи ленты (Investing.com и прочие seed)."""
+    listing = is_step1_listing_seed_url(page_url) or is_listing_page_url(page_url)
+    if not listing:
+        return bundle
+    children = _listing_urls_from_reader_hrefs(page_url, bundle)
+    if not children:
+        return bundle
+    logger.info(
+        "Reader fallback: ссылки с ленты | url=%s extracted=%s",
+        page_url[:120],
+        len(children),
+    )
+    return {
+        **bundle,
+        "is_listing_page": True,
+        "listing_article_urls": children,
+        "article_markers": False,
+        "soft_article_signals": False,
+    }
+
+
+def _skip_listing_direct_html_retry(initial_url: str, bundle: dict[str, Any]) -> bool:
+    """Повторный прямой GET бесполезен: уже читали через jina или Investing.com отдал 403."""
+    if str(bundle.get("fetch_via") or "") == "reader_proxy":
+        return True
+    if is_investing_com_url(initial_url) and int(bundle.get("status_code") or 0) in (403, 429):
+        return True
+    return False
 
 
 _EDITORIAL_BLOG_ARTICLE_PATH_RE = re.compile(r"^/blogs/\d+/\d+$", re.IGNORECASE)
@@ -1049,9 +1110,13 @@ def _expand_listing_url_candidates(initial_url: str, max_children: int = 10) -> 
             return []
         children = list(bundle.get("listing_article_urls") or [])
         if not children:
+            children = _listing_urls_from_reader_hrefs(initial_url, bundle)
+        if not children and not _skip_listing_direct_html_retry(initial_url, bundle):
             chunk_resp = _http_get_html_for_article(initial_url)
-            if chunk_resp and chunk_resp.text:
-                children = _extract_listing_article_urls(chunk_resp.text[:400_000], initial_url, limit=max(12, max_children * 2))
+            if chunk_resp and chunk_resp.text and int(getattr(chunk_resp, "status_code", 0) or 0) < 400:
+                children = _extract_listing_article_urls(
+                    chunk_resp.text[:400_000], initial_url, limit=max(12, max_children * 2)
+                )
         ranked_children = _prioritize_children(children)
         out: list[tuple[str, dict[str, Any]]] = []
         for child in ranked_children[:max_children]:
@@ -1087,7 +1152,10 @@ def _expand_listing_url_candidates(initial_url: str, max_children: int = 10) -> 
     if not bundle.get("ok"):
         return []
     if bundle.get("is_listing_page"):
-        ranked_children = _prioritize_children(list(bundle.get("listing_article_urls") or []))
+        ranked_children = _prioritize_children(
+            list(bundle.get("listing_article_urls") or [])
+            or _listing_urls_from_reader_hrefs(initial_url, bundle)
+        )
         out: list[tuple[str, dict[str, Any]]] = []
         for child in ranked_children[:max_children]:
             child_bundle = _fetch_article_page_bundle(child)
@@ -2122,8 +2190,16 @@ def _http_get_html_for_article(url: str) -> requests.Response | None:
                     headers={**headers_base, "User-Agent": agent},
                     allow_redirects=True,
                 )
-                if r.status_code in (403, 429) and agent == agents[0]:
-                    continue
+                if r.status_code in (403, 429):
+                    if is_investing_com_url(url):
+                        logger.info(
+                            "Статья: Investing.com HTTP %s, сразу reader proxy | url=%s",
+                            r.status_code,
+                            url[:160],
+                        )
+                        return r
+                    if agent == agents[0]:
+                        continue
                 if r.status_code in (502, 503, 504):
                     last_server_err = r
                     continue
@@ -2163,6 +2239,12 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
             return empty
         empty["status_code"] = r.status_code
         if r.status_code >= 400 or not r.text:
+            if is_investing_com_url(initial_url) and r.status_code in (403, 429):
+                logger.info(
+                    "Шаг 1: Investing.com HTTP %s, читаем через r.jina.ai | url=%s",
+                    r.status_code,
+                    initial_url[:160],
+                )
             reader_bundle = _fetch_article_bundle_via_reader_proxy(initial_url)
             if reader_bundle is not None:
                 return reader_bundle
@@ -6012,6 +6094,7 @@ class DigestService:
                 )
                 no_progress_rounds = 0
                 rescue_queries = [
+                    self._step1_practical_tools_query(digest),
                     self._step1_fresh_breaking_query(digest),
                     self._step1_fresh_tier1_query(digest),
                 ]
@@ -8605,6 +8688,20 @@ class DigestService:
             "новость OR сегодня OR вчера OR \"последние сутки\" OR \"breaking\" "
             "site:ria.ru OR site:interfax.ru OR site:vedomosti.ru OR site:habr.com OR site:vc.ru "
             "-archive -tag -tags -opinion -column -vacancy -jobs -events -digest"
+        )
+
+    def _step1_practical_tools_query(self, digest: Digest) -> str:
+        """Прикладные обзоры ИИ-инструментов для повседневной работы и жизни."""
+        earliest = digest_earliest_news_date(digest)
+        anchor = digest_news_anchor_date(digest)
+        return (
+            f"after:{earliest.isoformat()} before:{anchor.isoformat()} "
+            "\"искусственный интеллект\" OR \"ИИ\" OR \"нейросеть\" OR \"LLM\" "
+            "(обзор OR сравнение OR подборка OR \"как использовать\" OR \"как применять\" "
+            "OR \"для работы\" OR \"для учебы\" OR \"для бизнеса\" OR \"автоматизация рутины\" "
+            "OR \"экономия времени\") "
+            "site:ai-manual.ru OR site:vc.ru OR site:habr.com OR site:lifehacker.ru OR site:rb.ru OR site:cnews.ru "
+            "-pricing -demo -trial -signup -landing -press -release -vacancy -jobs"
         )
 
     def _step1_research_science_query(self, digest: Digest) -> str:

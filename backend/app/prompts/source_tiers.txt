@@ -31,6 +31,7 @@ Tier-1 (приоритет №1): ресурсы для массового чи�
 - РИА Новости, тематический раздел «Искусственный интеллект» — https://ria.ru/product_iskusstvennyy-intellekt/
 - Interfax, раздел Digital — https://www.interfax.ru/digital/
 - Ведомости, раздел «Технологии» — https://www.vedomosti.ru/technologies/
+- Lifehacker.ru, тег AI — https://lifehacker.ru/tag/ai/ (практические сценарии использования ИИ в быту и работе)
 
 Что не вошло в этот список, не повышай до Tier-1.
 
@@ -59,6 +60,8 @@ Tier-2 (приоритет №2): ресурсы для профессионал
 - NVIDIA, официальный AI-архив блога — https://blogs.nvidia.com/blog/tag/artificial-intelligence/ (российский blogs.nvidia.ru недоступен)
 - Shvedkov.pro — https://shvedkov.pro/
 - Investing.com (RU), разделы новостей и аналитики — https://ru.investing.com/news/stock-market-news , https://ru.investing.com/news/economy , https://ru.investing.com/analysis/stock-markets , https://ru.investing.com/analysis/market-overview , https://ru.investing.com/analysis/bonds — мониторинг шага 1: из лент берутся ссылки на отдельные статьи (в т.ч. про ИИ на финансовых рынках).
+- RB.ru, тег AI — https://rb.ru/tag/ai/ (инструменты и прикладные кейсы для бизнеса)
+- CNews, ИИ/аналитика и цифровизация — https://www.cnews.ru/
 
 Что не вошло в этот список, не повышай до Tier-2.
 
@@ -140,6 +143,7 @@ ai-manual.ru
 ria.ru
 interfax.ru
 vedomosti.ru
+lifehacker.ru
 [tier2_hosts]
 technologyreview.com
 spectrum.ieee.org
@@ -155,6 +159,8 @@ vc.ru
 blogs.nvidia.com
 shvedkov.pro
 investing.com
+rb.ru
+cnews.ru
 [tier3_hosts]
 digital.gov.ru
 sk.ru
@@ -238,6 +244,7 @@ https://ru.investing.com/analysis/bonds
 https://ria.ru/product_iskusstvennyy-intellekt/
 https://www.interfax.ru/digital/
 https://www.vedomosti.ru/technologies/
+https://lifehacker.ru/tag/ai/
 https://www.technologyreview.com/topic/artificial-intelligence/
 https://spectrum.ieee.org/topic/artificial-intelligence/
 https://www.wired.com/tag/artificial-intelligence/
@@ -250,6 +257,8 @@ https://www.tadviser.ru/index.php/новости
 https://www.tadviser.ru/index.php/статья:искусственный_интеллект
 https://habr.com/ru/hubs/artificial_intelligence/
 https://vc.ru/ai
+https://rb.ru/tag/ai/
+https://www.cnews.ru/
 https://blogs.nvidia.com/blog/tag/artificial-intelligence/
 https://shvedkov.pro/
 https://particle.news/

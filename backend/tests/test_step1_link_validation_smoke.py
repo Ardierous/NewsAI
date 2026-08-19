@@ -572,3 +572,61 @@ def test_mass_http_unreachable_connectivity_hint():
     assert "повторный запуск" in hint.lower()
     assert ds._mass_http_unreachable_connectivity_hint({"http_unreachable": 2}) == ""
     assert ds._mass_http_unreachable_connectivity_hint({"published_before_window": 20}) == ""
+
+
+def test_looks_like_article_url_investing_sibling_from_bonds_listing():
+    listing = "https://ru.investing.com/analysis/bonds"
+    article = "https://ru.investing.com/analysis/article-200323069"
+    assert ds._looks_like_article_url_from_listing(article, listing) is True
+    assert ds._looks_like_article_url_from_listing(
+        "https://ru.investing.com/analysis/stock-markets", listing
+    ) is False
+
+
+def test_http_get_investing_403_returns_without_second_ua(monkeypatch):
+    calls: list[str] = []
+
+    def fake_get(url, *args, **kwargs):
+        calls.append(str(kwargs.get("headers", {}).get("User-Agent") or ""))
+        return _Resp(403, url, "Forbidden")
+
+    monkeypatch.setattr(ds.requests, "get", fake_get)
+    resp = ds._http_get_html_for_article("https://ru.investing.com/analysis/bonds")
+    assert resp is not None
+    assert resp.status_code == 403
+    assert len(calls) == 1
+
+
+def test_expand_investing_listing_via_jina_on_403(monkeypatch):
+    listing = "https://ru.investing.com/analysis/bonds"
+    child = "https://ru.investing.com/analysis/article-200323069"
+    listing_md = f"""
+Title: Аналитика облигаций — Investing.com
+
+[Цена нефти и газа. Расширится ли риск-премия?]({child})
+[Реальна ли ключевая ставка в 15%?](https://ru.investing.com/analysis/article-200322287)
+[Раздел акций](https://ru.investing.com/analysis/stock-markets)
+"""
+    child_md = """
+Title: Цена нефти и газа. Расширится ли риск-премия?
+
+Подробный текст колонки про рынок облигаций, инфляцию и ставку ЦБ.
+Ещё абзац с фактами, чтобы корпус статьи через reader proxy был достаточно длинным для проверки.
+"""
+
+    def fake_http(url: str):
+        return _Resp(403, url, "Forbidden")
+
+    def fake_jina(url: str, *args, **kwargs):
+        if "analysis/bonds" in url:
+            return _Resp(200, url, listing_md)
+        return _Resp(200, url, child_md)
+
+    monkeypatch.setattr(ds, "_http_get_html_for_article", fake_http)
+    monkeypatch.setattr("app.services.article_reader_fallback.requests.get", fake_jina)
+    pairs = ds._expand_listing_url_candidates(listing, max_children=4)
+    urls = [u.rstrip("/") for u, _ in pairs]
+    assert child in urls
+    assert listing.rstrip("/") not in urls
+    assert all(not u.rstrip("/").endswith("/analysis/stock-markets") for u in urls)
+    assert all(not b.get("is_listing_page") for _, b in pairs)

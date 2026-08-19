@@ -165,6 +165,7 @@ PROXYAPI_API_KEY=...
 | Заголовок есть, всё серое | Требование только `article_markers` | `_page_is_article_like` |
 | `url_mutated_between_agents` | Доверие к URL из ScoringAgent | `_filter_score_url_mutations` |
 | Много `http_unreachable` на доменах из поиска | Выдуманные URL при пустых citations | strict citations, `news_search.py` |
+| Investing.com: ленты в seed, в пуле 0 карточек | Прямой GET = **403**; jina раньше не сохранял ссылки с ленты | `article_reader_fallback.py` (`reader_hrefs`), `_expand_listing_url_candidates`; лог `Investing.com HTTP 403` |
 | `published_before_window` доминирует | Stale URL из реестра или выдачи | реестр отключается при short pool; окно дат шага 0 |
 | `urls_sent_to_http` << 10 | Мало raw после tier-поиска | логи tier-батчей, `empty_citation_streak` |
 | Preview при 502 как «итог» | Пересборка не добрала до 10 | rebuild восстанавливает прежний пул, если был ≥10 |

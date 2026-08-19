@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import requests
 
@@ -40,6 +41,16 @@ _ARTICLE_STRUCTURE_RE = re.compile(
     r"articlebody|class=[\"'][^\"']*article[^\"']*[\"']",
     re.IGNORECASE,
 )
+_MD_LINK_RE = re.compile(
+    r"\[[^\]]*\]\(\s*<?([^)\s>]+)>?\s*(?:\"[^\"]*\")?\s*\)",
+    re.IGNORECASE,
+)
+_BARE_HTTP_RE = re.compile(r"https?://[^\s\]\)<>\"']+", re.IGNORECASE)
+_JINA_WRAP_RE = re.compile(r"^https?://r\.jina\.ai/(https?://.+)$", re.IGNORECASE)
+_STATIC_ASSET_RE = re.compile(
+    r"\.(?:jpg|jpeg|png|gif|webp|svg|css|js|pdf|zip|woff2?)(?:\?|$)",
+    re.IGNORECASE,
+)
 
 
 def reader_fallback_allowed(url: str) -> bool:
@@ -47,6 +58,94 @@ def reader_fallback_allowed(url: str) -> bool:
     if not host or host in {"manual", "unknown", "localhost"}:
         return False
     return True
+
+
+def is_investing_com_url(url: str) -> bool:
+    try:
+        host = (urlparse(str(url or "").strip()).hostname or "").lower()
+    except Exception:
+        return False
+    return "investing.com" in host
+
+
+def _listing_seed_for_reader(url: str) -> bool:
+    from app.services.news_search import is_step1_listing_seed_url
+
+    return is_step1_listing_seed_url(url)
+
+
+def _unwrap_jina_url(url: str) -> str:
+    m = _JINA_WRAP_RE.match(str(url or "").strip())
+    return m.group(1) if m else str(url or "").strip()
+
+
+def _hosts_compatible(page_host: str, link_host: str) -> bool:
+    a = (page_host or "").lower().removeprefix("www.")
+    b = (link_host or "").lower().removeprefix("www.")
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return "investing.com" in a and "investing.com" in b
+
+
+def extract_reader_markdown_urls(markdown_text: str, page_url: str, limit: int = 48) -> list[str]:
+    """Same-host HTTP URLs from jina markdown ([text](url), bare links, Links/Buttons)."""
+    text = markdown_text or ""
+    try:
+        page_host = urlparse(page_url).hostname or ""
+    except Exception:
+        return []
+    candidates: list[str] = []
+    for m in _MD_LINK_RE.finditer(text):
+        candidates.append(m.group(1))
+    for m in _BARE_HTTP_RE.finditer(text):
+        candidates.append(m.group(0))
+    page_key = str(page_url or "").strip().rstrip("/").lower()
+    found: list[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        href = html.unescape(str(raw or "").strip()).rstrip(".,);]\"'")
+        if not href or href.startswith(("#", "javascript:", "mailto:", "data:", "tel:")):
+            continue
+        href = _unwrap_jina_url(href)
+        try:
+            abs_url = urljoin(page_url, href).split("#")[0]
+            abs_url = _unwrap_jina_url(abs_url)
+            pu = urlparse(abs_url)
+        except Exception:
+            continue
+        if pu.scheme not in ("http", "https"):
+            continue
+        if not _hosts_compatible(page_host, pu.hostname or ""):
+            continue
+        if _STATIC_ASSET_RE.search(pu.path or ""):
+            continue
+        key = abs_url.rstrip("/").lower()
+        if not key or key in seen or key == page_key:
+            continue
+        seen.add(key)
+        found.append(abs_url)
+        if len(found) >= limit:
+            break
+    return found
+
+
+def _reader_timeout(url: str) -> tuple[float, float]:
+    if is_investing_com_url(url):
+        return (6.0, 20.0)
+    return (5.0, 16.0)
+
+
+def _reader_request_headers(url: str, *, listing: bool) -> dict[str, str]:
+    headers = {
+        "Accept": "text/plain",
+        "User-Agent": "Mozilla/5.0 (compatible; NewsDigestBot/1.0; +reader-fallback)",
+    }
+    if listing or is_investing_com_url(url):
+        headers["X-With-Links-Summary"] = "all"
+        headers["X-Timeout"] = "18"
+    return headers
 
 
 def looks_like_antibot_shell(chunk: str, *, visible_text: str | None = None) -> bool:
@@ -132,16 +231,15 @@ def _jina_reader_urls(initial_url: str) -> list[str]:
 def fetch_article_bundle_via_reader_proxy(initial_url: str) -> dict[str, Any] | None:
     if not reader_fallback_allowed(initial_url):
         return None
-    headers = {
-        "Accept": "text/plain",
-        "User-Agent": "Mozilla/5.0 (compatible; NewsDigestBot/1.0; +reader-fallback)",
-    }
+    listing_seed = _listing_seed_for_reader(initial_url)
+    headers = _reader_request_headers(initial_url, listing=listing_seed)
+    timeout = _reader_timeout(initial_url)
     last_status: int | None = None
     for reader_url in _jina_reader_urls(initial_url):
         try:
             r = requests.get(
                 reader_url,
-                timeout=(5, 16),
+                timeout=timeout,
                 headers=headers,
                 allow_redirects=True,
             )
@@ -149,17 +247,27 @@ def fetch_article_bundle_via_reader_proxy(initial_url: str) -> dict[str, Any] | 
             if r.status_code >= 400 or not r.text:
                 continue
             markdown_text = str(r.text)
+            hrefs = extract_reader_markdown_urls(markdown_text, initial_url)
             headline = extract_reader_headline(markdown_text)
             topic_corpus = extract_reader_topic_corpus(markdown_text)
-            if not headline or len(topic_corpus) < 120:
+            listing_ok = listing_seed and len(hrefs) >= 2
+            article_ok = bool(headline) and len(topic_corpus) >= 120
+            if not listing_ok and not article_ok:
                 continue
+            if listing_ok and (not headline or len(str(headline).strip()) < 8):
+                host = (urlparse(initial_url).hostname or "источник").removeprefix("www.")
+                headline = f"Лента новостей {host}"
+            if listing_ok and len(topic_corpus) < 40:
+                topic_corpus = " ".join(hrefs[:12])[:4000]
             published_at = extract_reader_published_at(markdown_text)
             logger.info(
-                "Reader fallback: статья получена | url=%s reader=%s headline_len=%s corpus_len=%s",
+                "Reader fallback: %s получена | url=%s reader=%s headline_len=%s corpus_len=%s hrefs=%s",
+                "лента" if listing_ok else "статья",
                 initial_url[:160],
                 reader_url[:80],
-                len(headline),
+                len(headline or ""),
                 len(topic_corpus),
+                len(hrefs),
             )
             return {
                 "ok": True,
@@ -168,13 +276,14 @@ def fetch_article_bundle_via_reader_proxy(initial_url: str) -> dict[str, Any] | 
                 "display_url": initial_url,
                 "headline": headline,
                 "headline_source": "reader_proxy",
-                "headline_strict": True,
-                "article_markers": True,
-                "soft_article_signals": True,
+                "headline_strict": not listing_ok,
+                "article_markers": not listing_ok,
+                "soft_article_signals": not listing_ok,
                 "topic_corpus": topic_corpus,
                 "published_at": published_at,
-                "is_listing_page": False,
+                "is_listing_page": listing_ok,
                 "listing_article_urls": [],
+                "reader_hrefs": hrefs,
                 "fetch_via": "reader_proxy",
             }
         except Exception:
