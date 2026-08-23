@@ -6,23 +6,27 @@ import re
 from datetime import date, datetime
 from typing import Any
 
-from app.services.digest_type_policy import is_curious_digest
+from app.services.digest_type_policy import is_legacy_stored_curious
 from app.services.digest_topic_policy import is_style_digest
 
 MAX_NEWS_SEP = "..."
 DZEN_NEWS_SEP = "—"
 SEP_VK = "· · ·"
 HEADER_TITLE_SERIOUS = "⚡Пять актуальных новостей про ИИ"
+HEADER_TITLE_AI = "⚡Пять новостей про ИИ"
 HEADER_TITLE_CURIOUS = "⚡Пять забавных новостей про ИИ"
 HEADER_TITLE_STYLE = "⚡Пять актуальных новостей про моду и стиль"
 # Обратная совместимость для тестов и импортов.
-HEADER_TITLE = HEADER_TITLE_SERIOUS
+HEADER_TITLE = HEADER_TITLE_AI
 DEFAULT_LEAD_SERIOUS = "Коротко: главные сдвиги в мире ИИ и вокруг экосистемы продуктов за сегодня."
+DEFAULT_LEAD_AI = (
+    "Коротко: деловые, практичные и неожиданные истории про ИИ и нейросети за этот период."
+)
 DEFAULT_LEAD_CURIOUS = (
     "Коротко: пять забавных, странных и неожиданных историй про нейросети и ИИ за этот период."
 )
 DEFAULT_LEAD_STYLE = "Коротко: главные новости моды, стиля и fashion-индустрии за этот период."
-DEFAULT_LEAD = DEFAULT_LEAD_SERIOUS
+DEFAULT_LEAD = DEFAULT_LEAD_AI
 
 MAX_CHANNEL_URL = "https://max.ru/channel_extellect"
 
@@ -163,17 +167,17 @@ def subscription_vk_block() -> str:
 def resolve_header_title(payload: dict[str, Any]) -> str:
     if is_style_digest(payload.get("digest_topic")):
         return HEADER_TITLE_STYLE
-    if is_curious_digest(payload.get("digest_type")):
+    if is_legacy_stored_curious(payload.get("digest_type")):
         return HEADER_TITLE_CURIOUS
-    return HEADER_TITLE_SERIOUS
+    return HEADER_TITLE_AI
 
 
 def resolve_default_lead(payload: dict[str, Any]) -> str:
     if is_style_digest(payload.get("digest_topic")):
         return DEFAULT_LEAD_STYLE
-    if is_curious_digest(payload.get("digest_type")):
+    if is_legacy_stored_curious(payload.get("digest_type")):
         return DEFAULT_LEAD_CURIOUS
-    return DEFAULT_LEAD_SERIOUS
+    return DEFAULT_LEAD_AI
 
 
 def normalize_hashtag_tokens(tags: list[Any], minimum: int, maximum: int) -> str:

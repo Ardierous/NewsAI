@@ -1,9 +1,8 @@
 """
 Маршрутизация веб-поиска шага 1.
 
-- serious → source_tiers.txt (tier_strict)
-- curious + curious_use_serious_tiers → source_tiers для сбора URL, curious_verify для тона
-- curious без флага → curious_source_hosts.txt
+- ai/style (unified) → source_tiers.txt (tier_strict) + добор curious/practical батчами
+- legacy curious в API/БД нормализуется в serious_tier
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app.services.digest_type_policy import is_curious_digest
+from app.services.digest_type_policy import normalize_digest_type
 from app.services.digest_topic_policy import is_style_digest
 
 SearchRoute = Literal["curious_hosts", "serious_tier", "style_tier", "legacy_open", "query_override"]
@@ -45,11 +44,11 @@ def resolve_step1_search_routing(
     Выбор контура поиска и prefilter для одного батча шага 1.
 
     - style → source_tiers_style.txt (tier_strict)
-    - curious + curious_use_serious_tiers → source_tiers (как serious), фильтр тона curious на verify
-    - curious без флага → curious_source_hosts.txt, curious_strict prefilter
-    - serious + tier_strict → source_tiers.txt
-    - иначе → legacy open query
+    - ai (unified) → source_tiers (tier_strict); curious_hosts не используется в UX
+    - query_override → open query
     """
+    _ = normalize_digest_type(digest_type)
+    _ = curious_use_serious_tiers
     if is_style_digest(digest_topic):
         return Step1SearchRouting(
             route="style_tier",
@@ -57,27 +56,12 @@ def resolve_step1_search_routing(
             curious_strict=False,
             curious_verify=False,
         )
-    curious = is_curious_digest(digest_type)
     if query_override is not None:
         return Step1SearchRouting(
             route="query_override",
             tier_strict=False,
             curious_strict=False,
-            curious_verify=curious,
-        )
-    if curious and curious_use_serious_tiers:
-        return Step1SearchRouting(
-            route="serious_tier",
-            tier_strict=True,
-            curious_strict=False,
-            curious_verify=True,
-        )
-    if curious:
-        return Step1SearchRouting(
-            route="curious_hosts",
-            tier_strict=False,
-            curious_strict=True,
-            curious_verify=True,
+            curious_verify=False,
         )
     if tier_strict_setting:
         return Step1SearchRouting(

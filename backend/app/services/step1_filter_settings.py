@@ -1,4 +1,4 @@
-"""Настройки фильтров шага 1: отдельные профили для serious и curious (не смешиваются)."""
+"""Настройки фильтров шага 1: профили serious (единый «Дайджест ИИ»), legacy curious и style."""
 
 from __future__ import annotations
 

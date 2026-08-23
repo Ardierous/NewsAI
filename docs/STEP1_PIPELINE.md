@@ -62,23 +62,25 @@
 
 Ответы ProxyAPI web_search кэшируются локально (`step1_web_search_cache.py`, TTL 90 дней) при `web_search_cache_enabled: true`.
 
-## Разделение серьёзный / курьёзный
+## Единый режим «Дайджест ИИ»
 
-| | **Серьёзный** (`digest_type=serious`) | **Курьёзный** (`digest_type=curious`) |
-|---|--------------------------------------|----------------------------------------|
-| Домены поиска | `source_tiers.txt` (tier-1…4) | `curious_source_hosts.txt` |
-| Prefilter `non_policy_source` | tier-1…4 | curious-список |
-| Фильтры | секция `serious` в `step1_filter_settings.json` | секция `curious` (+ `off_topic_not_curious`) |
-| Фильтр тона | нет | `off_topic_not_curious` (`curious_tone.py`) |
-| Пресс-релизы в rebalance | 20–35% | 0% |
-| Маршрутизация | `resolve_step1_search_routing` → `serious_tier` | → `curious_hosts` |
-| Curious yield | общие лимиты pipeline | отдельный блок `curious_yield` в `pipeline_settings.json` |
+С **2026-08** в интерфейсе один режим выпуска — **«Дайджест ИИ»** (`digest_type=serious` в API/БД). Legacy-значение `curious` в старых запросах и записях нормализуется в `serious`.
 
-Контуры **не пересекаются**: при `serious` функция `fetch_curious_prioritized_raw_urls` не вызывается.
+| | **Дайджест ИИ** (unified) | **Legacy curious** (только старые выпуски в БД) |
+|---|---------------------------|--------------------------------------------------|
+| Домены поиска | `source_tiers.txt` (tier-1…4) + добор `curious_source_hosts` | ранее — только `curious_source_hosts.txt` |
+| Prefilter | tier-1…4 + `allow_curious_tiers_in_serious` | curious-список |
+| Фильтры | секция `serious` в `step1_filter_settings.json` | секция `curious` (+ `off_topic_not_curious`) — не используется для новых выпусков |
+| Фильтр тона | нет `off_topic_not_curious` | `off_topic_not_curious` (`curious_tone.py`) |
+| Пресс-релизы в rebalance | 20–35% | 0% (legacy) |
+| Маршрутизация | `resolve_step1_search_routing` → `serious_tier` | — |
+| Добор разнообразия | `fetch_curious_prioritized_raw_urls` + practical/curious rescue | — |
 
-### Курьёзный выпуск
+При нехватке кандидатов unified-режим запускает **controlled rescue**: practical tools → curious human/viral/angles → fresh tier-1.
 
-Поиск по доменам из `curious_source_hosts.txt` (MAXIM, vc.ru, habr, dzen, reddit и др.; **без** RIA/Интерфакс/Ведомостей). После HTTP-проверки — фильтр **`off_topic_not_curious`**: отсекается сухой официоз; допускаются «человеческие» сюжеты про ИИ. Фильтр **`published_date_undefined`** для курьёза **выключен**. Пресс-релизы не добираются; в rebalance квота пресс = 0. Заголовки — на русском.
+### Legacy: курьёзный выпуск (до объединения)
+
+Старые выпуски с `digest_type=curious` в БД сохраняют курьёзный заголовок/лид на шаге 4. Новый сбор шага 1 для любого выпуска идёт по unified-контуру.
 
 ## Окно дат публикации
 

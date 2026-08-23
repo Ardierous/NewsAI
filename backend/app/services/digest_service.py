@@ -741,6 +741,115 @@ def _manual_seed_page_is_listing(stored: str, bundle: dict[str, Any]) -> bool:
     return False
 
 
+def _step2_manual_url_plausible_article(url: str) -> bool:
+    """URL похож на прямую статью (без загрузки страницы) — для доверия на шаге 2."""
+    stored = str(url or "").strip()
+    if not stored.startswith(("http://", "https://")):
+        return False
+    if _is_site_homepage_url(stored):
+        return False
+    if is_search_noise_url(stored):
+        return False
+    if is_listing_page_url(stored):
+        return False
+    if is_step1_listing_seed_url(stored):
+        return False
+    if is_investing_com_article_url(stored):
+        return True
+    try:
+        path = (urlparse(stored).path or "").rstrip("/")
+    except Exception:
+        return False
+    if not path or path == "/":
+        return False
+    low = stored.lower()
+    if any(x in low for x in ("?page=", "/page/", "/search", "/login", "/subscribe", "/rss", "/feed")):
+        return False
+    if re.search(r"\.(jpg|jpeg|png|gif|webp|pdf|zip)(\?|$)", low):
+        return False
+    if _CNEWS_ARTICLE_PATH_RE.search(path):
+        return True
+    last_seg = path.split("/")[-1]
+    if re.search(r"\d{5,}", path):
+        return True
+    if re.search(r"\d{4}[/-]\d{2}", path):
+        return True
+    if len(last_seg) >= 12 and ("-" in last_seg or "article" in last_seg.lower()):
+        return True
+    segments = [s for s in path.split("/") if s]
+    return len(segments) >= 3 and len(last_seg) >= 8
+
+
+def _title_from_step2_manual_url(url: str) -> str:
+    host = _host_from_url(url)
+    return f"Статья по ссылке ({host})"
+
+
+def _step2_manual_title_needs_enrichment(title: str) -> bool:
+    t = str(title or "").strip()
+    if not t:
+        return True
+    if t.startswith("Статья по ссылке ("):
+        return True
+    if re.match(r"^article\s+\d+", t, re.IGNORECASE):
+        return True
+    return False
+
+
+def _step2_manual_trusted_row(
+    stored: str,
+    *,
+    manual_step: int,
+    enrichment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    host = _host_from_url(stored)
+    enrichment = enrichment or {}
+    title = str(enrichment.get("title") or "").strip()
+    if len(title) < 8:
+        title = _title_from_step2_manual_url(stored)
+    excerpt = _truncate_article_excerpt(
+        str(enrichment.get("article_excerpt") or enrichment.get("excerpt") or "")
+    )
+    published_at = str(enrichment.get("published_at") or PUBLISHED_AT_UNDEFINED)[:100]
+    desc = (
+        f"Вставлено в поле URL на шаге {manual_step}; материал обязателен к использованию в выпуске. "
+    )
+    if excerpt:
+        desc += "Текст и заголовок подтянуты через веб-поиск — перед публикацией сверьте с оригиналом."
+    else:
+        desc += (
+            "Сайт блокирует автоматическую проверку — ссылка принята по вашему выбору "
+            "(перед публикацией откройте её в браузере)."
+        )
+    comment = "MANUAL_REQUIRED: добавлено пользователем MANUAL_TRUST:fetch_blocked"
+    policy_fields: dict[str, Any] = {}
+    _apply_source_policy_from_url(policy_fields, stored)
+    row: dict[str, Any] = {
+        "title": title[:500],
+        "url": stored[:1000],
+        "source": host,
+        "tier": policy_fields.get("tier", "Tier-3"),
+        "published_at": published_at,
+        "category": "manual",
+        "description": desc,
+        "significance_score": 3,
+        "novelty_score": 3,
+        "impact_score": 3,
+        "total_score": 9,
+        "reliability_status": policy_fields.get("reliability_status", "✅ подтверждено"),
+        "is_foreign_agent": _is_foreign_agent_source(stored),
+        "is_aggregator": policy_fields.get("is_aggregator", False),
+        "is_duplicate": False,
+        "verification_comment": comment,
+        "link_status": True,
+        "headline_editorial_ok": True,
+        "page_verified": True,
+    }
+    if excerpt:
+        row["article_excerpt"] = excerpt
+    return row
+
+
 def _manual_seed_page_is_article(stored: str, bundle: dict[str, Any]) -> bool:
     if not bundle.get("ok"):
         return False
@@ -3814,8 +3923,9 @@ class DigestService:
             # При возврате к ИИ — окно по умолчанию из настроек шага 0.
             news_window_days = d0.news_window_days_default
             news_window_day_kind = d0.news_window_day_kind_default
-        if digest_type not in {"serious", "curious"}:
+        if digest_type not in {None, "serious", "curious"}:
             raise HTTPException(status_code=400, detail="digest_type must be serious or curious")
+        digest_type = normalize_digest_type(digest_type)
         # Если пользователь переключает тему и открывается существующий выпуск этой темы,
         # чистим его прошлые шаги, чтобы в UI не смешивались кандидаты/результаты другой темы.
         if (topic_changed or (switch_requested and switched_to_another_digest)) and self._digest_has_topic_progress(digest):
@@ -6014,80 +6124,17 @@ class DigestService:
                 not step1_user_cancelled
                 and not step1_proxyapi_depleted
                 and self.settings.enable_web_fetch
-                and is_curious_digest(digest.digest_type)
+                and not partial_rebuild_no_web_progress
                 and len(verified_pool) < STEP1_MIN_VERIFIED
+                and (time.monotonic() - started_monotonic) < hard_time_limit_sec
                 and (
-                    reject_stats.get("off_topic_not_curious", 0) >= max(8, len(verified_pool) * 2)
-                    or reject_stats.get("published_before_window", 0) >= 5
+                    reject_stats.get("published_before_window", 0) >= 5
                     or reject_stats.get("http_unreachable", 0) >= 5
                     or len(verified_pool) < 3
                 )
             ):
                 logger.warning(
-                    "Шаг 1: дополнительный entertainment-only добор для курьёзного выпуска | digest_id=%s verified=%s off_topic_not_curious=%s",
-                    digest.id,
-                    len(verified_pool),
-                    reject_stats.get("off_topic_not_curious", 0),
-                )
-
-                no_progress_rounds = 0
-                rescue_queries = [
-                    self._step1_curious_human_stories_query(digest),
-                    self._step1_curious_viral_query(digest),
-                    self._step1_curious_angles_query(digest),
-                ]
-                yield_policy = getattr(self, "_step1_curious_yield", None)
-                if yield_policy:
-                    rescue_queries = rescue_queries[: max(yield_policy.entertainment_rescue_queries, 3)]
-                for query in rescue_queries:
-                    if len(verified_pool) >= STEP1_MIN_VERIFIED:
-                        break
-                    need = max(1, STEP1_MIN_VERIFIED - len(verified_pool) + 2)
-                    rescue_batch = int(getattr(self.settings, "step1_batch_size", 10) or 10)
-                    if yield_policy:
-                        rescue_batch = yield_policy.rescue_collect_batch
-                    need = min(max(6, rescue_batch), need)
-                    rescue_items, rescue_funnel = self._collect_search_verified_candidates(
-                        digest.id,
-                        digest,
-                        now_msk,
-                        seen_fp,
-                        limit=need,
-                        on_row=snapshot_preview_row,
-                        register_reject=register_reject,
-                        query_override=query,
-                        skip_urls=excluded_urls,
-                        filter_enabled=self._is_step1_filter_enabled,
-                    )
-                    for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
-                        step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
-                            rescue_funnel.get(key, 0) or 0
-                        )
-                    step1_collection_meta["iterations"] = int(step1_collection_meta.get("iterations", 0) or 0) + 1
-                    step1_collection_meta["curious_entertainment_rescue_applied"] = True
-                    before_cnt = len(verified_pool)
-                    for item in rescue_items:
-                        append_verified(item)
-                    added = len(verified_pool) - before_cnt
-                    if added <= 0:
-                        no_progress_rounds += 1
-                    else:
-                        no_progress_rounds = 0
-                    if no_progress_rounds >= 2:
-                        break
-
-            if (
-                not step1_user_cancelled
-                and not step1_proxyapi_depleted
-                and self.settings.enable_web_fetch
-                and not partial_rebuild_no_web_progress
-                and not is_curious_digest(digest.digest_type)
-                and len(verified_pool) < STEP1_MIN_VERIFIED
-                and (time.monotonic() - started_monotonic) < hard_time_limit_sec
-                and reject_stats.get("published_before_window", 0) >= 15
-            ):
-                logger.warning(
-                    "Шаг 1: fresh-search rescue для serious (много старых URL) | digest_id=%s verified=%s published_before=%s",
+                    "Шаг 1: unified pool rescue (practical + curious + fresh) | digest_id=%s verified=%s published_before=%s",
                     digest.id,
                     len(verified_pool),
                     reject_stats.get("published_before_window", 0),
@@ -6095,9 +6142,19 @@ class DigestService:
                 no_progress_rounds = 0
                 rescue_queries = [
                     self._step1_practical_tools_query(digest),
-                    self._step1_fresh_breaking_query(digest),
-                    self._step1_fresh_tier1_query(digest),
+                    self._step1_curious_human_stories_query(digest),
+                    self._step1_curious_viral_query(digest),
+                    self._step1_curious_angles_query(digest),
                 ]
+                if reject_stats.get("published_before_window", 0) >= 15:
+                    rescue_queries.extend(
+                        [
+                            self._step1_fresh_breaking_query(digest),
+                            self._step1_fresh_tier1_query(digest),
+                        ]
+                    )
+                else:
+                    rescue_queries.append(self._step1_fresh_tier1_query(digest))
                 for query in rescue_queries:
                     if len(verified_pool) >= STEP1_MIN_VERIFIED:
                         break
@@ -6124,7 +6181,7 @@ class DigestService:
                             rescue_funnel.get(key, 0) or 0
                         )
                     step1_collection_meta["iterations"] = int(step1_collection_meta.get("iterations", 0) or 0) + 1
-                    step1_collection_meta["serious_fresh_search_rescue_applied"] = True
+                    step1_collection_meta["unified_pool_rescue_applied"] = True
                     before_cnt = len(verified_pool)
                     for item in rescue_items:
                         append_verified(item)
@@ -6135,7 +6192,7 @@ class DigestService:
                         no_progress_rounds = 0
                     if no_progress_rounds >= 2:
                         break
-    
+
             verified_pool, removed_outside_window = _filter_verified_pool_by_date_window(
                 digest,
                 verified_pool,
@@ -6812,20 +6869,41 @@ class DigestService:
             STEP1_MIN_VERIFIED,
             int(getattr(self.settings, "step1_max_candidates_for_ui", 15) or 15),
         )
-        existing_urls_lower = {str(c.url or "").strip().lower() for c in existing}
-        existing_fps = {article_page_fingerprint(str(c.url or "")) for c in existing if str(c.url or "").strip()}
-
         to_add: list[str] = []
         skipped_duplicates: list[str] = []
+        reactivated_rows: list[dict[str, Any]] = []
+        existing_by_url: dict[str, NewsCandidate] = {
+            str(c.url or "").strip().lower(): c for c in existing if str(c.url or "").strip()
+        }
+        existing_by_fp: dict[str, NewsCandidate] = {}
+        for c in existing:
+            fp = article_page_fingerprint(str(c.url or ""))
+            if fp and fp not in existing_by_fp:
+                existing_by_fp[fp] = c
+
         for url in normalized:
             url_lower = url.strip().lower()
             fp = article_page_fingerprint(url)
-            if url_lower in existing_urls_lower or (fp and fp in existing_fps):
+            duplicate_row = existing_by_url.get(url_lower)
+            if duplicate_row is None and fp:
+                duplicate_row = existing_by_fp.get(fp)
+            if duplicate_row is not None:
+                upgraded = self._try_reactivate_failed_step2_manual_candidate(digest, duplicate_row)
+                if upgraded is not None:
+                    reactivated_rows.append(upgraded)
                 skipped_duplicates.append(url)
                 continue
             to_add.append(url)
 
         if not to_add:
+            if reactivated_rows:
+                self.db.commit()
+                return {
+                    "added": reactivated_rows,
+                    "skipped_duplicates": skipped_duplicates,
+                    "pool_count": len(existing),
+                    "detail": "Ссылка уже была в пуле — карточка обновлена для выбора в топ‑5.",
+                }
             return {
                 "added": [],
                 "skipped_duplicates": skipped_duplicates,
@@ -6923,6 +7001,135 @@ class DigestService:
             "added": created_rows,
             "skipped_duplicates": skipped_duplicates,
             "pool_count": len(existing) + len(created_rows),
+        }
+
+    def _enrich_blocked_manual_article(self, url: str) -> dict[str, Any]:
+        """Заголовок и выдержка для ручной ссылки, если прямой GET заблокирован антиботом."""
+        stored = str(url or "").strip()
+        if not stored.startswith(("http://", "https://")):
+            return {}
+        bundle = _fetch_article_page_bundle(stored)
+        if bundle.get("ok"):
+            headline = str(_headline_from_article_bundle(bundle) or "").strip()
+            corpus = _truncate_article_excerpt(str(bundle.get("topic_corpus") or ""))
+            if len(headline) >= 8 and len(corpus) >= 80:
+                out: dict[str, Any] = {"title": headline[:500], "article_excerpt": corpus}
+                pub = bundle.get("published_at")
+                if isinstance(pub, str) and pub.strip():
+                    out["published_at"] = pub.strip()[:100]
+                return out
+        if not getattr(self.settings, "proxyapi_web_search_enabled", True):
+            return {}
+        try:
+            meta = self.proxy.fetch_article_metadata_by_url(stored)
+        except Exception:
+            logger.warning(
+                "Шаг 2: не удалось подтянуть метаданные ручной ссылки | url=%s",
+                stored[:120],
+                exc_info=True,
+            )
+            return {}
+        if not meta:
+            return {}
+        title = str(meta.get("title") or "").strip()
+        excerpt = _truncate_article_excerpt(str(meta.get("excerpt") or meta.get("article_excerpt") or ""))
+        if len(title) < 8 and len(excerpt) < 80:
+            return {}
+        out = {}
+        if len(title) >= 8:
+            out["title"] = title[:500]
+        if excerpt:
+            out["article_excerpt"] = excerpt
+        pub = str(meta.get("published_at") or "").strip()
+        if pub:
+            parsed = _parse_published_at_storage_value(pub)
+            if parsed and _published_at_plausible(parsed):
+                out["published_at"] = _format_published_at_storage(parsed)
+        return out
+
+    def _hydrate_candidate_content(self, candidate: NewsCandidate) -> None:
+        """Дополняет заголовок и excerpt перед аналитикой (антибот-сайты, ручные ссылки шага 2)."""
+        excerpt = str(candidate.article_excerpt or "").strip()
+        comment = str(candidate.verification_comment or "")
+        title_needs = _step2_manual_title_needs_enrichment(str(candidate.title or ""))
+        needs = (
+            len(excerpt) < 120
+            or title_needs
+            or "MANUAL_TRUST:fetch_blocked" in comment
+            or "поле URL на шаге 2" in str(candidate.description or "")
+        )
+        if not needs:
+            return
+        stored = str(candidate.url or "").strip()
+        if not stored.startswith("http"):
+            return
+        enrichment = self._enrich_blocked_manual_article(stored)
+        if not enrichment:
+            return
+        changed = False
+        new_title = str(enrichment.get("title") or "").strip()
+        if new_title and (title_needs or len(str(candidate.title or "")) < 12):
+            candidate.title = new_title[:500]
+            changed = True
+        new_excerpt = str(enrichment.get("article_excerpt") or "").strip()
+        if new_excerpt and len(new_excerpt) > len(excerpt):
+            candidate.article_excerpt = new_excerpt[:4000]
+            changed = True
+        pub = str(enrichment.get("published_at") or "").strip()
+        if pub and str(candidate.published_at or "") in {"", PUBLISHED_AT_UNDEFINED}:
+            candidate.published_at = pub[:100]
+            changed = True
+        if changed:
+            self.db.add(candidate)
+
+    def _try_reactivate_failed_step2_manual_candidate(
+        self,
+        digest: Digest,
+        row: NewsCandidate,
+    ) -> dict[str, Any] | None:
+        """Починить ручную ссылку шага 2, если авто-проверка не прошла из‑за антибота."""
+        if row.link_status and row.headline_editorial_ok:
+            return None
+        comment = str(row.verification_comment or "")
+        if "MANUAL_REQUIRED:" not in comment and "поле URL на шаге 2" not in str(row.description or ""):
+            return None
+        stored = str(row.url or "").strip()
+        if not stored or not _step2_manual_url_plausible_article(stored):
+            return None
+        trusted = _step2_manual_trusted_row(
+            stored,
+            manual_step=2,
+            enrichment=self._enrich_blocked_manual_article(stored),
+        )
+        row.title = str(trusted.get("title") or row.title)[:500]
+        row.description = str(trusted.get("description") or row.description)
+        row.verification_comment = str(trusted.get("verification_comment") or row.verification_comment)
+        row.link_status = True
+        row.headline_editorial_ok = True
+        row.page_verified = True
+        row.reliability_status = str(trusted.get("reliability_status") or row.reliability_status)[:40]
+        row.category = "manual"
+        excerpt = str(trusted.get("article_excerpt") or "").strip()
+        if excerpt:
+            row.article_excerpt = excerpt[:4000]
+        pub = str(trusted.get("published_at") or "").strip()
+        if pub and pub != PUBLISHED_AT_UNDEFINED:
+            row.published_at = pub[:100]
+        self.db.add(row)
+        self.db.flush()
+        logger.info(
+            "Шаг 2: обновлена ручная ссылка после антибота | digest_id=%s candidate_id=%s url=%s",
+            digest.id,
+            row.id,
+            stored[:120],
+        )
+        return {
+            "id": row.id,
+            "url": row.url,
+            "title": row.title,
+            "page_verified": row.page_verified,
+            "headline_editorial_ok": row.headline_editorial_ok,
+            "link_status": row.link_status,
         }
 
     def _candidate_publisher_host(self, candidate: NewsCandidate) -> str:
@@ -7276,6 +7483,7 @@ class DigestService:
         for item in selected:
             candidate = self.db.query(NewsCandidate).filter(NewsCandidate.id == item.candidate_id).first()
             if candidate:
+                self._hydrate_candidate_content(candidate)
                 payload.append(
                     {
                         "candidate_id": candidate.id,
@@ -7288,6 +7496,8 @@ class DigestService:
                         "article_excerpt": str(candidate.article_excerpt or "")[:4000],
                     }
                 )
+        if payload:
+            self.db.commit()
         with self._digest_cost_session(
             digest,
             step="step_3",
@@ -7386,6 +7596,9 @@ class DigestService:
 
     def _resolve_article_excerpt(self, candidate: NewsCandidate) -> str:
         excerpt = str(getattr(candidate, "article_excerpt", None) or "").strip()
+        if len(excerpt) < 120:
+            self._hydrate_candidate_content(candidate)
+            excerpt = str(getattr(candidate, "article_excerpt", None) or "").strip()
         if len(excerpt) >= 120:
             return excerpt[:4000]
         if not candidate.url.startswith("http"):
@@ -7954,6 +8167,21 @@ class DigestService:
             if mandatory:
                 comment = "MANUAL_REQUIRED: добавлено пользователем"
                 if not link_ok:
+                    if manual_step == 2 and _step2_manual_url_plausible_article(stored):
+                        enrichment = self._enrich_blocked_manual_article(stored)
+                        trusted = _step2_manual_trusted_row(
+                            stored,
+                            manual_step=manual_step,
+                            enrichment=enrichment,
+                        )
+                        trusted["original_number"] = idx
+                        logger.info(
+                            "Шаг 2: ручной URL без авто-проверки (антибот) — принят по структуре ссылки | url=%s",
+                            stored[:120],
+                        )
+                        result.append(trusted)
+                        attach_seed_marker(result[-1], row_seed)
+                        continue
                     title = f"Статья по ссылке ({host})"
                     desc = (
                         "Страница по ссылке не открылась — проверьте URL в браузере и вставьте снова."
@@ -9868,7 +10096,6 @@ class DigestService:
                 )
                 skip_curious_supplement = (
                     query_override is None
-                    and not is_curious_digest(digest.digest_type)
                     and serious_curious_enabled
                     and (
                         tier_raw_added >= max(8, check_limit // 2)
@@ -9883,11 +10110,7 @@ class DigestService:
                         len(raw_unique),
                         check_limit,
                     )
-                elif (
-                    query_override is None
-                    and not is_curious_digest(digest.digest_type)
-                    and serious_curious_enabled
-                ):
+                elif query_override is None and serious_curious_enabled:
                     curious_batches = max(
                         2,
                         min(
@@ -10096,10 +10319,7 @@ class DigestService:
         )
         search_window_earliest = digest_earliest_news_date(digest)
         search_window_anchor = digest_news_anchor_date(digest)
-        serious_mixed_sources = (
-            not is_curious_digest(digest.digest_type)
-            and bool(getattr(self.settings, "step1_serious_use_curious_tiers", True))
-        )
+        serious_mixed_sources = bool(getattr(self.settings, "step1_serious_use_curious_tiers", True))
         for raw in raw_unique:
             if step1_is_cancelled(digest_id):
                 break
@@ -11276,4 +11496,8 @@ class DigestService:
         desc = str(description or "")
         if "TELEGRAM_SEED:" in comment or "Telegram-монитор" in desc:
             return False
-        return "поле URL на шаге 1" in desc or "поле URL на шаге 2" in desc
+        return (
+            "MANUAL_REQUIRED:" in comment
+            or "поле URL на шаге 1" in desc
+            or "поле URL на шаге 2" in desc
+        )

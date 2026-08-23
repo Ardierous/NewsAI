@@ -1168,6 +1168,54 @@ def test_step2_add_manual_url_appends_to_pool(monkeypatch: pytest.MonkeyPatch):
     assert manual_url in dup["skipped_duplicates"]
 
 
+def test_step2_add_manual_url_trusts_investing_when_fetch_blocked(monkeypatch: pytest.MonkeyPatch):
+    service, digest = _make_service(monkeypatch)
+    digest.status = STATUS_STEP1
+    digest.current_step = STATUS_STEP1
+    service.db.commit()
+
+    manual_url = "https://ru.investing.com/news/stock-market-news/article-3361070"
+    monkeypatch.setattr(ds, "_fetch_article_page_bundle", lambda url: {"ok": False, "status_code": 403})
+    monkeypatch.setattr(
+        service,
+        "_enrich_blocked_manual_article",
+        lambda url: {
+            "title": "Nvidia и ИИ: прогноз аналитиков Investing.com",
+            "article_excerpt": "Аналитики оценили влияние ИИ на рынок акций. " * 8,
+            "published_at": "2026-08-20T10:00:00+03:00",
+        },
+    )
+
+    result = service.add_manual_urls_to_pool(digest.id, [manual_url])
+    assert len(result["added"]) == 1
+    row = service.db.query(NewsCandidate).filter(NewsCandidate.id == result["added"][0]["id"]).one()
+    assert row.link_status is True
+    assert row.headline_editorial_ok is True
+    assert row.page_verified is True
+    assert "шаге 2" in row.description
+    assert "MANUAL_TRUST:fetch_blocked" in row.verification_comment
+    assert "Nvidia" in row.title
+    assert len(row.article_excerpt) >= 120
+
+    dup = service.add_manual_urls_to_pool(digest.id, [manual_url])
+    assert dup["added"] == []
+    assert manual_url in dup["skipped_duplicates"]
+
+    row.link_status = False
+    row.headline_editorial_ok = False
+    row.page_verified = False
+    row.verification_comment = "MANUAL_REQUIRED: добавлено пользователем REJECT_REASON:seed_unverified"
+    row.description = "Страница по ссылке не открылась — проверьте URL в браузере и вставьте снова."
+    service.db.commit()
+
+    repaired = service.add_manual_urls_to_pool(digest.id, [manual_url])
+    assert len(repaired["added"]) == 1
+    row = service.db.query(NewsCandidate).filter(NewsCandidate.id == repaired["added"][0]["id"]).one()
+    assert row.link_status is True
+    assert row.headline_editorial_ok is True
+    assert "шаге 2" in row.description
+
+
 def test_select_news_manual_picks_ignore_legacy_telegram_manual_required(monkeypatch: pytest.MonkeyPatch):
     service, digest = _make_service(monkeypatch)
     digest.status = STATUS_STEP1

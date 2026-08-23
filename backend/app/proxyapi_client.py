@@ -126,6 +126,28 @@ def _log_headers(source: str) -> dict[str, str]:
     return headers
 
 
+def _parse_json_object(raw: str) -> dict[str, Any] | None:
+    text = str(raw or "").strip()
+    m = re.search(r"```(?:json)?\s*\n?(.*?)```", text, flags=re.DOTALL | re.IGNORECASE)
+    if m:
+        text = m.group(1).strip()
+    try:
+        if text.startswith("{"):
+            parsed = json.loads(text)
+            return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+    try:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            parsed = json.loads(text[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
+    return None
+
+
 @contextmanager
 def proxyapi_log_context(**kwargs: Any) -> Iterator[None]:
     clean = {str(k): _safe_header_value(v) for k, v in kwargs.items() if v is not None}
@@ -529,6 +551,85 @@ class ProxyApiClient:
             _log_proxyapi_exception(exc, kind="chat.web_search_preview", model=preview_model)
             logger.exception("ProxyAPI chat search-preview failed | model=%s", preview_model)
             return []
+
+    def fetch_article_metadata_by_url(self, url: str) -> dict[str, str]:
+        """
+        Заголовок и выдержка по конкретному URL через web_search (если прямой GET заблокирован).
+        Не учитывается в лимите web_search шага 1.
+        """
+        if not self.settings.proxyapi_web_search_enabled:
+            return {}
+        stored = str(url or "").strip()
+        if not stored.startswith(("http://", "https://")):
+            return {}
+        user_prompt = (
+            f"Найди в веб-поиске эту конкретную страницу (точный URL):\n{stored}\n\n"
+            "Верни JSON без markdown и пояснений:\n"
+            '{"title":"полный заголовок статьи на русском","excerpt":"3–6 предложений: суть и ключевые факты",'
+            '"published_at":"дата публикации ISO 8601 с +03:00 или пустая строка"}\n'
+            "Используй только факты со страницы или из сниппета поиска по этой ссылке. Не выдумывай."
+        )
+        location = {
+            "type": "approximate",
+            "country": "RU",
+            "city": "Moscow",
+            "region": "Moscow",
+        }
+        tools = [
+            {
+                "type": "web_search",
+                "search_context_size": "medium",
+                "user_location": location,
+            }
+        ]
+        model = self.settings.proxyapi_web_search_model
+        try:
+            response = self.client.responses.create(
+                model=model,
+                tools=tools,
+                input=[{"role": "user", "content": user_prompt}],
+                max_output_tokens=700,
+                extra_headers=_log_headers("manual_url_metadata"),
+            )
+            self._last_api_response = response
+            _log_proxyapi_usage(response, kind="responses.manual_url_metadata", model=model)
+            raw = str(getattr(response, "output_text", None) or "")
+            if not raw.strip():
+                for item in getattr(response, "output", None) or []:
+                    if getattr(item, "type", None) == "message":
+                        for block in getattr(item, "content", None) or []:
+                            if getattr(block, "type", None) == "output_text":
+                                raw = str(getattr(block, "text", None) or "")
+                                break
+            parsed = _parse_json_object(raw)
+            if not isinstance(parsed, dict):
+                return {}
+            title = str(parsed.get("title") or "").strip()
+            excerpt = str(parsed.get("excerpt") or parsed.get("article_excerpt") or "").strip()
+            published_at = str(parsed.get("published_at") or "").strip()
+            if len(title) < 8 and len(excerpt) < 80:
+                return {}
+            out: dict[str, str] = {}
+            if len(title) >= 8:
+                out["title"] = title[:500]
+            if excerpt:
+                out["excerpt"] = excerpt[:4000]
+            if published_at:
+                out["published_at"] = published_at[:100]
+            if out:
+                logger.info(
+                    "ProxyAPI manual_url_metadata | url=%s title_len=%s excerpt_len=%s",
+                    stored[:120],
+                    len(out.get("title") or ""),
+                    len(out.get("excerpt") or ""),
+                )
+            return out
+        except Exception as exc:
+            if _is_proxyapi_budget_error(exc):
+                self.last_error_kind = "budget_exceeded"
+            _log_proxyapi_exception(exc, kind="responses.manual_url_metadata", model=model)
+            logger.warning("ProxyAPI manual_url_metadata failed | url=%s", stored[:120], exc_info=True)
+            return {}
 
     def fetch_telegram_digest_seed_urls(
         self,

@@ -1,54 +1,37 @@
-"""Изоляция контуров поиска: serious не трогает curious_hosts и наоборот."""
+"""Маршрутизация поиска: единый «Дайджест ИИ» через serious_tier."""
 
-from app.services.digest_type_policy import step1_product_excludes_for_digest_type, step1_topic_terms_for_digest_type
+from app.services.digest_type_policy import (
+    is_curious_digest,
+    is_legacy_stored_curious,
+    normalize_digest_type,
+    step1_product_excludes_for_digest_type,
+    step1_topic_terms_for_digest_type,
+)
 from app.services.step1_search_routing import resolve_step1_search_routing
 
 
-def test_serious_default_uses_source_tiers_only() -> None:
-    r = resolve_step1_search_routing("serious", query_override=None, tier_strict_setting=True)
-    assert r.route == "serious_tier"
-    assert r.uses_source_tiers
-    assert not r.uses_curious_hosts
-    assert r.tier_strict is True
-    assert r.curious_strict is False
-    assert r.curious_verify is False
+def test_unified_ai_uses_source_tiers() -> None:
+    for dtype in ("serious", "curious", None):
+        r = resolve_step1_search_routing(dtype, query_override=None, tier_strict_setting=True)
+        assert r.route == "serious_tier"
+        assert r.uses_source_tiers
+        assert not r.uses_curious_hosts
+        assert r.tier_strict is True
+        assert r.curious_strict is False
+        assert r.curious_verify is False
 
 
-def test_curious_default_uses_curious_hosts() -> None:
-    r = resolve_step1_search_routing(
-        "curious",
-        query_override=None,
-        tier_strict_setting=True,
-    )
-    assert r.route == "curious_hosts"
-    assert r.uses_curious_hosts
-    assert not r.uses_source_tiers
-    assert r.tier_strict is False
-    assert r.curious_strict is True
-    assert r.curious_verify is True
+def test_legacy_curious_input_normalizes_to_serious() -> None:
+    assert normalize_digest_type("curious") == "serious"
+    assert is_curious_digest("curious") is False
+    assert is_legacy_stored_curious("curious") is True
 
 
-def test_curious_optional_serious_tiers_hybrid() -> None:
-    r = resolve_step1_search_routing(
-        "curious",
-        query_override=None,
-        tier_strict_setting=True,
-        curious_use_serious_tiers=True,
-    )
-    assert r.route == "serious_tier"
-    assert r.uses_source_tiers
-    assert not r.uses_curious_hosts
-    assert r.tier_strict is True
-    assert r.curious_strict is False
-    assert r.curious_verify is True
-
-
-def test_curious_with_override_disables_host_batches_but_keeps_verify() -> None:
-    r = resolve_step1_search_routing("curious", query_override="custom query", tier_strict_setting=True)
+def test_query_override_route() -> None:
+    r = resolve_step1_search_routing("serious", query_override="custom query", tier_strict_setting=True)
     assert r.route == "query_override"
     assert not r.uses_source_tiers
     assert not r.uses_curious_hosts
-    assert r.curious_verify is True
 
 
 def test_style_topic_uses_style_tier_route() -> None:
@@ -63,16 +46,17 @@ def test_style_topic_uses_style_tier_route() -> None:
     assert r.uses_source_tiers
 
 
-def test_serious_topic_terms_not_curious_keywords() -> None:
-    serious = step1_topic_terms_for_digest_type("serious")
-    curious = step1_topic_terms_for_digest_type("curious")
-    assert "курьёз" not in serious
-    assert "курьёз" in curious
-    assert "regulation" in serious
+def test_unified_topic_terms_use_serious_en() -> None:
+    for dtype in ("serious", "curious", None):
+        terms = step1_topic_terms_for_digest_type(dtype)
+        assert "regulation" in terms
+        assert "курьёз" not in terms
 
 
-def test_serious_product_excludes_not_curious_regulation_minus() -> None:
+def test_unified_product_excludes_use_serious_profile() -> None:
     serious = step1_product_excludes_for_digest_type("serious")
     curious = step1_product_excludes_for_digest_type("curious")
+    assert "-blog" in serious
+    assert "-blog" in curious
     assert "-регулирование" not in serious
-    assert "-регулирование" in curious
+    assert "-регулирование" not in curious

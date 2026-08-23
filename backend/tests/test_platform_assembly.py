@@ -59,7 +59,7 @@ def test_telegram_no_sep_inline_subscription_short_lead():
     assert "• [Telegram]" in text or "• [ВКонтакте]" in text
     assert subscription_md_inline() in text
     assert payload["overall_analysis"] not in text
-    assert "Коротко: главные сдвиги" in text
+    assert "Коротко: деловые, практичные" in text
     assert re.search(r"➤ \[OpenAI[^\]]+\]\(https://3dnews\.ru/[^\)]+\)\nКомпания объединяет", text)
 
 
@@ -132,11 +132,18 @@ def test_digest_docx_filename():
     assert digest_docx_filename("2026-05-16", 5) == "digest_2026-05-16_id5.docx"
 
 
-def test_curious_digest_uses_funny_header_title():
+def test_unified_ai_digest_uses_ai_header_title():
+    payload = _sample_payload()
+    tg = assemble_telegram(payload)
+    assert HEADER_TITLE in tg
+    assert "Пять новостей про ИИ" in tg
+
+
+def test_legacy_curious_digest_uses_funny_header_title():
     payload = {**_sample_payload(), "digest_type": "curious"}
     tg = assemble_telegram(payload)
     assert HEADER_TITLE_CURIOUS in tg
-    assert HEADER_TITLE_SERIOUS not in tg
+    assert HEADER_TITLE not in tg
     assert assemble_max(payload).count("⚡") == 1
     assert HEADER_TITLE_CURIOUS in assemble_vk(payload)
 

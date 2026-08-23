@@ -56,6 +56,7 @@ def _step0_digest_topic_default() -> Literal["ai", "style"]:
 
 
 class Step0Request(BaseModel):
+    """digest_type: legacy serious|curious принимаются; канонически всегда «Дайджест ИИ» (serious)."""
     digest_type: Literal["serious", "curious"] | None = None
     digest_topic: Literal["ai", "style"] | None = None
     news_window_days: int = Field(default_factory=_step0_news_window_days_default, ge=1, le=90)

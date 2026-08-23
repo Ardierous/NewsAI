@@ -1,4 +1,4 @@
-"""Поиск и приоритизация шага 1: serious и curious не смешивают контуры."""
+"""Поиск шага 1: единый «Дайджест ИИ» (serious_tier + добор curious/practical)."""
 
 from datetime import date
 from types import SimpleNamespace
@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 from app.config import get_settings
 from app.services import digest_service as ds
-from app.services.digest_type_policy import step1_topic_terms_for_digest_type
+from app.services.digest_type_policy import (
+    is_curious_digest,
+    normalize_digest_type,
+    step1_topic_terms_for_digest_type,
+)
 from app.services.step1_search_routing import resolve_step1_search_routing
 
 
@@ -20,38 +24,22 @@ def _digest(dtype: str) -> SimpleNamespace:
     )
 
 
-def test_search_routing_separate_for_serious_and_curious() -> None:
-    serious = resolve_step1_search_routing("serious", query_override=None, tier_strict_setting=True)
-    curious = resolve_step1_search_routing(
-        "curious",
-        query_override=None,
-        tier_strict_setting=True,
-    )
-    curious_hybrid = resolve_step1_search_routing(
-        "curious",
-        query_override=None,
-        tier_strict_setting=True,
-        curious_use_serious_tiers=True,
-    )
-    assert serious.route == "serious_tier"
-    assert serious.curious_strict is False
-    assert curious.route == "curious_hosts"
-    assert curious.curious_strict is True
-    assert curious.curious_verify is True
-    assert curious_hybrid.route == "serious_tier"
-    assert curious_hybrid.curious_strict is False
+def test_search_routing_unified_for_serious_and_legacy_curious() -> None:
+    for dtype in ("serious", "curious"):
+        r = resolve_step1_search_routing(dtype, query_override=None, tier_strict_setting=True)
+        assert r.route == "serious_tier"
+        assert r.curious_strict is False
+        assert is_curious_digest(dtype) is False
 
 
-def test_topic_terms_do_not_cross_digest_types() -> None:
-    serious_terms = step1_topic_terms_for_digest_type("serious")
-    curious_terms = step1_topic_terms_for_digest_type("curious")
-    assert "курьёз" not in serious_terms
-    assert "regulation" in serious_terms
-    assert "курьёз" in curious_terms
-    assert "кринж" in curious_terms or "ржач" in curious_terms
+def test_topic_terms_unified_serious_en() -> None:
+    for dtype in ("serious", "curious"):
+        terms = step1_topic_terms_for_digest_type(dtype)
+        assert "курьёз" not in terms
+        assert "regulation" in terms
 
 
-def test_curious_prioritize_prefers_entertainment_over_tier_host() -> None:
+def test_curious_prioritize_still_works_for_legacy_helper() -> None:
     svc = ds.DigestService.__new__(ds.DigestService)
     digest = _digest("curious")
     urls = [
@@ -74,17 +62,6 @@ def test_curious_prioritize_prefers_keyword_slug_over_neutral_same_host() -> Non
     assert ordered[0] == funny
 
 
-def test_curious_prioritize_drops_urls_outside_window() -> None:
-    svc = ds.DigestService.__new__(ds.DigestService)
-    digest = _digest("curious")
-    urls = [
-        "https://futurism.com/2023/04/01/epic-ai-fail",
-        "https://www.popmech.ru/science/funny-ai-id1/",
-    ]
-    ordered = svc._step1_prioritize_curious_search_urls(urls, digest)
-    assert ordered == ["https://www.popmech.ru/science/funny-ai-id1/"]
-
-
 def test_serious_prioritize_still_prefers_tier1_over_entertainment() -> None:
     svc = ds.DigestService.__new__(ds.DigestService)
     svc.settings = SimpleNamespace(source_tiers_path=get_settings().source_tiers_path)
@@ -98,20 +75,23 @@ def test_serious_prioritize_still_prefers_tier1_over_entertainment() -> None:
     assert ordered[0].startswith("https://ria.ru/")
 
 
-def test_curious_search_query_uses_curious_seed_hint_not_tiers() -> None:
+def test_unified_search_query_uses_tiers_not_curious_hosts() -> None:
     svc = ds.DigestService.__new__(ds.DigestService)
     svc.settings = SimpleNamespace(source_tiers_path=get_settings().source_tiers_path)
-    curious_q = svc._step1_search_query(_digest("curious"))
-    serious_q = svc._step1_search_query(_digest("serious"))
-    assert "curious_source_hosts" in curious_q
-    assert "tier-файла" in serious_q or "tier-2" in serious_q.lower()
-    assert "curious_source_hosts" not in serious_q
+    for dtype in ("serious", "curious"):
+        q = svc._step1_search_query(_digest(dtype))
+        assert "curious_source_hosts" not in q
+        assert "tier-файла" in q or "tier-2" in q.lower()
+
+
+def test_legacy_curious_normalizes_on_read() -> None:
+    assert normalize_digest_type("curious") == "serious"
 
 
 def test_search_query_includes_publication_year() -> None:
     svc = ds.DigestService.__new__(ds.DigestService)
     svc.settings = SimpleNamespace(source_tiers_path=get_settings().source_tiers_path)
-    digest = _digest("curious")
+    digest = _digest("serious")
     digest.date = date(2026, 6, 16)
     q = svc._step1_search_query(digest)
     assert "Год публикации: 2026" in q

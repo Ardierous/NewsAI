@@ -1,19 +1,32 @@
-"""Редакционная политика типов выпуска: serious (деловой) vs curious (курьёзный)."""
+"""Редакционная политика выпуска: единый «Дайджест ИИ» (канонически serious)."""
 
 from __future__ import annotations
 
 DIGEST_TYPE_SERIOUS = "serious"
-DIGEST_TYPE_CURIOUS = "curious"
+DIGEST_TYPE_CURIOUS = "curious"  # legacy: принимается в API/БД, маршрутизация → serious
+DIGEST_TYPE_AI = DIGEST_TYPE_SERIOUS
 
 
 def normalize_digest_type(digest_type: str | None) -> str:
-    if digest_type == DIGEST_TYPE_CURIOUS:
-        return DIGEST_TYPE_CURIOUS
+    """Канонический тип для поиска, фильтров и шага 1 — всегда serious."""
+    raw = str(digest_type or "").strip().lower()
+    if raw == DIGEST_TYPE_CURIOUS:
+        return DIGEST_TYPE_SERIOUS
     return DIGEST_TYPE_SERIOUS
 
 
+def is_legacy_stored_curious(digest_type: str | None) -> bool:
+    """Сырой тип в БД до объединения режимов (для тона финала старых выпусков)."""
+    return str(digest_type or "").strip().lower() == DIGEST_TYPE_CURIOUS
+
+
 def is_curious_digest(digest_type: str | None) -> bool:
-    return normalize_digest_type(digest_type) == DIGEST_TYPE_CURIOUS
+    """Отдельный курьёзный контур отключён — единый режим «Дайджест ИИ»."""
+    return False
+
+
+def digest_type_display_ru(_digest_type: str | None = None) -> str:
+    return "Дайджест ИИ"
 
 
 # --- Веб-поиск шага 1 (дополняют tier-host seed) ---
@@ -76,8 +89,7 @@ _STEP1_PRODUCT_EXCLUDES_CURIOUS_EXTRA = (
 
 
 def step1_topic_terms_for_digest_type(digest_type: str | None) -> str:
-    if is_curious_digest(digest_type):
-        return _STEP1_TOPIC_TERMS_CURIOUS_RU
+    """Основной tier-поиск — деловые EN-ключи; курьёзный добор — отдельными батчами."""
     return _STEP1_TOPIC_TERMS_SERIOUS_EN
 
 
@@ -241,52 +253,32 @@ def step1_curious_raw_url_serious_literals() -> tuple[str, ...]:
 
 
 def curious_ru_share_bounds() -> tuple[float, float]:
-    """Мин/макс доля RU-источников в rebalance курьёзного пула."""
+    """Мин/макс доля RU-источников в rebalance курьёзного пула (legacy)."""
     return 0.55, 0.85
 
 
 def step1_product_excludes_for_digest_type(digest_type: str | None) -> str:
-    extra = (
-        _STEP1_PRODUCT_EXCLUDES_CURIOUS_EXTRA
-        if is_curious_digest(digest_type)
-        else _STEP1_PRODUCT_EXCLUDES_SERIOUS_EXTRA
-    )
-    return _STEP1_PRODUCT_EXCLUDES_COMMON + extra
+    _ = normalize_digest_type(digest_type)
+    return _STEP1_PRODUCT_EXCLUDES_COMMON + _STEP1_PRODUCT_EXCLUDES_SERIOUS_EXTRA
 
 
 def step1_research_editorial_block(digest_type: str | None) -> str:
-    if is_curious_digest(digest_type):
-        return (
-            "РЕЖИМ ВЫПУСКА: digest_type=curious (курьёзный дайджест на выходные). "
-            "Подбирай только забавные, смешные, удивительные или неожиданные истории про ИИ/нейросети/чат-ботов/роботов: "
-            "курьёзы, фейлы, глюки, абсурдные кейсы, вирусные мемы, странные эксперименты, нелепые заявления — "
-            "то, что развлекает без напряжения. "
-            "ИСКЛЮЧАЙ сухую регуляторику, отчёты инвесторов, корпоративные пресс-релизы, «прорывы» и официоз — "
-            "их не должно быть в пуле (0% пресс-релизов). "
-            "При равной пригодности отдавай предпочтение более «человечным» и эмоциональным заголовкам, а не Tier СМИ. "
-            "Доля российских источников — 30-50%. Из одного источника — не более 2 новостей. "
-        )
+    _ = normalize_digest_type(digest_type)
     return (
-        "РЕЖИМ ВЫПУСКА: digest_type=serious (деловой дайджест). "
+        "РЕЖИМ ВЫПУСКА: единый дайджест ИИ (деловой + практичный + развлекательный). "
         "Приоритет — значимые новости ИИ: регулирование, исследования, внедрения, инвестиции, партнёрства, официальные заявления. "
-        "Корпоративные пресс-релизы и официальные материалы — 20-35% пула (2-3 из 10), только как новости (факты, планы), не промо инструментов. "
+        "Допустимы качественные практические обзоры инструментов и умеренно курьёзные/вирусные истории про ИИ без потери новостной ценности. "
+        "Корпоративные пресс-релизы — 20-35% пула (2-3 из 10), только как новости (факты, планы), не промо инструментов. "
         "Доля российских источников — 30-50%. Из одного источника — не более 2 новостей. "
     )
 
 
 def step1_scoring_editorial_block(digest_type: str | None) -> str:
-    if is_curious_digest(digest_type):
-        return (
-            "digest_type=curious: повышай total_score только забавным, неожиданным, вирусным и «человечным» материалам про ИИ; "
-            "максимально повышай истории с фейлом, багом, жалобами пользователей, абсурдом, кринжем, мемом, дипфейком, "
-            "странным экспериментом, ироничным скандалом или вирусным эффектом. "
-            "резко снижай баллы (до 1–3) сухим пресс-релизам, регуляторике, инвестициям, корпоративному официозу, "
-            "конференциям и обычным новостям «компания представила/выпустила модель». "
-            "В пуле не должно остаться «серьёзных» новостей без курьёзного/удивительного угла."
-        )
+    _ = normalize_digest_type(digest_type)
     return (
-        "digest_type=serious: повышай баллы значимости, влияния и новизны для деловых новостей ИИ; "
-        "снижай баллы промо инструментов и чисто развлекательных мемов без новостной ценности."
+        "digest_type=ai: повышай баллы значимости, влияния и новизны для деловых новостей ИИ; "
+        "умеренно повышай практичные обзоры инструментов и «человечные» курьёзные/вирусные сюжеты про ИИ; "
+        "снижай баллы промо лендингов, чистых мемов без новостной ценности и сухого официоза без угла для читателя."
     )
 
 
@@ -303,12 +295,10 @@ def step2_order_system_prompt(digest_type: str | None) -> str:
         "items — массив из 5 объектов с полями candidate_id, output_position, ordering_reason "
         "(ordering_reason: 1–2 предложения, почему новость на этой позиции)."
     )
-    if is_curious_digest(digest_type):
-        return (
-            base
-            + " Выпуск курьёзный (выходной): ставь в начало самую смешную, странную или вирусную новость. "
-            "Выше должны идти фейлы, глюки, жалобы пользователей, абсурдные кейсы, мемность и неожиданные человеческие истории. "
-            "Сухие деловые AI-новости, регуляторику, инвестиции, пресс-релизы и «компания представила модель» оставляй ниже "
-            "даже при высоком tier или формальном score. Чередуй лёгкий тон, избегай «тяжёлого» финала — лучше яркий позитивный или ироничный аккорд."
-        )
-    return base + " Выпуск деловой: сильная важная новость в начале, сбалансированный ритм без развлекательного перекоса."
+    _ = normalize_digest_type(digest_type)
+    return (
+        base
+        + " Выпуск объединяет деловые, практичные и умеренно развлекательные AI-новости: "
+        "сильная важная или практичная новость в начале, разнообразный ритм в середине, "
+        "запоминающийся финал — без перекоса только в мемы или только в официоз."
+    )

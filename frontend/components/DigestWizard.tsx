@@ -954,8 +954,9 @@ function articlePageFingerprint(url: string): string {
 }
 
 function resolveKeptCandidateIds(
-  candidates: { id: number; url?: string; headline_editorial_ok?: boolean; page_verified?: boolean; link_status?: boolean; reliability_status?: string; is_aggregator?: boolean; is_duplicate?: boolean }[],
+  candidates: { id: number; url?: string; headline_editorial_ok?: boolean; page_verified?: boolean; link_status?: boolean; reliability_status?: string; is_aggregator?: boolean; is_duplicate?: boolean; verification_comment?: string; description?: string }[],
   keptUrls: string[],
+  opts?: { includeManualRequired?: boolean },
 ): number[] {
   const fps = keptUrls.map(articlePageFingerprint).filter(Boolean);
   if (!fps.length) return [];
@@ -969,9 +970,24 @@ function resolveKeptCandidateIds(
     const id = byFp.get(fp);
     if (id == null) continue;
     const row = candidates.find((c) => c.id === id);
-    if (row && candidateSelectableForStep2(row)) out.push(id);
+    if (!row) continue;
+    const manualOk = Boolean(opts?.includeManualRequired && isManualRequiredCandidate(row));
+    if (candidateSelectableForStep2(row) || manualOk) out.push(id);
   }
   return out;
+}
+
+/** После «Добавить в пул»: сохранить прежний выбор и автоматически отметить новые ручные ссылки. */
+function mergeStep2SelectionIds(
+  keptIds: number[],
+  manualIds: number[],
+  candidates: Step2PickCandidate[],
+): number[] {
+  const manualRequired = manualIds.filter((id) => {
+    const row = candidates.find((c) => c.id === id);
+    return row && isManualRequiredCandidate(row);
+  });
+  return [...new Set([...manualRequired, ...keptIds, ...manualIds])].slice(0, 5);
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -1084,7 +1100,7 @@ const REJECT_REASON_LABELS: Record<string, string> = {
   non_article_page: "на странице нет нормального заголовка материала (как у обычной статьи)",
   off_topic_not_ai: "по тексту страницы тема не про искусственный интеллект и нейросети — это другая тематика",
   off_topic_not_curious:
-    "только курьёзный выпуск: сухой официоз (релиз, регуляторика, инвестиции) отклонён; нейтральные AI-материалы остаются с пониженным приоритетом",
+    "legacy: только старые курьёзные выпуски — сухой официоз отклонён; в едином «Дайджест ИИ» фильтр не используется",
   excluded_from_final_pool:
     "страница прошла проверку, но не вошла в финальный список кандидатов (лимит rebalance, квоты источников)",
   headline_low_quality:
@@ -1534,22 +1550,16 @@ export function DigestWizard({ digestId }: Props) {
     const st = digest?.digest?.status as string | undefined;
     const pastStep2 = st === "selected" || st === "analytics_ready" || st === "final_ready";
 
-    const pendingUrls = pendingPreselectKeptUrlsRef.current;
-    if (pendingUrls.length > 0) {
+    const pendingKeptUrls = pendingPreselectKeptUrlsRef.current;
+    const pendingManualUrls = pendingManualUrlsRef.current;
+    if (pendingKeptUrls.length > 0 || pendingManualUrls.length > 0) {
       pendingPreselectKeptUrlsRef.current = [];
-      const remapped = resolveKeptCandidateIds(list, pendingUrls);
-      if (remapped.length) {
-        setSelected(remapped);
-        return;
-      }
-    }
-
-    if (pendingManualUrlsRef.current.length > 0) {
-      const urls = pendingManualUrlsRef.current;
       pendingManualUrlsRef.current = [];
-      const remapped = resolveKeptCandidateIds(list, urls);
-      if (remapped.length) {
-        setSelected(remapped);
+      const keptIds = resolveKeptCandidateIds(list, pendingKeptUrls);
+      const manualIds = resolveKeptCandidateIds(list, pendingManualUrls);
+      const merged = mergeStep2SelectionIds(keptIds, manualIds, list as Step2PickCandidate[]);
+      if (merged.length) {
+        setSelected(merged);
         return;
       }
     }
@@ -1916,36 +1926,33 @@ export function DigestWizard({ digestId }: Props) {
       setError("Вставьте хотя бы одну ссылку на статью.");
       return;
     }
-    await run("Шаг 2: проверка и добавление ссылки в пул…", async () => {
-      const res = await api.step2AddManualUrls(digestId, urls);
-      setStep2ManualUrls("");
-      await loadDigest({ skipProgress: true, preserveSelection: true });
-      const selectionLimit = 5;
-      const addedIds = (res?.added || [])
-        .filter((row) => row.id && candidateSelectableForStep2(row))
-        .map((row) => row.id);
-      if (addedIds.length) {
-        const alreadySelected = Array.from(new Set(selected));
-        const freshAdded = Array.from(new Set(addedIds)).filter((id) => !alreadySelected.includes(id));
-        if (alreadySelected.length + freshAdded.length > selectionLimit) {
-          setSelected([]);
+    const keptUrls = selected
+      .map((id) => candidatesSorted.find((c) => c.id === id)?.url)
+      .filter((url): url is string => Boolean(url));
+    await run(
+      "Шаг 2: проверка и добавление ссылки в пул…",
+      async () => {
+        const res = await api.step2AddManualUrls(digestId, urls);
+        setStep2ManualUrls("");
+        pendingPreselectKeptUrlsRef.current = keptUrls;
+        const addedUrls = (res?.added || []).map((row) => String(row.url || "").trim()).filter(Boolean);
+        pendingManualUrlsRef.current = addedUrls.length ? addedUrls : urls;
+        if (keptUrls.length + pendingManualUrlsRef.current.length > 5) {
           setError(
-            "После добавления ссылок получилось бы больше 5 выбранных новостей, поэтому выбор сброшен. Отметьте нужные 5 заново.",
+            "После добавления ссылок получилось бы больше 5 выбранных новостей. Сохранены только первые 5 — проверьте галочки.",
           );
-        } else if (freshAdded.length) {
-          setSelected([...alreadySelected, ...freshAdded]);
+        } else if (res?.skipped_duplicates?.length) {
+          setError(`Уже в пуле: ${res.skipped_duplicates.join(", ")}`);
+        } else if (res?.detail && !(res?.added || []).length) {
+          setError(res.detail);
+        } else if ((res?.added || []).length && !(res.added || []).some((row) => candidateSelectableForStep2(row))) {
+          setError(
+            "Ссылка добавлена, но не прошла проверку «Можно в топ‑5». Откройте карточку — причина в описании; укажите прямую ссылку на статью про ИИ.",
+          );
         }
-      }
-      if (res?.skipped_duplicates?.length) {
-        setError(`Уже в пуле: ${res.skipped_duplicates.join(", ")}`);
-      } else if (res?.detail && !(res?.added || []).length) {
-        setError(res.detail);
-      } else if ((res?.added || []).length && !addedIds.length) {
-        setError(
-          "Ссылка добавлена, но не прошла проверку «Можно в топ‑5». Откройте карточку — причина в описании; укажите прямую ссылку на статью про ИИ.",
-        );
-      }
-    });
+      },
+      { preserveSelection: true },
+    );
   };
 
   const renderStep2ManualUrlBlock = (opts?: { marginTop?: number; marginBottom?: number }) =>
@@ -2135,7 +2142,11 @@ export function DigestWizard({ digestId }: Props) {
     [manualUrls],
   );
 
-  const run = async (label: string, fn: () => Promise<unknown>) => {
+  const run = async (
+    label: string,
+    fn: () => Promise<unknown>,
+    opts?: { preserveSelection?: boolean },
+  ) => {
     if (label.includes("Шаг 1:")) {
       pendingScrollToStep2Ref.current = true;
     }
@@ -2173,7 +2184,7 @@ export function DigestWizard({ digestId }: Props) {
       } else {
         setProgressLabel("Обновление данных…");
       }
-      await loadDigest({ skipProgress: true });
+      await loadDigest({ skipProgress: true, preserveSelection: opts?.preserveSelection });
       if (label.includes("порядок") || label.includes("оптимальн")) {
         setOrderEditMode(false);
       }
@@ -2634,19 +2645,15 @@ export function DigestWizard({ digestId }: Props) {
     />
   );
 
-  const step0Active = useMemo((): "serious" | "curious" | "default" | null => {
-    const row = digest?.digest;
-    if (!row?.digest_type) return null;
-    if (row.digest_type_via_default) return "default";
-    if (row.digest_type === "serious") return "serious";
-    if (row.digest_type === "curious") return "curious";
-    return null;
-  }, [digest?.digest]);
-
   const sourceTiersDigestType = useMemo((): "serious" | "curious" | null => {
-    const t = digest?.digest?.digest_type;
-    return t === "serious" || t === "curious" ? t : null;
-  }, [digest?.digest?.digest_type]);
+    if (isStyleTopic) return null;
+    return "serious";
+  }, [isStyleTopic]);
+
+  const step0Saved = useMemo(() => {
+    const status = String(digest?.digest?.status || "");
+    return status !== "" && status !== "draft";
+  }, [digest?.digest?.status]);
 
   const step0ApiOpts = () => ({
     digest_topic: digestTopic,
@@ -2671,20 +2678,6 @@ export function DigestWizard({ digestId }: Props) {
         return;
       }
     });
-
-  const step0BtnStyle = (key: "serious" | "curious" | "default"): CSSProperties => {
-    const on = step0Active === key;
-    return {
-      padding: "10px 16px",
-      borderRadius: 8,
-      cursor: loading ? "not-allowed" : "pointer",
-      opacity: step0Active && !on ? 0.55 : 1,
-      border: on ? "2px solid #38bdf8" : "1px solid #475569",
-      background: on ? "#1e3a5f" : "#1e293b",
-      color: "#e2e8f0",
-      fontWeight: on ? 600 : 400,
-    };
-  };
 
   const onDrop = (targetId: number) => {
     if (draggedId === null || draggedId === targetId) return;
@@ -2855,9 +2848,7 @@ export function DigestWizard({ digestId }: Props) {
               title={
                 isStyleTopic
                   ? "Для темы «Стиль» используется отдельный файл source_tiers_style.txt"
-                  : sourceTiersDigestType
-                    ? "Домены источников и счётчики за 30 дней"
-                    : "Сначала выберите тип дайджеста (серьёзный или курьёзный)"
+                  : "Домены источников и счётчики за 30 дней (единый режим «Дайджест ИИ»)"
               }
               onClick={() => setShowSourceTiersModal(true)}
             >
@@ -2881,7 +2872,8 @@ export function DigestWizard({ digestId }: Props) {
           ) : (
             <>
               {" "}
-              Затем нажмите <strong>одну</strong> кнопку тона и дождитесь полоски загрузки.
+              Режим выпуска — <strong>«Дайджест ИИ»</strong> (деловые, практичные и умеренно развлекательные новости).
+              Нажмите <strong>«Сохранить параметры шага 0»</strong> и дождитесь полоски загрузки.
             </>
           )}{" "}
           Если в выпуске уже есть собранные шаги, смена тематики создаст/откроет отдельный выпуск этой же даты под новую тему.
@@ -2947,21 +2939,21 @@ export function DigestWizard({ digestId }: Props) {
             Календарные
           </label>
         </fieldset>
-        <WizardWhy summary="Зачем тематика и тон важны">
+        <WizardWhy summary="Зачем тематика и режим важны">
           <p>
             <strong>Тематика</strong> определяет, какие источники и ключевые слова использует поиск на шаге 1, и как
-            формируются тексты на шагах 3–4. <strong>ИИ</strong> — текущий режим про искусственный интеллект.{" "}
+            формируются тексты на шагах 3–4. <strong>ИИ</strong> — единый режим «Дайджест ИИ»: деловые новости,
+            практичные обзоры инструментов и умеренно курьёзные истории про нейросети.{" "}
             <strong>Стиль</strong> — отдельный пул fashion-источников и фильтры по моде/одежде.
           </p>
           {!isStyleTopic ? (
             <p>
-              <strong>Серьёзный</strong> — нейтральный деловой тон. <strong>Курьёзный</strong> — легче формулировки.{" "}
-              <strong>По умолчанию</strong> — тип из файла настроек сервера (<code>digest_defaults.json</code>).
+              Отдельного переключателя «серьёзный/курьёзный» больше нет: разнообразие обеспечивает автоматический добор
+              источников на шаге 1.
             </p>
           ) : (
             <p>
-              Для темы <strong>Стиль</strong> тон один — общий нейтральный; кнопки «Серьёзный/Курьёзный» не
-              показываются.
+              Для темы <strong>Стиль</strong> тон один — общий нейтральный.
             </p>
           )}
           <p>
@@ -2976,44 +2968,46 @@ export function DigestWizard({ digestId }: Props) {
             <button
               type="button"
               disabled={loading}
-              style={step0BtnStyle("serious")}
+              style={{
+                padding: "10px 16px",
+                borderRadius: 8,
+                cursor: loading ? "not-allowed" : "pointer",
+                border: "1px solid #475569",
+                background: "#1e293b",
+                color: "#e2e8f0",
+              }}
               onClick={() => runStep0("Сохранение тематики: стиль…", { digest_type: "serious", ...step0ApiOpts() })}
             >
               Сохранить тематику
             </button>
           </div>
         ) : (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            disabled={loading}
-            style={step0BtnStyle("serious")}
-            aria-pressed={step0Active === "serious"}
-            title="Деловой нейтральный тон; рекомендуется для будничных выпусков вручную."
-            onClick={() => runStep0("Сохранение типа дайджеста: серьёзный…", { digest_type: "serious", ...step0ApiOpts() })}
-          >
-            Серьёзный
-          </button>
-          <button
-            type="button"
-            disabled={loading}
-            style={step0BtnStyle("curious")}
-            aria-pressed={step0Active === "curious"}
-            title="Курьёзный выпуск: поиск и отбор забавных/неожиданных историй про ИИ (без делового официоза). Перед шагом 1 сохраните тип."
-            onClick={() => runStep0("Сохранение типа дайджеста: курьёзный…", { digest_type: "curious", ...step0ApiOpts() })}
-          >
-            Курьёзный
-          </button>
-          <button
-            type="button"
-            disabled={loading}
-            style={step0BtnStyle("default")}
-            aria-pressed={step0Active === "default"}
-            title="Тип из digest_defaults.json на сервере (сейчас — серьёзный)."
-            onClick={() => runStep0("Сохранение типа дайджеста по умолчанию…", step0ApiOpts())}
-          >
-            По умолчанию
-          </button>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 8 }}>
+          <p style={{ margin: 0, fontSize: "0.95rem", color: "#cbd5e1" }}>
+            Режим выпуска: <strong style={{ color: "#e2e8f0" }}>Дайджест ИИ</strong> — объединяет деловые, практичные и
+            умеренно развлекательные материалы про искусственный интеллект.
+          </p>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              disabled={loading}
+              style={{
+                padding: "10px 16px",
+                borderRadius: 8,
+                cursor: loading ? "not-allowed" : "pointer",
+                border: step0Saved ? "2px solid #38bdf8" : "1px solid #475569",
+                background: step0Saved ? "#1e3a5f" : "#1e293b",
+                color: "#e2e8f0",
+                fontWeight: step0Saved ? 600 : 400,
+              }}
+              title="Сохранить тематику, окно новостей и режим «Дайджест ИИ» перед запуском шага 1."
+              onClick={() =>
+                runStep0("Сохранение параметров шага 0…", { digest_type: "serious", ...step0ApiOpts() })
+              }
+            >
+              {step0Saved ? "Параметры шага 0 сохранены" : "Сохранить параметры шага 0"}
+            </button>
+          </div>
         </div>
         )}
       </div>
@@ -3729,11 +3723,7 @@ export function DigestWizard({ digestId }: Props) {
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
             <h3 style={{ margin: 0 }}>
               Настройки фильтра новостей
-              {digest?.digest?.digest_type === "curious"
-                ? " (курьёзный выпуск)"
-                : digest?.digest?.digest_type === "serious"
-                  ? " (серьёзный выпуск)"
-                  : ""}
+              {isStyleTopic ? " (тема: стиль)" : " (Дайджест ИИ)"}
             </h3>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button type="button" disabled={step1FilterSaving || step1FilterLoading} onClick={() => void saveStep1FilterSettings()}>

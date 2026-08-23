@@ -69,6 +69,7 @@ curl http://127.0.0.1:8000/health
 
 ## Прочее
 
+- Контрольные точки: **А** (19.08.2026 — пакет «практичный дайджест»), **Б** (20.08.2026 — объединение серьёзного и курьёзного в «Дайджест ИИ») — [README.md](README.md) § «Контрольные точки»
 - Запуск, Docker, `.env`: [README.md](README.md)
 - Пайплайн: `backend/app/pipeline_settings.json`, `backend/app/digest_defaults.json`
 - Дорожка шага 1: [docs/STEP1_PIPELINE.md](docs/STEP1_PIPELINE.md)

@@ -145,10 +145,7 @@ export function SourceTiersModal({ digestType, open, onClose }: Props) {
 
   if (!open) return null;
 
-  const title =
-    digestType === "curious"
-      ? "Источники — курьёзный выпуск"
-      : "Источники — серьёзный выпуск";
+  const title = digestType === "curious" ? "Источники — legacy курьёзный" : "Источники — Дайджест ИИ";
 
   return (
     <div className="source-tiers-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="source-tiers-title">
