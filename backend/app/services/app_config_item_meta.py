@@ -117,8 +117,8 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
         alternatives="1–100; при tier_strict=true не используется — поиск идёт сразу по tier-1…4.",
     ),
     "step1_max_candidates_for_ui": ConfigItemMeta(
-        why="15 — целевой размер пула в UI (10–15 по контракту дайджеста).",
-        alternatives="10–30; rebalance стремится к min(15, verified_count), но не ниже 10 для шага 2.",
+        why="20 — верхняя граница пула в UI (сколько максимум карточек сохранять после шага 1).",
+        alternatives="10–30; больше — шире выбор на шаге 2, но дольше сбор и проверка ссылок.",
     ),
     "step1_max_cost_rub": ConfigItemMeta(
         why="50 ₽ — потолок расхода ProxyAPI на шаг 1 за один прогон выпуска.",
@@ -131,6 +131,22 @@ _FIELD_META: dict[str, ConfigItemMeta] = {
     "step1_tier_strict_search": ConfigItemMeta(
         why="Да — поиск по tier-1…4 и aggregator_hosts (Tier-2) из source_tiers.txt (site: батчи).",
         alternatives="false — общий web_search + legacy добор tier-1; шире выдача, но вне политики источников.",
+    ),
+    "step1_serious_curious_extra_batches": ConfigItemMeta(
+        why=(
+            "0 — дополнительный курьёзный добор отключён; используется только базовый "
+            "step1_serious_curious_search_batches."
+        ),
+        alternatives=(
+            "1–10: добавляет extra батчи развлекательных источников, когда пул короткий "
+            "(поднимает шанс попасть «человечным» новостям, но может немного увеличить стоимость шага 1)."
+        ),
+    ),
+    "step1_first_offer_min_candidates": ConfigItemMeta(
+        why="15 — целевой минимум карточек в первом предложении пула (если есть где добрать).",
+        alternatives=(
+            "10–30: при значении выше 10 шаг 1 делает дополнительный top-up, чтобы не пересобирать пул сразу после первого запуска."
+        ),
     ),
     "step1_telegram_monitor_enabled": ConfigItemMeta(
         why="Да — канал technokratos даёт seed URL в окне выпуска без ручного копирования ссылок.",

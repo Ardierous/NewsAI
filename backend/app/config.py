@@ -64,6 +64,8 @@ class Settings(BaseSettings):
     step1_curious_use_serious_tiers: bool = False
     step1_serious_use_curious_tiers: bool = True
     step1_serious_curious_search_batches: int = 4
+    step1_serious_curious_extra_batches: int = 0
+    step1_first_offer_min_candidates: int = 15
     step1_telegram_monitor_enabled: bool = True
     step1_telegram_monitor_channels: str = "technokratos"
     step1_telegram_max_pages: int = 2

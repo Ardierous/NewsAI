@@ -100,6 +100,15 @@ def test_vk_hashtags_separated_from_subscription():
     assert "OPENAI ПЕРЕСТРАИВАЕТСЯ" in text
 
 
+def test_vk_uses_max_lead_when_lead_vk_missing():
+    payload = _sample_payload()
+    payload["max_lead"] = "Содержательный анонс выпуска про внедрение ИИ в бизнес, продукты и инфраструктуру."
+    payload.pop("lead_vk", None)
+    text = assemble_vk(payload)
+    assert payload["max_lead"] in text
+    assert "Коротко: деловые, практичные и неожиданные истории про ИИ и нейросети за этот период." not in text
+
+
 def test_dzen_html_header_links_and_inline_subscription():
     text = assemble_dzen(_sample_payload())
     assert DZEN_NEWS_SEP in text

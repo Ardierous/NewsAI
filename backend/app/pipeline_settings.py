@@ -46,6 +46,8 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "curious_use_serious_tiers": False,
             "serious_use_curious_tiers": True,
             "serious_curious_search_batches": 4,
+            "serious_curious_extra_batches": 0,
+            "first_offer_min_candidates": 15,
             "telegram_monitor_enabled": True,
             "telegram_monitor_channels": "technokratos",
             "telegram_max_pages": 2,
@@ -227,6 +229,20 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
         lo=1,
         hi=12,
     )
+    step1["serious_curious_extra_batches"] = _int(
+        step1_raw,
+        "serious_curious_extra_batches",
+        step1.get("serious_curious_extra_batches", 0),
+        lo=0,
+        hi=10,
+    )
+    step1["first_offer_min_candidates"] = _int(
+        step1_raw,
+        "first_offer_min_candidates",
+        step1.get("first_offer_min_candidates", 15),
+        lo=10,
+        hi=30,
+    )
     step1["telegram_monitor_enabled"] = _coerce_bool(
         step1_raw.get("telegram_monitor_enabled"), step1["telegram_monitor_enabled"]
     )
@@ -392,6 +408,15 @@ def read_pipeline_config(path: Path | None = None) -> dict[str, Any]:
     return normalize_pipeline_config(raw)
 
 
+def write_pipeline_config(config: dict[str, Any], path: Path | None = None) -> dict[str, Any]:
+    cfg_path = path or _PIPELINE_SETTINGS_PATH
+    normalized = normalize_pipeline_config(config if isinstance(config, dict) else {})
+    cfg_path.write_text(json.dumps(normalized, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if cfg_path == _PIPELINE_SETTINGS_PATH:
+        get_pipeline_config.cache_clear()
+    return normalized
+
+
 def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
     """Плоский словарь имён полей Settings ← значения из JSON."""
     cfg = read_pipeline_config(path) if path is not None else get_pipeline_config()
@@ -433,6 +458,8 @@ def pipeline_settings_flat(path: Path | None = None) -> dict[str, Any]:
         "step1_curious_use_serious_tiers": s1["curious_use_serious_tiers"],
         "step1_serious_use_curious_tiers": s1["serious_use_curious_tiers"],
         "step1_serious_curious_search_batches": s1["serious_curious_search_batches"],
+        "step1_serious_curious_extra_batches": s1["serious_curious_extra_batches"],
+        "step1_first_offer_min_candidates": s1["first_offer_min_candidates"],
         "step1_telegram_monitor_enabled": s1["telegram_monitor_enabled"],
         "step1_telegram_monitor_channels": s1["telegram_monitor_channels"],
         "step1_telegram_max_pages": s1["telegram_max_pages"],

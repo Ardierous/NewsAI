@@ -136,6 +136,13 @@ export const api = {
       env_overrides: string[];
       note: string;
     }>("/config"),
+  getStep1CuriousBalance: () =>
+    request<{ value: number }>("/config/step1/serious-curious-extra-batches"),
+  setStep1CuriousBalance: (value: number) =>
+    request<{ value: number }>("/config/step1/serious-curious-extra-batches", {
+      method: "PUT",
+      body: JSON.stringify({ value }),
+    }),
   createTodayDigest: () => request<any>("/digests/create", { method: "POST" }),
   getDigest: (id: number) => request<any>(`/digests/${id}`),
   step0: (
@@ -340,11 +347,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ variant }),
     }),
-  generateStep4Texts: (id: number, platforms: string[], hook_variant?: "A" | "B" | "V") =>
+  generateStep4Texts: (
+    id: number,
+    platforms: string[],
+    hook_variant?: "A" | "B" | "V",
+    signal?: AbortSignal,
+  ) =>
     request<any>(`/digests/${id}/step4/generate-texts`, {
       method: "POST",
       body: JSON.stringify({ platforms, hook_variant }),
       timeoutMs: LONG_POST_MS,
+      signal,
+    }),
+  cancelStep4Texts: (id: number) =>
+    request<{ ok: boolean; running?: boolean; detail: string }>(`/digests/${id}/step4/generate-texts/cancel`, {
+      method: "POST",
+      body: JSON.stringify({}),
     }),
   confirmFinal: (id: number, hook_variant?: "A" | "B" | "V") =>
     request<any>(`/digests/${id}/step4/confirm-final`, {

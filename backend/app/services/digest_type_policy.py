@@ -36,6 +36,13 @@ _STEP1_TOPIC_TERMS_SERIOUS_EN = (
     "regulation research breakthrough deployment partnership investment "
 )
 
+_STEP1_TOPIC_TERMS_SERIOUS_RU = (
+    "искусственный интеллект нейросеть нейросети машинное обучение "
+    "генеративный ИИ llm gpt агент ai-агент copilot "
+    "внедрение кейс применение автоматизация "
+    "исследование регулирование инвестиции партнёрство "
+)
+
 # Обязательный «развлекательный» якорь в поиске — без него выдача уходит в обычные tech-новости.
 _STEP1_CURIOUS_ENTERTAINMENT_ANCHOR_RU = (
     '(курьёз OR "ИИ ляпы" OR "нейросеть ошиблась" OR "галлюцинации нейросети" OR '
@@ -89,8 +96,9 @@ _STEP1_PRODUCT_EXCLUDES_CURIOUS_EXTRA = (
 
 
 def step1_topic_terms_for_digest_type(digest_type: str | None) -> str:
-    """Основной tier-поиск — деловые EN-ключи; курьёзный добор — отдельными батчами."""
-    return _STEP1_TOPIC_TERMS_SERIOUS_EN
+    """Основной tier-поиск: смешанные RU+EN маркеры ИИ; курьёзный добор — отдельными батчами."""
+    _ = normalize_digest_type(digest_type)
+    return f"{_STEP1_TOPIC_TERMS_SERIOUS_EN} {_STEP1_TOPIC_TERMS_SERIOUS_RU}"
 
 
 def step1_curious_foreign_topic_terms() -> str:

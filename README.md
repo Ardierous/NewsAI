@@ -134,6 +134,8 @@ AGENTS.md                    # подсказки для агентов Cursor
 - Дефолты: **3 рабочих дня**, единый режим **«Дайджест ИИ»** (`backend/app/digest_defaults.json`).
 - Новый выпуск на сегодня (`POST /digests/create`) сразу проходит шаг 0 с этими дефолтами.
 - Окно дат можно менять через `PATCH …/news-window` без сброса шага 0.
+- Для режима ИИ в шаге 0 есть ползунок **«Баланс серьёзный ↔ курьёзный»** (1–10) — сохраняет
+  `step1_serious_curious_extra_batches` для следующего запуска шага 1.
 
 ### Шаг 1
 
@@ -163,7 +165,11 @@ AGENTS.md                    # подсказки для агентов Cursor
 - Последовательность в UI: `generate-images` (если включено) → `select-image` → `generate-texts`.
 - Тексты под заголовком — **2–4 предложения**, до **450 символов** (без заголовка); `reader_copy.py`, `ReaderCopyAgent`.
 - **Заголовки новостей** в финальных текстах — полные: при сборке шага 4 подтягиваются со страницы, если в базе сохранён укороченный вариант.
-- Кнопки «Скопировать для …» — одной строкой над полями; «На главную» — в шапке мастера и в блоке копирования.
+- Кнопки копирования:
+  - Telegram: **две отдельные кнопки** — «анонс к картинке» и «основной пост (5 новостей)».
+  - MAX/Дzen: копируйте только через кнопку (HTML-формат).
+  - VK: plain text кнопкой.
+- Во время `generate-texts` доступна остановка: **«Принудительно остановить генерацию»**.
 - «Зафиксировать» — `POST …/finalize` (учёт стоимости выпуска).
 - Legacy: `POST …/step4/confirm-final` — тексты + обложка одним вызовом.
 
@@ -173,7 +179,7 @@ AGENTS.md                    # подсказки для агентов Cursor
 
 | Площадка | Формат | Публикация |
 |----------|--------|------------|
-| Telegram | Markdown | «Скопировать для Telegram» → Ctrl+V |
+| Telegram | Markdown (2 части) | 1) «Скопировать анонс для Telegram (к картинке)» → подпись к медиа; 2) «Скопировать пост Telegram (5 новостей)» → отдельным сообщением |
 | MAX | HTML (`<b>`, `<a>`, `<br>`) | Только кнопка копирования → веб-редактор MAX |
 | Дзен | HTML (разделитель «—») | Только кнопка копирования |
 | ВКонтакте | Plain text, CAPS, URL в «Подробности:» | «Скопировать для VK»; между новостями `· · ·` |
@@ -203,7 +209,7 @@ AGENTS.md                    # подсказки для агентов Cursor
 
 **Шаг 3:** `POST …/step3/confirm-ready`
 
-**Шаг 4:** `POST …/step4/generate-images`, `…/select-image`, `…/generate-texts`, `…/confirm-final`
+**Шаг 4:** `POST …/step4/generate-images`, `…/select-image`, `…/generate-texts`, `…/generate-texts/cancel`, `…/confirm-final`
 
 **Артефакты:** `GET …/final`, `GET …/docx`, `GET …/image?variant=N`
 
@@ -243,6 +249,8 @@ PROXYAPI_API_KEY=ваш_ключ
 | `tier_max_web_search_batches` | 8 | батчей ProxyAPI за tier-проход |
 | `max_cost_rub` | 50 | бюджет ProxyAPI на шаг 1 |
 | `max_candidates_for_ui` | 20 | целевой размер пула в UI |
+| `first_offer_min_candidates` | 15 | минимальный размер первого предложения пула (добор без пересборки) |
+| `serious_curious_extra_batches` | 0–10 | усиление курьёзного добора в unified режиме |
 | `verify_workers` | 8 | параллельные HTTP-проверки |
 | `crew_fallback_only_if_empty` | true | Crew только если verified = 0 |
 | `crew_enrich_verified_scores` | true | доп. скоринг ScoringAgent по verified |
@@ -299,7 +307,7 @@ cd backend && python -m pytest tests/test_step1_link_validation_smoke.py tests/t
 
 Frontend: `cd frontend && npm run build`.
 
-Browser E2E: `python main.py` → мастер 0→4 на `/digests/{id}`; шаг 1 — длительный запрос; шаг 4 — копирование HTML для MAX/Дzen кнопками, обложка отдельно.
+Browser E2E: `python main.py` → мастер 0→4 на `/digests/{id}`; шаг 1 — длительный запрос; шаг 4 — Telegram: отдельно анонс (подпись к картинке) и основной пост; MAX/Дzen — HTML кнопками; обложка отдельно.
 
 См. [AGENTS.md](AGENTS.md).
 

@@ -133,6 +133,14 @@ from app.services.step1_cancellation import (
     is_cancelled as step1_is_cancelled,
     request_cancel as step1_request_cancel,
 )
+from app.services.step4_text_cancellation import (
+    Step4TextsCancelledError,
+    begin_run as step4_text_begin_run,
+    end_run as step4_text_end_run,
+    is_cancelled as step4_text_is_cancelled,
+    is_running as step4_text_is_running,
+    request_cancel as step4_text_request_cancel,
+)
 from app.services.candidate_origin import apply_resolved_origin
 from app.services.source_tiers_editor import expand_search_seed_urls
 from app.services.telegram_channel_monitor import (
@@ -4692,6 +4700,20 @@ class DigestService:
             "detail": "Запрос на остановку принят. Текущая проверка завершится, затем сохранится частичный результат.",
         }
 
+    def cancel_step4_texts_run(self, digest_id: int) -> dict[str, Any]:
+        self.get_digest(digest_id)
+        was_running = step4_text_is_running(digest_id)
+        accepted = step4_text_request_cancel(digest_id)
+        if accepted:
+            return {
+                "ok": True,
+                "running": True,
+                "detail": "Запрос на остановку генерации текстов принят.",
+            }
+        if was_running:
+            return {"ok": True, "running": False, "detail": "Генерация текстов уже завершается."}
+        raise HTTPException(status_code=409, detail="Генерация текстов сейчас не выполняется.")
+
     def get_step1_live_progress(self, digest_id: int) -> dict[str, Any]:
         from app.services.step1_cancellation import is_running as step1_is_running
         from app.services.step1_live_progress import live_payload_from_meta, snapshot_live_progress
@@ -5118,6 +5140,12 @@ class DigestService:
                     for x in step1_filter_states
                 ],
                 "tier_strict_search": bool(getattr(self.settings, "step1_tier_strict_search", True)),
+                "serious_curious_extra_batches": int(
+                    getattr(self.settings, "step1_serious_curious_extra_batches", 0) or 0
+                ),
+                "first_offer_min_candidates": int(
+                    getattr(self.settings, "step1_first_offer_min_candidates", 15) or 15
+                ),
             }
             baseline_e2e = median_e2e_for_digest_type(digest.digest_type or "serious")
             estimated_raw_for_10 = estimate_raw_urls_for_target(baseline_e2e)
@@ -5985,6 +6013,7 @@ class DigestService:
                         ),
                         skip_urls=excluded_urls,
                         filter_enabled=self._is_step1_filter_enabled,
+                        pool_target_size=collection_target_pages,
                     )
                     for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
                         step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
@@ -6175,6 +6204,7 @@ class DigestService:
                         skip_urls=excluded_urls,
                         filter_enabled=self._is_step1_filter_enabled,
                         verified_pool_size=len(verified_pool),
+                        pool_target_size=STEP1_MIN_VERIFIED,
                     )
                     for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
                         step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
@@ -6610,6 +6640,48 @@ class DigestService:
                 )
                 reject_stats["user_excluded"] = int(reject_stats.get("user_excluded", 0)) + int(removed_blocked)
                 step1_collection_meta["user_excluded_removed"] = int(removed_blocked)
+
+            first_offer_target = max(
+                STEP1_MIN_VERIFIED,
+                min(
+                    int(getattr(self.settings, "step1_first_offer_min_candidates", 15) or 15),
+                    int(getattr(self.settings, "step1_max_candidates_for_ui", 15) or 15),
+                    30,
+                ),
+            )
+            if (
+                not step1_user_cancelled
+                and not step1_proxyapi_depleted
+                and self.settings.enable_web_fetch
+                and len(verified_pool) < first_offer_target
+            ):
+                try:
+                    topup_meta = self._step1_topup_search_until_minimum(
+                        digest,
+                        verified_pool=verified_pool,
+                        seen_fp=seen_fp,
+                        excluded_urls=excluded_urls,
+                        now_msk=now_msk,
+                        snapshot_preview_row=snapshot_preview_row,
+                        append_verified=append_verified,
+                        register_reject=register_reject,
+                        started_monotonic=started_monotonic,
+                        hard_limit_sec=hard_time_limit_sec,
+                        batch_size=step1_batch_size,
+                        target=first_offer_target,
+                        max_rounds=4,
+                        filter_enabled=self._is_step1_filter_enabled,
+                        respect_host_cap=False,
+                        phase_label="first_offer",
+                    )
+                    step1_collection_meta["topup_first_offer_rounds"] = int(topup_meta.get("rounds", 0) or 0)
+                    step1_collection_meta["topup_first_offer_added"] = int(topup_meta.get("added", 0) or 0)
+                    for key in ("urls_raw_merged", "urls_prefilter_rejected", "urls_sent_to_http"):
+                        step1_collection_meta[key] = int(step1_collection_meta.get(key, 0) or 0) + int(
+                            topup_meta.get(key, 0) or 0
+                        )
+                except Exception:
+                    logger.exception("Шаг 1: top-up до минимального первого предложения не выполнен")
 
             # Кандидатов удаляем только после успешного rebalance.
             self.db.query(NewsCandidate).filter(NewsCandidate.digest_id == digest.id).delete()
@@ -7836,106 +7908,127 @@ class DigestService:
         digest = self.get_digest(digest_id)
         self._step4_allow_status(digest)
         platform_keys = self._step4_validate_platforms(platforms)
+        step4_text_begin_run(digest.id)
 
-        hook = self._step4_resolve_hook(digest, hook_variant)
-        self._step4_generate_reader_texts(digest)
-        selected_payload = self._step4_selected_payload(digest)
-        if not selected_payload:
-            raise HTTPException(status_code=400, detail="Нет выбранных новостей с аналитикой для текстов")
+        def _raise_if_cancelled() -> None:
+            if step4_text_is_cancelled(digest.id):
+                raise Step4TextsCancelledError()
 
-        hashtags = self._step4_hashtags(digest)
-        writer_payload = {
-            "hook_variant": hook,
-            "selected_news": selected_payload,
-            "hashtags": hashtags,
-            "date": format_digest_date_ru(digest.date),
-            "overall_analysis": self._step4_overall_analysis(digest),
-            "digest_type": digest.digest_type or "serious",
-            "digest_topic": getattr(digest, "digest_topic", None) or "ai",
-        }
-        logger.info(
-            "Шаг 4: тексты площадок | digest_id=%s hook=%s platforms=%s",
-            digest.id,
-            hook,
-            ",".join(platform_keys),
-        )
+        try:
+            hook = self._step4_resolve_hook(digest, hook_variant)
+            _raise_if_cancelled()
+            self._step4_generate_reader_texts(digest)
+            _raise_if_cancelled()
+            selected_payload = self._step4_selected_payload(digest)
+            if not selected_payload:
+                raise HTTPException(status_code=400, detail="Нет выбранных новостей с аналитикой для текстов")
 
-        with self._digest_cost_session(
-            digest,
-            step="step_4",
-            agent_name="PlatformWriterAgent",
-            request_label="step_4_texts",
-            model=AGENT_MODEL_RECOMMENDATIONS["PlatformWriterAgent"],
-        ):
-            outputs = self.workflow.run_platform_writer(writer_payload, platforms=platform_keys)
+            hashtags = self._step4_hashtags(digest)
+            writer_payload = {
+                "hook_variant": hook,
+                "selected_news": selected_payload,
+                "hashtags": hashtags,
+                "date": format_digest_date_ru(digest.date),
+                "overall_analysis": self._step4_overall_analysis(digest),
+                "digest_type": digest.digest_type or "serious",
+                "digest_topic": getattr(digest, "digest_topic", None) or "ai",
+            }
+            logger.info(
+                "Шаг 4: тексты площадок | digest_id=%s hook=%s platforms=%s",
+                digest.id,
+                hook,
+                ",".join(platform_keys),
+            )
 
-            self.db.query(FinalOutput).filter(
-                FinalOutput.digest_id == digest.id,
-                FinalOutput.platform.in_(platform_keys),
-            ).delete()
-            for platform in platform_keys:
-                content = outputs.get(platform, "")
-                self.db.add(
-                    FinalOutput(
-                        digest_id=digest.id,
-                        platform=platform,
-                        content=content,
-                        character_count=len(content),
-                        qc_status="pending",
+            with self._digest_cost_session(
+                digest,
+                step="step_4",
+                agent_name="PlatformWriterAgent",
+                request_label="step_4_texts",
+                model=AGENT_MODEL_RECOMMENDATIONS["PlatformWriterAgent"],
+            ):
+                _raise_if_cancelled()
+                outputs = self.workflow.run_platform_writer(writer_payload, platforms=platform_keys)
+                _raise_if_cancelled()
+
+                self.db.query(FinalOutput).filter(
+                    FinalOutput.digest_id == digest.id,
+                    FinalOutput.platform.in_(platform_keys),
+                ).delete()
+                for platform in platform_keys:
+                    content = outputs.get(platform, "")
+                    self.db.add(
+                        FinalOutput(
+                            digest_id=digest.id,
+                            platform=platform,
+                            content=content,
+                            character_count=len(content),
+                            qc_status="pending",
+                        )
                     )
-                )
-            self.db.commit()
-
-            checks = self.workflow.run_qc(outputs, has_ok=True)
-            self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).delete()
-            failed = False
-            for c in checks:
-                status = str(c.get("status", "pass")).lower()
-                self.db.add(
-                    QualityCheck(
-                        digest_id=digest.id,
-                        check_name=str(c.get("check_name", "QC")),
-                        status=status,
-                        comment=str(c.get("comment", "")),
-                    )
-                )
-                if status not in {"pass", "ok", "success"}:
-                    failed = True
-            self.db.commit()
-
-            if failed:
-                repair_payload = {
-                    "hook_variant": hook,
-                    "selected_news": selected_payload,
-                    "hashtags": hashtags,
-                    "fix_mode": True,
-                    "date": format_digest_date_ru(digest.date),
-                    "overall_analysis": self._step4_overall_analysis(digest),
-                    "digest_type": digest.digest_type or "serious",
-                }
-                regenerated = self.workflow.run_platform_writer(repair_payload, platforms=platform_keys)
-                for row in (
-                    self.db.query(FinalOutput)
-                    .filter(FinalOutput.digest_id == digest.id, FinalOutput.platform.in_(platform_keys))
-                    .all()
-                ):
-                    row.content = regenerated.get(row.platform, row.content)
-                    row.character_count = len(row.content)
-                    row.qc_status = "repaired"
                 self.db.commit()
 
-        digest.status = STATUS_FINAL
-        digest.current_step = STATUS_FINAL
-        self.db.commit()
+                _raise_if_cancelled()
+                checks = self.workflow.run_qc(outputs, has_ok=True)
+                _raise_if_cancelled()
+                self.db.query(QualityCheck).filter(QualityCheck.digest_id == digest.id).delete()
+                failed = False
+                for c in checks:
+                    status = str(c.get("status", "pass")).lower()
+                    self.db.add(
+                        QualityCheck(
+                            digest_id=digest.id,
+                            check_name=str(c.get("check_name", "QC")),
+                            status=status,
+                            comment=str(c.get("comment", "")),
+                        )
+                    )
+                    if status not in {"pass", "ok", "success"}:
+                        failed = True
+                self.db.commit()
 
-        docx_name = digest_docx_filename(digest.date, digest.id)
-        docx_path = self.settings.docx_dir / docx_name
-        build_docx(self.db, digest, docx_path)
-        self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "docx").delete()
-        self.db.add(Asset(digest_id=digest.id, type="docx", path=str(docx_path), prompt="final export"))
-        self.db.commit()
-        logger.info("Шаг 4: тексты готовы | digest_id=%s docx=%s", digest.id, docx_path.name)
-        return {"hook_variant": hook, "platforms": platform_keys, "docx_path": str(docx_path)}
+                if failed:
+                    _raise_if_cancelled()
+                    repair_payload = {
+                        "hook_variant": hook,
+                        "selected_news": selected_payload,
+                        "hashtags": hashtags,
+                        "fix_mode": True,
+                        "date": format_digest_date_ru(digest.date),
+                        "overall_analysis": self._step4_overall_analysis(digest),
+                        "digest_type": digest.digest_type or "serious",
+                    }
+                    regenerated = self.workflow.run_platform_writer(repair_payload, platforms=platform_keys)
+                    _raise_if_cancelled()
+                    for row in (
+                        self.db.query(FinalOutput)
+                        .filter(FinalOutput.digest_id == digest.id, FinalOutput.platform.in_(platform_keys))
+                        .all()
+                    ):
+                        row.content = regenerated.get(row.platform, row.content)
+                        row.character_count = len(row.content)
+                        row.qc_status = "repaired"
+                    self.db.commit()
+
+            _raise_if_cancelled()
+            digest.status = STATUS_FINAL
+            digest.current_step = STATUS_FINAL
+            self.db.commit()
+
+            docx_name = digest_docx_filename(digest.date, digest.id)
+            docx_path = self.settings.docx_dir / docx_name
+            build_docx(self.db, digest, docx_path)
+            self.db.query(Asset).filter(Asset.digest_id == digest.id, Asset.type == "docx").delete()
+            self.db.add(Asset(digest_id=digest.id, type="docx", path=str(docx_path), prompt="final export"))
+            self.db.commit()
+            logger.info("Шаг 4: тексты готовы | digest_id=%s docx=%s", digest.id, docx_path.name)
+            return {"hook_variant": hook, "platforms": platform_keys, "docx_path": str(docx_path)}
+        except Step4TextsCancelledError:
+            self.db.rollback()
+            logger.warning("Шаг 4: генерация текстов остановлена пользователем | digest_id=%s", digest.id)
+            raise HTTPException(status_code=409, detail="Генерация текстов остановлена пользователем.")
+        finally:
+            step4_text_end_run(digest.id)
 
     def run_step_4_final(self, digest_id: int, hook_variant: str | None) -> dict[str, Any]:
         """Совместимость: обложки → выбор варианта 1 → все площадки (обложки — если включены)."""
@@ -9111,6 +9204,7 @@ class DigestService:
                 skip_urls=excluded_urls,
                 filter_enabled=filter_enabled,
                 verified_pool_size=len(verified_pool),
+                pool_target_size=target,
             )
             for key in funnel_acc:
                 funnel_acc[key] += int(funnel.get(key, 0) or 0)
@@ -9205,6 +9299,14 @@ class DigestService:
             "urls_sent_to_http": 0,
         }
 
+        curious_mix_target = max(
+            target_min_verified,
+            min(
+                target_max_candidates,
+                int(getattr(self.settings, "step1_first_offer_min_candidates", 15) or 15),
+            ),
+        )
+
         def _run_collect(need: int, *, query_override: str | None = None) -> None:
             if getattr(self, "_step1_web_search_abort_reason", None):
                 return
@@ -9228,6 +9330,7 @@ class DigestService:
                 skip_urls=excluded_urls,
                 filter_enabled=filter_enabled,
                 verified_pool_size=len(verified_pool),
+                pool_target_size=curious_mix_target,
                 deadline_monotonic=started_monotonic + hard_limit_sec,
             )
             for key in funnel_acc:
@@ -9855,6 +9958,7 @@ class DigestService:
         skip_urls: list[str] | None = None,
         filter_enabled: Any | None = None,
         verified_pool_size: int = 0,
+        pool_target_size: int | None = None,
         deadline_monotonic: float | None = None,
     ) -> tuple[list[dict[str, Any]], dict[str, int]]:
         """Реальные URL из ProxyAPI + SerpAPI + Tavily — до LLM-цепочки."""
@@ -9880,7 +9984,13 @@ class DigestService:
         window_hint, topic_terms, product_excludes = self._step1_search_query_parts(digest)
         configured_fetch_limit = max(10, int(getattr(self.settings, "step1_search_fetch_limit", 36) or 36))
         configured_check_limit = max(5, int(getattr(self.settings, "step1_urls_checked_per_collect", 24) or 24))
-        pool_shortfall = max(0, STEP1_MIN_VERIFIED - max(0, int(verified_pool_size or 0)))
+        target_pool_for_mix = max(
+            STEP1_MIN_VERIFIED,
+            int(pool_target_size or STEP1_MIN_VERIFIED),
+        )
+        verified_now = max(0, int(verified_pool_size or 0))
+        pool_shortfall = max(0, STEP1_MIN_VERIFIED - verified_now)
+        mix_shortfall = max(0, target_pool_for_mix - verified_now)
         if pool_shortfall > 0:
             fetch_limit = configured_fetch_limit
             check_limit = configured_check_limit
@@ -10094,9 +10204,12 @@ class DigestService:
                 serious_curious_enabled = bool(
                     getattr(self.settings, "step1_serious_use_curious_tiers", True)
                 )
+                verified_now = max(0, int(verified_pool_size or 0))
+                short_pool = verified_now < target_pool_for_mix or mix_shortfall > 0
                 skip_curious_supplement = (
                     query_override is None
                     and serious_curious_enabled
+                    and not short_pool
                     and (
                         tier_raw_added >= max(8, check_limit // 2)
                         or len(raw_unique) >= check_limit
@@ -10111,20 +10224,34 @@ class DigestService:
                         check_limit,
                     )
                 elif query_override is None and serious_curious_enabled:
-                    curious_batches = max(
+                    base_curious_batches = max(
                         2,
                         min(
                             6,
                             int(getattr(self.settings, "step1_serious_curious_search_batches", 4) or 4),
                         ),
                     )
-                    if tier_raw_added >= 5:
-                        curious_batches = min(curious_batches, 2)
+                    extra_curious_batches = max(
+                        0,
+                        min(
+                            10,
+                            int(getattr(self.settings, "step1_serious_curious_extra_batches", 0) or 0),
+                        ),
+                    )
+                    if short_pool and mix_shortfall >= 5:
+                        curious_batches = max(3, base_curious_batches + extra_curious_batches)
+                    elif short_pool:
+                        curious_batches = max(2, min(base_curious_batches + extra_curious_batches, 10))
+                    else:
+                        curious_batches = min(base_curious_batches, 2 if tier_raw_added >= 5 else base_curious_batches)
                     logger.info(
-                        "Шаг 1: добор курьёзных источников для серьёзного выпуска | digest_id=%s batches=%s tier_raw=%s",
+                        "Шаг 1: добор курьёзных источников для серьёзного выпуска | digest_id=%s batches=%s tier_raw=%s verified=%s short_pool=%s extra=%s",
                         digest.id,
                         curious_batches,
                         tier_raw_added,
+                        verified_now,
+                        short_pool,
+                        extra_curious_batches,
                     )
                     for u in fetch_curious_prioritized_raw_urls(
                         self.settings,
@@ -10137,7 +10264,7 @@ class DigestService:
                         search_context_size=supplement_ctx,
                         max_search_batches=curious_batches,
                         skip_aggregator_tier=True,
-                        pool_shortfall=pool_shortfall,
+                        pool_shortfall=max(pool_shortfall, mix_shortfall),
                     ):
                         key = str(u or "").strip().lower().rstrip("/")
                         if not key or key in seen_raw:

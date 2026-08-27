@@ -17,7 +17,8 @@ from app.services.digest_type_policy import (
 def test_unified_search_uses_english_topic_terms_only() -> None:
     for dtype in ("serious", "curious", None):
         terms = step1_topic_terms_for_digest_type(dtype)
-        assert terms == _STEP1_TOPIC_TERMS_SERIOUS_EN
+        assert _STEP1_TOPIC_TERMS_SERIOUS_EN in terms
+        assert "искусственный интеллект" in terms
         assert "курьёз" not in terms
 
 

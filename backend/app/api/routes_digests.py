@@ -546,6 +546,12 @@ def step4_generate_texts(digest_id: int, payload: Step4GenerateTextsRequest, db:
     )
 
 
+@router.post("/{digest_id}/step4/generate-texts/cancel")
+def step4_cancel_generate_texts(digest_id: int, db: Session = Depends(get_db)) -> dict:
+    service = DigestService(db)
+    return service.cancel_step4_texts_run(digest_id)
+
+
 @router.post("/{digest_id}/step4/confirm-final")
 def confirm_final(digest_id: int, payload: CommandRequest, db: Session = Depends(get_db)) -> dict:
     """Устаревший монолитный шаг 4: 4 обложки, выбор v1, все площадки."""

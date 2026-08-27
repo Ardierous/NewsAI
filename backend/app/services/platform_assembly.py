@@ -45,7 +45,8 @@ _MONTHS_RU = (
     "декабря",
 )
 
-TELEGRAM_MAX_CHARS = 3800
+# Для отдельного Telegram-сообщения (не подпись к медиа) держим комфортный лимит.
+TELEGRAM_MAX_CHARS = 3200
 MAX_PLATFORM_MAX_CHARS = 4000
 # Пост в редакторе Дзена (не длинная «статья»): https://dzen.ru/help/ru/channel/post.html
 DZEN_POST_MAX_CHARS = 4096
@@ -204,6 +205,12 @@ def resolve_lead(payload: dict[str, Any], platform: str = "telegram") -> str:
     custom = str(payload.get(key) or "").strip()
     if custom:
         return custom
+    # Для VK используем тот же содержательный анонс, что и в MAX,
+    # чтобы не скатываться к общему шаблону "Коротко: ...".
+    if platform == "vk":
+        max_lead = str(payload.get("max_lead") or "").strip()
+        if max_lead:
+            return max_lead
     return resolve_default_lead(payload)
 
 
@@ -290,6 +297,32 @@ def _truncate_at_word(text: str, max_len: int) -> str:
     if " " in cut:
         cut = cut.rsplit(" ", 1)[0]
     return cut + "…"
+
+
+def _compact_plain_text(text: str, max_len: int) -> str:
+    """Сжимает текст без многоточий: берёт полные предложения, затем мягко подрезает."""
+    src = " ".join(str(text or "").split())
+    if len(src) <= max_len:
+        return src
+    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", src) if p.strip()]
+    if parts:
+        out: list[str] = []
+        cur = 0
+        for part in parts:
+            add = len(part) + (1 if out else 0)
+            if cur + add > max_len:
+                break
+            out.append(part)
+            cur += add
+        if out:
+            return " ".join(out)
+    # Fallback: короткая версия без "…", заканчиваем точкой.
+    cut = src[:max_len].rstrip(" ,;:-")
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    if cut and cut[-1] not in ".!?":
+        cut += "."
+    return cut
 
 
 def _split_platform_html_footer(text: str) -> tuple[str, str]:
@@ -408,11 +441,11 @@ def _dzen_post_news_block(item: dict[str, Any], *, max_body_chars: int) -> str:
 def assemble_telegram(payload: dict[str, Any]) -> str:
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
-    lead = resolve_lead(payload, "telegram")
+    lead = _compact_plain_text(resolve_lead(payload, "telegram"), 420)
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
     news_blocks: list[str] = []
     for item in payload.get("selected_news") or []:
-        summary = _item_summary_short(item)
+        summary = _compact_plain_text(_item_summary_short(item), 240)
         news_blocks.append(f"{_news_link_line(item['title'], item['url'])}\n{summary}")
     body = "\n\n".join(news_blocks)
     sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_md_inline()
@@ -427,7 +460,8 @@ def assemble_max(payload: dict[str, Any]) -> str:
     """HTML для веб-редактора MAX: жирная шапка, ссылки в заголовках, отступы через <br>."""
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
-    lead = _truncate_at_word(resolve_lead(payload, "max"), 280)
+    # Для MAX не обрываем анонс многоточием — собираем короткий, завершённый абзац.
+    lead = _compact_plain_text(resolve_lead(payload, "max"), 230)
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
     sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_html_inline()
     footer = (

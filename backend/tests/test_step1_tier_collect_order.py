@@ -30,6 +30,7 @@ def _make_service(settings_overrides: dict | None = None) -> tuple[DigestService
         "step1_curious_use_serious_tiers": False,
         "step1_serious_use_curious_tiers": True,
         "step1_serious_curious_search_batches": 4,
+        "step1_serious_curious_extra_batches": 0,
         "step1_search_fetch_limit": 36,
         "step1_urls_checked_per_collect": 24,
         "step1_search_tier1_min_raw_urls": 15,
@@ -83,6 +84,10 @@ def test_cheap_sources_run_before_tier_web_search(monkeypatch: pytest.MonkeyPatc
     )
     monkeypatch.setattr(
         "app.services.digest_service.fetch_curious_prioritized_raw_urls",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        "app.services.digest_service.fetch_article_urls_raw_merged",
         lambda *_a, **_k: [],
     )
     monkeypatch.setattr(
@@ -151,6 +156,7 @@ def test_cheap_sources_skip_tier_when_listing_fills_raw(monkeypatch: pytest.Monk
 
     monkeypatch.setattr("app.services.digest_service.fetch_tier_prioritized_raw_urls", _fake_tier)
     monkeypatch.setattr("app.services.digest_service.fetch_curious_prioritized_raw_urls", lambda *_a, **_k: [])
+    monkeypatch.setattr("app.services.digest_service.fetch_article_urls_raw_merged", lambda *_a, **_k: [])
     monkeypatch.setattr(DigestService, "_step1_seed_collect_from_registry", _fake_registry)
     monkeypatch.setattr(DigestService, "_step1_add_seed_listing_raw_urls", _fake_listing)
     monkeypatch.setattr(DigestService, "_ingest_step1_urls_with_listing_expansion", lambda *_a, **_k: [])
@@ -182,6 +188,7 @@ def test_full_pool_skips_tier_web_search(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr("app.services.digest_service.fetch_tier_prioritized_raw_urls", _fake_tier)
     monkeypatch.setattr("app.services.digest_service.fetch_curious_prioritized_raw_urls", lambda *_a, **_k: [])
+    monkeypatch.setattr("app.services.digest_service.fetch_article_urls_raw_merged", lambda *_a, **_k: [])
     monkeypatch.setattr(DigestService, "_step1_seed_collect_from_registry", lambda *_a, **_k: 0)
     monkeypatch.setattr(DigestService, "_step1_add_seed_listing_raw_urls", lambda *_a, **_k: 0)
     monkeypatch.setattr(DigestService, "_ingest_step1_urls_with_listing_expansion", lambda *_a, **_k: [])
@@ -201,3 +208,34 @@ def test_full_pool_skips_tier_web_search(monkeypatch: pytest.MonkeyPatch):
     )
 
     assert tier_called["v"] is False
+
+
+def test_short_pool_applies_extra_curious_batches(monkeypatch: pytest.MonkeyPatch):
+    seen: dict[str, int] = {}
+
+    monkeypatch.setattr("app.services.digest_service.fetch_tier_prioritized_raw_urls", lambda *_a, **_k: [])
+
+    def _fake_curious(*_a, **kwargs):
+        seen["max_search_batches"] = int(kwargs.get("max_search_batches") or 0)
+        return []
+
+    monkeypatch.setattr("app.services.digest_service.fetch_curious_prioritized_raw_urls", _fake_curious)
+    monkeypatch.setattr(DigestService, "_step1_seed_collect_from_registry", lambda *_a, **_k: 0)
+    monkeypatch.setattr(DigestService, "_step1_add_seed_listing_raw_urls", lambda *_a, **_k: 0)
+    monkeypatch.setattr(DigestService, "_ingest_step1_urls_with_listing_expansion", lambda *_a, **_k: [])
+    monkeypatch.setattr(DigestService, "_step1_search_query_parts", lambda self, d: ("after:2026-06-01 ", "ИИ", "-pricing"))
+    monkeypatch.setattr("app.services.step1_web_search_stats.reset_empty_citation_streak", lambda: None)
+    monkeypatch.setattr("app.services.digest_service.register_raw_urls", lambda *a, **k: 0)
+    monkeypatch.setattr(DigestService, "_step1_prioritize_search_urls", lambda self, urls, digest=None: list(urls))
+
+    service, digest = _make_service({"step1_serious_curious_search_batches": 4, "step1_serious_curious_extra_batches": 2})
+    service._collect_search_verified_candidates(
+        99,
+        digest,
+        "2026-06-16T12:00:00+03:00",
+        set(),
+        limit=10,
+        verified_pool_size=0,
+    )
+
+    assert seen["max_search_batches"] == 6

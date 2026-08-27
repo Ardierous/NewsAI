@@ -1338,7 +1338,9 @@ export function DigestWizard({ digestId }: Props) {
   const newsWindowHydratedForRef = useRef<number | null>(null);
   const step3ModeRef = useRef<Step3ProgressMode>("analytics");
   const step1AbortRef = useRef<AbortController | null>(null);
+  const step4TextsAbortRef = useRef<AbortController | null>(null);
   const [step1Stopping, setStep1Stopping] = useState(false);
+  const [step4TextsStopping, setStep4TextsStopping] = useState(false);
   const [step1Elapsed, setStep1Elapsed] = useState(0);
   const [step1Live, setStep1Live] = useState<Step1LiveProgress | null>(null);
   const [step3Elapsed, setStep3Elapsed] = useState(0);
@@ -1346,6 +1348,8 @@ export function DigestWizard({ digestId }: Props) {
   const [newsWindowDays, setNewsWindowDays] = useState(3);
   const [newsWindowDayKind, setNewsWindowDayKind] = useState<"calendar" | "working">("working");
   const [digestTopic, setDigestTopic] = useState<"ai" | "style">("ai");
+  const [step1CuriousBalance, setStep1CuriousBalance] = useState(3);
+  const [savedStep1CuriousBalance, setSavedStep1CuriousBalance] = useState<number | null>(null);
   const [showAllFoundNews, setShowAllFoundNews] = useState(false);
   const [showStep1Statistics, setShowStep1Statistics] = useState(false);
   const [step1StatsLoading, setStep1StatsLoading] = useState(false);
@@ -1433,6 +1437,16 @@ export function DigestWizard({ digestId }: Props) {
     },
     [flashCopyFeedback],
   );
+
+  const splitTelegramForImageCaption = useCallback((text: string): { caption: string; post: string } => {
+    const raw = String(text || "").trim();
+    if (!raw) return { caption: "", post: "" };
+    const newsStart = raw.indexOf("\n\n➤ [");
+    if (newsStart === -1) return { caption: raw, post: raw };
+    const caption = raw.slice(0, newsStart).trim();
+    const post = raw.slice(newsStart + 2).trim();
+    return { caption, post };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -1531,6 +1545,25 @@ export function DigestWizard({ digestId }: Props) {
       setDigestTopic(topic);
     }
   }, [digestId, digest?.digest]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.getStep1CuriousBalance();
+        if (!cancelled) {
+          const next = Math.max(1, Math.min(10, Number(data?.value) || 3));
+          setStep1CuriousBalance(next);
+          setSavedStep1CuriousBalance(next);
+        }
+      } catch {
+        // Не блокируем шаг 0, если endpoint временно недоступен.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [digestId]);
 
   useEffect(() => {
     const list = digest?.candidates as
@@ -2218,7 +2251,9 @@ export function DigestWizard({ digestId }: Props) {
       setProgressLabel("");
       setRunningStepKey(null);
       setStep1Stopping(false);
+      setStep4TextsStopping(false);
       step1AbortRef.current = null;
+      step4TextsAbortRef.current = null;
     }
   };
 
@@ -2233,6 +2268,24 @@ export function DigestWizard({ digestId }: Props) {
       setError((e as Error).message || "Не удалось отправить запрос на остановку.");
     }
   }, [digestId, step1Stopping]);
+
+  const cancelStep4TextsGeneration = useCallback(async () => {
+    if (step4TextsStopping) return;
+    setStep4TextsStopping(true);
+    setError("");
+    try {
+      await api.cancelStep4Texts(digestId);
+    } catch (e) {
+      setError((e as Error).message || "Не удалось отправить запрос на остановку генерации текстов.");
+    } finally {
+      try {
+        step4TextsAbortRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
+      setStep4TextsStopping(false);
+    }
+  }, [digestId, step4TextsStopping]);
 
   const runStep1 = (rebuild: boolean) => {
     const keepIds = rebuild && selected.length > 0 ? [...selected] : [];
@@ -2655,6 +2708,34 @@ export function DigestWizard({ digestId }: Props) {
     return status !== "" && status !== "draft";
   }, [digest?.digest?.status]);
 
+  const step0NeedsSave = useMemo(() => {
+    const d = digest?.digest;
+    if (!d) return false;
+    const status = String(d.status || "");
+    if (status === "" || status === "draft") return true;
+
+    const savedTopic = d.digest_topic === "style" ? "style" : "ai";
+    if (digestTopic !== savedTopic) return true;
+
+    const savedDays = Math.max(1, Math.min(90, Number(d.news_window_days) || 3));
+    if (newsWindowDays !== savedDays) return true;
+
+    const savedDayKind = d.news_window_day_kind === "calendar" ? "calendar" : "working";
+    if (newsWindowDayKind !== savedDayKind) return true;
+
+    if (digestTopic !== "style" && savedStep1CuriousBalance != null && step1CuriousBalance !== savedStep1CuriousBalance) {
+      return true;
+    }
+    return false;
+  }, [
+    digest?.digest,
+    digestTopic,
+    newsWindowDays,
+    newsWindowDayKind,
+    savedStep1CuriousBalance,
+    step1CuriousBalance,
+  ]);
+
   const step0ApiOpts = () => ({
     digest_topic: digestTopic,
     news_window_days: newsWindowDays,
@@ -2671,6 +2752,13 @@ export function DigestWizard({ digestId }: Props) {
     },
   ) =>
     run(label, async () => {
+      const nextTopic = (payload.digest_topic ?? digestTopic) as "ai" | "style";
+      if (nextTopic !== "style") {
+        const saved = await api.setStep1CuriousBalance(Math.max(1, Math.min(10, Number(step1CuriousBalance) || 3)));
+        const nextSavedBalance = Math.max(1, Math.min(10, Number(saved?.value) || step1CuriousBalance));
+        setStep1CuriousBalance(nextSavedBalance);
+        setSavedStep1CuriousBalance(nextSavedBalance);
+      }
       const resp = await api.step0(digestId, payload);
       const nextId = Number(resp?.digest_id || 0);
       if (nextId > 0 && nextId !== digestId) {
@@ -2939,6 +3027,26 @@ export function DigestWizard({ digestId }: Props) {
             Календарные
           </label>
         </fieldset>
+        {!isStyleTopic ? (
+          <label style={{ display: "block", marginBottom: 10 }}>
+            Баланс серьёзный ↔ курьёзный:{" "}
+            <strong style={{ color: "#e2e8f0" }}>{step1CuriousBalance}</strong>
+            <input
+              type="range"
+              min={1}
+              max={10}
+              step={1}
+              value={step1CuriousBalance}
+              disabled={loading}
+              onChange={(e) => setStep1CuriousBalance(Math.max(1, Math.min(10, Number(e.target.value) || 3)))}
+              style={{ width: "100%", marginTop: 8 }}
+            />
+            <div style={{ display: "flex", justifyContent: "space-between", color: "#94a3b8", fontSize: "0.85rem", marginTop: 4 }}>
+              <span>1 — больше серьёзных</span>
+              <span>10 — больше курьёзных</span>
+            </div>
+          </label>
+        ) : null}
         <WizardWhy summary="Зачем тематика и режим важны">
           <p>
             <strong>Тематика</strong> определяет, какие источники и ключевые слова использует поиск на шаге 1, и как
@@ -2967,18 +3075,19 @@ export function DigestWizard({ digestId }: Props) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
             <button
               type="button"
-              disabled={loading}
+              disabled={loading || !step0NeedsSave}
               style={{
                 padding: "10px 16px",
                 borderRadius: 8,
-                cursor: loading ? "not-allowed" : "pointer",
-                border: "1px solid #475569",
-                background: "#1e293b",
+                cursor: loading || !step0NeedsSave ? "not-allowed" : "pointer",
+                border: step0NeedsSave ? "1px solid #475569" : "2px solid #38bdf8",
+                background: step0NeedsSave ? "#1e293b" : "#1e3a5f",
                 color: "#e2e8f0",
+                fontWeight: step0NeedsSave ? 400 : 600,
               }}
               onClick={() => runStep0("Сохранение тематики: стиль…", { digest_type: "serious", ...step0ApiOpts() })}
             >
-              Сохранить тематику
+              {step0NeedsSave ? "Сохранить тематику" : "Параметры шага 0 сохранены"}
             </button>
           </div>
         ) : (
@@ -2990,22 +3099,26 @@ export function DigestWizard({ digestId }: Props) {
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"
-              disabled={loading}
+              disabled={loading || !step0NeedsSave}
               style={{
                 padding: "10px 16px",
                 borderRadius: 8,
-                cursor: loading ? "not-allowed" : "pointer",
-                border: step0Saved ? "2px solid #38bdf8" : "1px solid #475569",
-                background: step0Saved ? "#1e3a5f" : "#1e293b",
+                cursor: loading || !step0NeedsSave ? "not-allowed" : "pointer",
+                border: !step0NeedsSave ? "2px solid #38bdf8" : "1px solid #475569",
+                background: !step0NeedsSave ? "#1e3a5f" : "#1e293b",
                 color: "#e2e8f0",
-                fontWeight: step0Saved ? 600 : 400,
+                fontWeight: !step0NeedsSave ? 600 : 400,
               }}
-              title="Сохранить тематику, окно новостей и режим «Дайджест ИИ» перед запуском шага 1."
+              title={
+                step0NeedsSave
+                  ? "Сохранить тематику, окно новостей и баланс серьёзный/курьёзный перед запуском шага 1."
+                  : "Параметры шага 0 уже сохранены — повторно нажимать не требуется."
+              }
               onClick={() =>
                 runStep0("Сохранение параметров шага 0…", { digest_type: "serious", ...step0ApiOpts() })
               }
             >
-              {step0Saved ? "Параметры шага 0 сохранены" : "Сохранить параметры шага 0"}
+              {!step0NeedsSave && step0Saved ? "Параметры шага 0 сохранены" : "Сохранить параметры шага 0"}
             </button>
           </div>
         </div>
@@ -4741,13 +4854,32 @@ export function DigestWizard({ digestId }: Props) {
                 disabled={!canStep4 || loading || selectedPlatformsList.length === 0}
                 onClick={() =>
                   run("Шаг 4: тексты — генерация для выбранных площадок (AI, может занять несколько минут)…", () =>
-                    api.generateStep4Texts(digestId, [...selectedPlatformsList], hookVariant || undefined),
+                    {
+                      const ac = new AbortController();
+                      step4TextsAbortRef.current = ac;
+                      return api.generateStep4Texts(
+                        digestId,
+                        [...selectedPlatformsList],
+                        hookVariant || undefined,
+                        ac.signal,
+                      );
+                    },
                   )
                 }
               >
                 Сгенерировать тексты ({selectedPlatformsList.length}{" "}
                 {selectedPlatformsList.length === 1 ? "площадка" : "площадок"})
               </button>
+              {step4TextsInProgress ? (
+                <button
+                  type="button"
+                  disabled={step4TextsStopping}
+                  onClick={() => void cancelStep4TextsGeneration()}
+                  style={{ marginLeft: 8 }}
+                >
+                  {step4TextsStopping ? "Останавливаем…" : "Принудительно остановить генерацию"}
+                </button>
+              ) : null}
             </div>
           </>
         )}
@@ -4811,6 +4943,27 @@ export function DigestWizard({ digestId }: Props) {
               <div className="step4-copy-all-buttons">
                 {sortedOutputs.map((o: any) => {
                   const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();
+                  if (o.platform === "telegram") {
+                    const split = splitTelegramForImageCaption(String(o.content ?? ""));
+                    return (
+                      <div key={o.platform} className="step4-telegram-copy-stack">
+                        <button
+                          type="button"
+                          className="step4-copy-btn step4-copy-btn--compact"
+                          onClick={() => void handleCopyPlatform("telegram", split.caption, "telegram_caption")}
+                        >
+                          Скопировать анонс для Telegram (к картинке)
+                        </button>
+                        <button
+                          type="button"
+                          className="step4-copy-btn step4-copy-btn--compact"
+                          onClick={() => void handleCopyPlatform("telegram", split.post, "telegram_post")}
+                        >
+                          Скопировать пост Telegram (5 новостей)
+                        </button>
+                      </div>
+                    );
+                  }
                   return (
                     <button
                       key={o.platform}
@@ -4828,20 +4981,35 @@ export function DigestWizard({ digestId }: Props) {
               </div>
               {sortedOutputs.map((o: any) => {
                 const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();
-                const st = copyStatus[o.platform] ?? "idle";
-                if (st === "idle") return null;
+                const keys =
+                  o.platform === "telegram" ? ["telegram_caption", "telegram_post"] : [o.platform];
+                const rows = keys
+                  .map((k) => ({ key: k, st: copyStatus[k] ?? "idle" }))
+                  .filter((x) => x.st !== "idle");
+                if (rows.length === 0) return null;
                 return (
-                  <p
-                    key={`${o.platform}-feedback`}
-                    className="step4-copy-all-feedback"
-                    style={{ color: st === "ok" ? "#4ade80" : "#f87171", margin: 0 }}
-                  >
-                    {st === "ok"
-                      ? o.platform === "max" || o.platform === "dzen"
-                        ? `${label}: скопировано с форматированием — вставьте в редактор (Ctrl+V).`
-                        : `${label}: скопировано — вставьте в редактор (Ctrl+V).`
-                      : `${label}: не удалось записать в буфер — выделите текст в поле ниже и Ctrl+C.`}
-                  </p>
+                  <div key={`${o.platform}-feedback`} className="step4-copy-all-feedback">
+                    {rows.map(({ key, st }) => (
+                      <p
+                        key={key}
+                        style={{ color: st === "ok" ? "#4ade80" : "#f87171", margin: 0 }}
+                      >
+                        {st === "ok"
+                          ? key === "telegram_caption"
+                            ? `${label}: анонс скопирован — вставьте как подпись к картинке.`
+                            : key === "telegram_post"
+                              ? `${label}: основной пост скопирован — отправьте отдельным сообщением.`
+                              : o.platform === "max" || o.platform === "dzen"
+                                ? `${label}: скопировано с форматированием — вставьте в редактор (Ctrl+V).`
+                                : `${label}: скопировано — вставьте в редактор (Ctrl+V).`
+                          : key === "telegram_caption"
+                            ? `${label}: не удалось скопировать анонс — выделите текст в поле ниже и Ctrl+C.`
+                            : key === "telegram_post"
+                              ? `${label}: не удалось скопировать основной пост — выделите текст в поле ниже и Ctrl+C.`
+                              : `${label}: не удалось записать в буфер — выделите текст в поле ниже и Ctrl+C.`}
+                      </p>
+                    ))}
+                  </div>
                 );
               })}
             </div>
@@ -4865,8 +5033,8 @@ export function DigestWizard({ digestId }: Props) {
                   </p>
                 ) : o.platform === "telegram" ? (
                   <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>
-                    Markdown: жирная шапка, ссылки в заголовках новостей. Копируйте кнопкой в строке выше и вставляйте в
-                    Telegram (Ctrl+V).
+                    Сначала скопируйте «анонс для Telegram (к картинке)» и вставьте как подпись. Затем скопируйте
+                    «пост Telegram (5 новостей)» и отправьте отдельным сообщением.
                   </p>
                 ) : o.platform === "vk" ? (
                   <p className="wizard-hint-do" style={{ fontSize: "0.9rem", marginTop: 0 }}>

@@ -37,6 +37,8 @@ _SETTING_ENV: dict[str, str] = {
     "step1_verify_workers": "STEP1_VERIFY_WORKERS",
     "step1_crew_fallback_only_if_empty": "STEP1_CREW_FALLBACK_ONLY_IF_EMPTY",
     "step1_tier_strict_search": "STEP1_TIER_STRICT_SEARCH",
+    "step1_serious_curious_extra_batches": "STEP1_SERIOUS_CURIOUS_EXTRA_BATCHES",
+    "step1_first_offer_min_candidates": "STEP1_FIRST_OFFER_MIN_CANDIDATES",
     "step1_telegram_monitor_enabled": "STEP1_TELEGRAM_MONITOR_ENABLED",
     "step1_telegram_monitor_channels": "STEP1_TELEGRAM_MONITOR_CHANNELS",
     "step1_telegram_max_pages": "STEP1_TELEGRAM_MAX_PAGES",
@@ -72,6 +74,8 @@ _PIPELINE_FIELDS = frozenset(
         "step1_verify_workers",
         "step1_crew_fallback_only_if_empty",
         "step1_tier_strict_search",
+        "step1_serious_curious_extra_batches",
+        "step1_first_offer_min_candidates",
         "step1_telegram_monitor_enabled",
         "step1_telegram_monitor_channels",
         "step1_telegram_max_pages",
@@ -250,6 +254,21 @@ def build_app_config_summary() -> dict[str, Any]:
                     settings.step1_tier_strict_search,
                     "step1_tier_strict_search",
                     hint="Поиск только по tier-1…4 из source_tiers.txt (site: батчи по приоритету)",
+                ),
+                _item(
+                    "Extra батчи развлекательного добора",
+                    settings.step1_serious_curious_extra_batches,
+                    "step1_serious_curious_extra_batches",
+                    hint=(
+                        "Сколько дополнительных батчей брать из развлекательных источников при коротком пуле "
+                        "(0 — без усиления)."
+                    ),
+                ),
+                _item(
+                    "Мин. кандидатов в первом предложении",
+                    settings.step1_first_offer_min_candidates,
+                    "step1_first_offer_min_candidates",
+                    hint="Шаг 1 пытается добрать до этого числа после базового сбора (если есть доступные статьи в окне дат).",
                 ),
                 _item("Telegram monitor", settings.step1_telegram_monitor_enabled, "step1_telegram_monitor_enabled"),
                 _item("Telegram каналы", settings.step1_telegram_monitor_channels, "step1_telegram_monitor_channels"),

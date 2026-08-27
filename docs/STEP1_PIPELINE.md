@@ -9,7 +9,8 @@
 | Параметр | Значение | Источник |
 |----------|----------|----------|
 | Минимум успешного пула | **10** проверенных материалов | `STEP1_MIN_VERIFIED` в `digest_service.py` |
-| Целевой размер пула для UI | до **12** | `max_candidates_for_ui` в `pipeline_settings.json` |
+| Целевой размер пула для UI | до **20** | `max_candidates_for_ui` в `pipeline_settings.json` |
+| Минимум первого предложения | **15** | `first_offer_min_candidates` в `pipeline_settings.json` |
 | Порог воронки | **10** | `min_discovered_pages` в `step1_filter_settings.json` |
 | Батч tier-поиска | **14** URL | `batch_size` |
 | Сырые URL за collect | до **64** | `search_fetch_limit` |
@@ -18,6 +19,7 @@
 | Мин. итераций (serious) | **5** | `min_collection_iterations` в `step1_filter_settings.json` |
 | Мин. итераций (curious) | **2** | там же, секция `curious` |
 | ProxyAPI-батчей за tier-проход | до **12** | `tier_max_web_search_batches` |
+| Extra батчи курьёзного добора | **0–10** | `serious_curious_extra_batches` |
 | Бюджет ProxyAPI | **50 ₽** | `max_cost_rub` |
 | HTTP workers | **8** | `verify_workers` |
 
@@ -26,6 +28,7 @@
 | Параметр | Где задаётся |
 |----------|--------------|
 | Тип и окно выпуска | `POST /digests/{id}/step0`; смена только окна — `PATCH /digests/{id}/news-window` или поля в теле `POST …/step1/run` |
+| Баланс serious/curious в unified режиме | Ползунок шага 0 (1–10) → `step1_serious_curious_extra_batches` |
 | Дефолты шага 0 | `backend/app/digest_defaults.json` (`step0`) |
 | Фильтры шага 1 и порог воронки | `backend/app/step1_filter_settings.json` (профили **serious** и **curious**); UI «Настройки фильтра новостей» → `GET/PUT /digests/{id}/step1/filters` |
 | Технические лимиты шага 1 | `backend/app/pipeline_settings.json`; переопределение через `.env` (`STEP1_*`) |
@@ -158,7 +161,7 @@ Stop-правила:
 
 - Если после всех проходов verified < 10 → `502` + breakdown причин; частичный preview может сохраниться в БД.
 - Если verified ≥ 10 → rebalance с целевым размером до 12, но не ниже 10.
-- В БД: `NewsCandidate`, `step1_collection_meta` (elapsed, funnel, stop_reason), обновление реестра URL.
+- В БД: `NewsCandidate`, `step1_collection_meta` (elapsed, funnel, stop_reason, `serious_curious_extra_batches`, `first_offer_min_candidates`), обновление реестра URL.
 
 ## Что видно в UI
 

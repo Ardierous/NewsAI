@@ -23,3 +23,11 @@ class AppConfigResponse(BaseModel):
     sections: list[AppConfigSectionOut] = Field(default_factory=list)
     env_overrides: list[str] = Field(default_factory=list)
     note: str = ""
+
+
+class Step1CuriousBalanceUpdate(BaseModel):
+    value: int = Field(..., ge=1, le=10)
+
+
+class Step1CuriousBalanceResponse(BaseModel):
+    value: int = Field(..., ge=1, le=10)

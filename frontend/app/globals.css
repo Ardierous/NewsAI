@@ -280,6 +280,18 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
+.step4-telegram-copy-stack {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step4-copy-all-bar .step4-copy-btn--compact {
+  padding: 5px 10px;
+  font-size: 0.84rem;
+  line-height: 1.2;
+}
+
 .step4-copy-all-bar .step4-home-btn {
   margin-left: auto;
 }

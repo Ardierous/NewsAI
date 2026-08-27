@@ -81,6 +81,10 @@ export function DigestHintsAccordion() {
                   Окно ограничивает шаг 1: материалы старше N дней от даты выпуска отсекаются (
                   <code style={c}>published_before_window</code>).
                 </li>
+                <li style={li}>
+                  В режиме ИИ доступен ползунок <strong>«Баланс серьёзный ↔ курьёзный»</strong> (1–10): сохраняется на
+                  шаге 0 и влияет на добор источников в шаге 1.
+                </li>
                 <li style={{ ...li, marginBottom: 0 }}>
                   Кнопка <strong>Настройки</strong> открывает модалку с параметрами приложения (комментарии «почему так» и
                   альтернативы) — не путать с «Настройки фильтра новостей» на шаге 1.
@@ -180,13 +184,16 @@ export function DigestHintsAccordion() {
                 простой текст для читателей: 2–4 коротких предложения, до 450 символов без заголовка (
                 <code style={c}>reader_copy.py</code>, <code style={c}>ReaderCopyAgent</code>). Итоговую вёрстку собирает{" "}
                 <code style={c}>platform_assembly.py</code>: Telegram — markdown; MAX и Дзен — HTML для веб-редакторов; ВК —
-                plain text. Копируйте кнопкой «Скопировать текст для …» (MAX/Дzen — не вручную из поля). Обложку загружайте
-                на площадку отдельно: скачайте с шага 4 или используйте JPG из <code style={c}>images/</code> по типу выпуска.
+                plain text. Для Telegram: отдельная кнопка <strong>анонса к картинке</strong> и отдельная кнопка{" "}
+                <strong>основного поста</strong> (5 новостей). MAX/Дzen копируйте только кнопкой (не вручную из поля).
+                Обложку загружайте на площадку отдельно: скачайте с шага 4 или используйте JPG из{" "}
+                <code style={c}>images/</code> по типу выпуска.
               </p>
               <div style={dev}>
                 <strong style={{ color: "#cbd5e1" }}>API:</strong> <code style={c}>POST …/step3/confirm-ready</code> →{" "}
                 <code style={c}>run_step_3_analytics</code>; шаг 4: <code style={c}>generate-images</code>,{" "}
-                <code style={c}>select-image</code>, <code style={c}>generate-texts</code>. Итог —{" "}
+                <code style={c}>select-image</code>, <code style={c}>generate-texts</code>,{" "}
+                <code style={c}>generate-texts/cancel</code>. Итог —{" "}
                 <code style={c}>GET /digests/{"{id}"}</code>, экспорт <code style={c}>/docx</code> и изображения в{" "}
                 <code style={c}>routes_digests.py</code>.
               </div>
