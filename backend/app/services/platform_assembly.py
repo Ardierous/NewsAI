@@ -8,6 +8,7 @@ from typing import Any
 
 from app.services.digest_type_policy import is_legacy_stored_curious
 from app.services.digest_topic_policy import is_style_digest
+from app.services.reader_copy import strip_analytics_scaffold
 
 MAX_NEWS_SEP = "..."
 DZEN_NEWS_SEP = "—"
@@ -15,7 +16,7 @@ SEP_VK = "· · ·"
 HEADER_TITLE_SERIOUS = "⚡Пять актуальных новостей про ИИ"
 HEADER_TITLE_AI = "⚡Пять новостей про ИИ"
 HEADER_TITLE_CURIOUS = "⚡Пять забавных новостей про ИИ"
-HEADER_TITLE_STYLE = "⚡Пять актуальных новостей про моду и стиль"
+HEADER_TITLE_STYLE = "⚡Стиль: пять главных новостей моды"
 # Обратная совместимость для тестов и импортов.
 HEADER_TITLE = HEADER_TITLE_AI
 DEFAULT_LEAD_SERIOUS = "Коротко: главные сдвиги в мире ИИ и вокруг экосистемы продуктов за сегодня."
@@ -48,6 +49,8 @@ _MONTHS_RU = (
 # Для отдельного Telegram-сообщения (не подпись к медиа) держим комфортный лимит.
 TELEGRAM_MAX_CHARS = 3200
 MAX_PLATFORM_MAX_CHARS = 4000
+# Целевой объём описания одной новости в MAX для темы «Стиль» (весь пост ≤ MAX_PLATFORM_MAX_CHARS).
+STYLE_MAX_NEWS_BODY_TARGET_CHARS = 720
 # Пост в редакторе Дзена (не длинная «статья»): https://dzen.ru/help/ru/channel/post.html
 DZEN_POST_MAX_CHARS = 4096
 
@@ -181,7 +184,13 @@ def resolve_default_lead(payload: dict[str, Any]) -> str:
     return DEFAULT_LEAD_AI
 
 
-def normalize_hashtag_tokens(tags: list[Any], minimum: int, maximum: int) -> str:
+def normalize_hashtag_tokens(
+    tags: list[Any],
+    minimum: int,
+    maximum: int,
+    *,
+    digest_topic: str | None = None,
+) -> str:
     seen: list[str] = []
     for t in tags:
         s = str(t).strip()
@@ -191,7 +200,10 @@ def normalize_hashtag_tokens(tags: list[Any], minimum: int, maximum: int) -> str
             s = f"#{s}"
         if s not in seen:
             seen.append(s)
-    defaults = ["#ИИновости", "#нейросети", "#инновации", "#AI", "#технологии", "#машинноеОбучение"]
+    if is_style_digest(digest_topic):
+        defaults = ["#мода", "#стиль", "#fashion", "#тренды", "#одежда", "#стритстайл"]
+    else:
+        defaults = ["#ИИновости", "#нейросети", "#инновации", "#AI", "#технологии", "#машинноеОбучение"]
     for d in defaults:
         if len(seen) >= minimum:
             break
@@ -265,6 +277,31 @@ def _item_summary_short(item: dict[str, Any]) -> str:
     return " ".join(str(item.get("summary", "")).split())
 
 
+def _text_largely_contained(haystack: str, needle: str, *, min_needle: int = 36) -> bool:
+    if not needle or len(needle) < min_needle:
+        return False
+    if needle in haystack or haystack in needle:
+        return True
+    return needle[: min(48, len(needle))] in haystack
+
+
+def _item_summary_style_max(item: dict[str, Any], max_chars: int) -> str:
+    """Описание для MAX (тема «Стиль»): только читательский текст, без шаблона аналитики."""
+    parts: list[str] = []
+    for key in ("reader_text", "summary_short", "essence"):
+        part = strip_analytics_scaffold(str(item.get(key) or ""))
+        if not part:
+            continue
+        combined = " ".join(parts)
+        if parts and _text_largely_contained(combined, part):
+            continue
+        parts.append(part)
+    body = " ".join(parts).strip()
+    if not body:
+        body = strip_analytics_scaffold(_item_summary_short(item))
+    return _compact_plain_text(body, max_chars)
+
+
 def _news_link_line(title: str, url: str) -> str:
     safe_title = escape_md_link_label(title)
     return f"➤ [{safe_title}]({url.strip()})"
@@ -276,12 +313,17 @@ def _news_link_html(title: str, url: str) -> str:
     return f'➤ <a href="{safe_url}">{safe_title}</a>'
 
 
-def _html_news_block(item: dict[str, Any], *, max_body_chars: int | None = None) -> str:
+def _html_news_block(
+    item: dict[str, Any],
+    *,
+    max_body_chars: int | None = None,
+    body_text: str | None = None,
+) -> str:
     title = str(item["title"]).strip()
     url = str(item["url"]).strip()
-    body_raw = " ".join(_item_summary_short(item).split())
+    body_raw = " ".join((body_text or _item_summary_short(item)).split())
     if max_body_chars is not None:
-        body_raw = _truncate_at_word(body_raw, max_body_chars)
+        body_raw = _compact_plain_text(body_raw, max_body_chars)
     summary = escape_html_text(body_raw)
     return f"{_news_link_html(title, url)}<br><br>{summary}"
 
@@ -325,6 +367,28 @@ def _compact_plain_text(text: str, max_len: int) -> str:
     return cut
 
 
+def _compose_max_specific_lead(payload: dict[str, Any], max_len: int = 280) -> str:
+    """Содержательный лид для MAX на основе фактуры выбранных новостей."""
+    custom = str(payload.get("max_lead") or "").strip()
+    if custom:
+        return _compact_plain_text(custom, max_len)
+
+    points: list[str] = []
+    for item in list(payload.get("selected_news") or [])[:3]:
+        summary = _item_summary_short(item)
+        snippet = _compact_plain_text(summary, 110).strip(" ,;:-")
+        if snippet and snippet not in points:
+            points.append(snippet)
+        if len(points) >= 2:
+            break
+
+    if points:
+        joined = "; ".join(points)
+        return _compact_plain_text(f"В выпуске: {joined}.", max_len)
+
+    return _compact_plain_text(resolve_default_lead(payload), max_len)
+
+
 def _split_platform_html_footer(text: str) -> tuple[str, str]:
     sub = subscription_html_inline()
     idx = text.find(sub)
@@ -364,8 +428,10 @@ def _shrink_html_news_summaries(body: str, max_len: int) -> str:
         prefix, _title, mid, summary = m.groups()
         if not summary.strip():
             continue
-        while len("".join(news_parts[:idx]) + "".join(seps[:idx]) + prefix + _title + mid + summary) > max_len and len(summary) > 40:
-            summary = _truncate_at_word(summary, max(40, len(summary) - 48))
+        while len("".join(news_parts[:idx]) + "".join(seps[:idx]) + prefix + _title + mid + summary) > max_len and len(
+            summary
+        ) > 40:
+            summary = _compact_plain_text(summary, max(40, len(summary) - 48))
         news_parts[idx] = prefix + _title + mid + summary
         rebuilt = ""
         for j, news in enumerate(news_parts):
@@ -441,8 +507,9 @@ def _dzen_post_news_block(item: dict[str, Any], *, max_body_chars: int) -> str:
 def assemble_telegram(payload: dict[str, Any]) -> str:
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
+    topic = payload.get("digest_topic")
     lead = _compact_plain_text(resolve_lead(payload, "telegram"), 420)
-    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
+    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6, digest_topic=topic)
     news_blocks: list[str] = []
     for item in payload.get("selected_news") or []:
         summary = _compact_plain_text(_item_summary_short(item), 240)
@@ -460,10 +527,15 @@ def assemble_max(payload: dict[str, Any]) -> str:
     """HTML для веб-редактора MAX: жирная шапка, ссылки в заголовках, отступы через <br>."""
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
-    # Для MAX не обрываем анонс многоточием — собираем короткий, завершённый абзац.
-    lead = _compact_plain_text(resolve_lead(payload, "max"), 230)
-    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6)
-    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_html_inline()
+    topic = payload.get("digest_topic")
+    style = is_style_digest(topic)
+    if style:
+        lead = _compact_plain_text(resolve_lead(payload, "max") or resolve_default_lead(payload), 160)
+    else:
+        # Для MAX делаем более содержательный лид по фактуре выпуска, без обрыва многоточием.
+        lead = _compose_max_specific_lead(payload, 280)
+    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6, digest_topic=topic)
+    sub = "" if style else subscription_html_inline()
     footer = (
         f"<br><br>{escape_html_text(tags)}"
         if not sub
@@ -477,6 +549,30 @@ def assemble_max(payload: dict[str, Any]) -> str:
     n = max(len(news), 1)
     sep = f"<br><br>{MAX_NEWS_SEP}<br><br>"
     budget = MAX_PLATFORM_MAX_CHARS - len(header) - len(footer) - len(sep) * max(n - 1, 0)
+    if style:
+        per_news = max(
+            STYLE_MAX_NEWS_BODY_TARGET_CHARS,
+            (budget // n) - 12,
+        )
+        body = ""
+        for _ in range(14):
+            news_blocks = [
+                _html_news_block(
+                    item,
+                    max_body_chars=per_news,
+                    body_text=_item_summary_style_max(item, per_news),
+                )
+                for item in news
+            ]
+            body = sep.join(news_blocks)
+            if len(header) + len(body) + len(footer) <= MAX_PLATFORM_MAX_CHARS:
+                break
+            per_news = max(STYLE_MAX_NEWS_BODY_TARGET_CHARS - 80, int(per_news * 0.92))
+        text = header + body + footer
+        if len(text) > MAX_PLATFORM_MAX_CHARS:
+            shrunk = _shrink_html_news_summaries(body, MAX_PLATFORM_MAX_CHARS - len(header) - len(footer))
+            text = header + shrunk + footer
+        return text
     per_news = max(120, (budget // n) - 120)
     news_blocks = [_max_news_block(item, max_body_chars=per_news) for item in news]
     body = sep.join(news_blocks)
@@ -487,8 +583,9 @@ def assemble_max(payload: dict[str, Any]) -> str:
 def assemble_vk(payload: dict[str, Any]) -> str:
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
+    topic = payload.get("digest_topic")
     lead = resolve_lead(payload, "vk")
-    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 3, 5)
+    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 3, 5, digest_topic=topic)
     news_blocks: list[str] = []
     for item in payload.get("selected_news") or []:
         title = str(item["title"]).strip().upper()
@@ -508,7 +605,8 @@ def assemble_dzen(payload: dict[str, Any]) -> str:
     """HTML для веб-редактора Дзена — не более 4096 символов (см. справку Дзена)."""
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
-    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 3, 5)
+    topic = payload.get("digest_topic")
+    tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 3, 5, digest_topic=topic)
     intro = str(payload.get("dzen_intro") or "").strip()
     if not intro:
         intro = resolve_default_lead(payload)

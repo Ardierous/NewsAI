@@ -40,10 +40,11 @@ _ANALYTICS_EDITORIAL = (
     "Ответ — только JSON, без markdown и текста вокруг."
 )
 
-_READER_COPY_EDITORIAL = (
+def _reader_copy_editorial(max_chars: int = 450) -> str:
+    return (
     "Для каждого items[] верни candidate_id и reader_text. "
-    "reader_text — ГОТОВОЕ описание новости для читателей финального дайджеста: 2–4 коротких простых "
-    "предложения (НЕ БОЛЕЕ 450 символов, без учёта заголовка новости). "
+    f"reader_text — ГОТОВОЕ описание новости для читателей финального дайджеста: 3–6 коротких простых "
+    f"предложения (НЕ БОЛЕЕ {max_chars} символов, без учёта заголовка новости). "
     "Пиши простым разговорным русским языком, как будто объясняешь другу. "
     "НЕ используй официальный, канцелярский или «новостной» стиль. "
     "Синтезируй essence, analysis и article_excerpt: суть + почему это важно + что из этого следует. "
@@ -52,9 +53,12 @@ _READER_COPY_EDITORIAL = (
     "Без канцелярита, официоза, штампов и признаков генерации ИИ. "
     "Не копируй article_excerpt дословно; не ссылайся на «редактора», «аналитику» или внутренние поля. "
     "Только проверяемые факты из article_excerpt и analysis. "
-    "self_check[] — reader_text_max_450_chars, simple_language, no_service_info, no_ai_cliches, facts_from_excerpt. "
+    f"self_check[] — reader_text_max_{max_chars}_chars, simple_language, no_service_info, no_ai_cliches, facts_from_excerpt. "
     "Ответ — только JSON: items[], self_check[], без markdown и текста вокруг."
-)
+    )
+
+
+_READER_COPY_EDITORIAL = _reader_copy_editorial(450)
 
 
 def _strip_markdown_json_fence(raw: str) -> str:
@@ -110,18 +114,22 @@ def _fallback_analytics_item(news: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fallback_reader_text_item(news: dict[str, Any]) -> dict[str, Any]:
+def _fallback_reader_text_item(news: dict[str, Any], *, max_chars: int = 450) -> dict[str, Any]:
     return {
         "candidate_id": int(news["candidate_id"]),
         "reader_text": build_reader_text_fallback(
             str(news.get("essence") or news.get("title") or ""),
             str(news.get("analysis") or ""),
+            max_chars=max_chars,
         ),
     }
 
 
 def complete_reader_descriptions_result(
-    result: dict[str, Any], reader_items: list[dict[str, Any]]
+    result: dict[str, Any],
+    reader_items: list[dict[str, Any]],
+    *,
+    max_chars: int = 450,
 ) -> dict[str, Any]:
     expected = [int(x["candidate_id"]) for x in reader_items]
     news_by_id = {int(x["candidate_id"]): x for x in reader_items}
@@ -148,7 +156,7 @@ def complete_reader_descriptions_result(
         if cid in by_id and by_id[cid]["reader_text"]:
             complete_items.append(by_id[cid])
         else:
-            complete_items.append(_fallback_reader_text_item(news))
+            complete_items.append(_fallback_reader_text_item(news, max_chars=max_chars))
     out = dict(result)
     out["items"] = complete_items
     checks = out.get("self_check", [])
@@ -176,9 +184,9 @@ def complete_analytics_result(result: dict[str, Any], selected_news: list[dict[s
             continue
         by_id[cid] = {
             "candidate_id": cid,
-            "essence": sanitize_reader_description(str(row.get("essence") or "")),
-            "comment": sanitize_reader_description(str(row.get("comment") or "")),
-            "analysis": sanitize_reader_description(str(row.get("analysis") or "")),
+            "essence": sanitize_reader_description(str(row.get("essence") or ""), keep_analytics_labels=True),
+            "comment": sanitize_reader_description(str(row.get("comment") or ""), keep_analytics_labels=True),
+            "analysis": sanitize_reader_description(str(row.get("analysis") or ""), keep_analytics_labels=True),
         }
     complete_items: list[dict[str, Any]] = []
     for cid in expected:
@@ -203,7 +211,10 @@ def complete_analytics_result(result: dict[str, Any], selected_news: list[dict[s
             "рынок ИИ ускоряется, а ставки на инфраструктуру и продукты растут."
         )
     else:
-        out["overall_analysis"] = sanitize_reader_description(str(out["overall_analysis"]))
+        out["overall_analysis"] = sanitize_reader_description(
+            str(out["overall_analysis"]),
+            keep_analytics_labels=True,
+        )
     raw_tags = out.get("hashtags", [])
     if isinstance(raw_tags, str):
         out["hashtags"] = [x for x in raw_tags.split() if x]
@@ -463,11 +474,11 @@ class CrewWorkflow:
             selected_news,
         )
 
-    def run_reader_descriptions(self, reader_items: list[dict[str, Any]]) -> dict[str, Any]:
+    def run_reader_descriptions(self, reader_items: list[dict[str, Any]], *, max_chars: int = 450) -> dict[str, Any]:
         task = Task(
             description=self._with_contract(
                 "Сформируй JSON: items[], self_check[]. "
-                f"{_READER_COPY_EDITORIAL} Вход: {json.dumps(reader_items, ensure_ascii=False)}"
+                f"{_reader_copy_editorial(max_chars)} Вход: {json.dumps(reader_items, ensure_ascii=False)}"
             ),
             expected_output="JSON объект с reader_text по каждой новости",
             agent=self.agents.reader_copy,
@@ -475,10 +486,14 @@ class CrewWorkflow:
         crew = Crew(agents=[self.agents.reader_copy], tasks=[task], process=Process.sequential, verbose=False)
         parsed = _extract_json(self._kickoff(crew), {})
         if isinstance(parsed, dict) and parsed.get("items"):
-            return complete_reader_descriptions_result(parsed, reader_items)
+            return complete_reader_descriptions_result(parsed, reader_items, max_chars=max_chars)
         return complete_reader_descriptions_result(
-            {"items": [_fallback_reader_text_item(item) for item in reader_items], "self_check": []},
+            {
+                "items": [_fallback_reader_text_item(item, max_chars=max_chars) for item in reader_items],
+                "self_check": [],
+            },
             reader_items,
+            max_chars=max_chars,
         )
 
     def run_image_prompt(self, hook_variant: str, selected_news: list[dict[str, Any]]) -> str:
@@ -500,11 +515,17 @@ class CrewWorkflow:
     def run_platform_writer(self, payload: dict[str, Any], platforms: list[str] | None = None) -> dict[str, str]:
         target = list(platforms) if platforms else ["telegram", "max", "vk", "dzen"]
         keys_str = ",".join(target)
+        topic = str(payload.get("digest_topic") or "ai")
+        sub_rule = (
+            "Для digest_topic=style подпись ExTellect в финале НЕ добавляется. "
+            if is_style_digest(topic)
+            else f"Подпись в финале будет в одну строку, пример: {subscription_md_inline()!r}. "
+        )
         extra_rules = (
             "Дополнительно к контракту: итоговую вёрстку собирает сервер (platform_assembly) — верни JSON только с полями "
             "telegram_lead, max_lead, dzen_intro (короткие вводные 1–2 предложения для TG/MAX/Дзен). "
             "Не возвращай готовые тексты платформ: сервер сам соберёт markdown (Telegram), HTML (MAX, Дzen) и plain text (VK). "
-            f"Подпись в финале будет в одну строку, пример: {subscription_md_inline()!r}. "
+            f"{sub_rule}"
             "Хэштеги: в telegram и max — 4–6; в vk и dzen — 3–5. "
             "MAX: между новостями разделитель «...» с отступами (<br><br> в HTML). "
             "Верни только JSON с полями telegram_lead, max_lead, dzen_intro."
@@ -534,14 +555,26 @@ class CrewWorkflow:
                 assembly_payload["max_lead"] = max_lead
         return assemble_platform_outputs(assembly_payload, platforms=target)
 
-    def run_qc(self, outputs: dict[str, str], has_ok: bool) -> list[dict[str, str]]:
+    def run_qc(
+        self,
+        outputs: dict[str, str],
+        has_ok: bool,
+        *,
+        digest_topic: str | None = None,
+    ) -> list[dict[str, str]]:
+        sub_check = (
+            "для digest_topic=style подпись ExTellect не требуется,"
+            if is_style_digest(digest_topic)
+            else "подпись ExTellect в каждом блоке (кроме style),"
+        )
         task = Task(
             description=self._with_contract(
                 "Сформируй JSON массив проверок по критериям: "
                 "сноски,cite,инсайт,ссылки в Telegram/MAX только в заголовках новостей,хэштеги (telegram/max 4–6, vk/dzen 3–5),"
-                "подпись ExTellect в каждом блоке,MAX!=Telegram,MAX HTML с <a href> и разделителем ...,"
+                f"{sub_check}"
+                "MAX!=Telegram,MAX HTML с <a href> и разделителем ...,"
                 "Дзен HTML и длина ≤4096,финал после Ок."
-                f"Вход:{outputs}, has_ok={has_ok}"
+                f"Вход:{outputs}, has_ok={has_ok}, digest_topic={digest_topic or 'ai'}"
             ),
             expected_output="JSON массив check_name,status,comment",
             agent=self.agents.quality_control,

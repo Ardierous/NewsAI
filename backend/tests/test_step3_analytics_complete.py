@@ -79,6 +79,33 @@ def test_complete_analytics_strips_service_markers():
     assert "Tier" not in out["overall_analysis"]
 
 
+def test_complete_analytics_keeps_step3_section_labels():
+    selected = [
+        {"candidate_id": 1, "title": "Тест", "source": "S", "url": "https://a.example", "published_at": ""},
+    ]
+    analysis = (
+        "Аудитория: специалисты по кибербезопасности и финансовые организации. "
+        "Почему важно: растут риски ИИ в атаках на банки. "
+        "Польза: можно заранее усилить защиту. "
+        "Вред: паника без фактов. "
+        "Возможные последствия: банки ускорят контроль доступа."
+    )
+    out = complete_analytics_result(
+        {
+            "items": [{"candidate_id": 1, "essence": "Суть", "comment": "Заметка", "analysis": analysis}],
+            "overall_analysis": "Общий вывод",
+            "hashtags": ["#ИИ"],
+            "self_check": [],
+        },
+        selected,
+    )
+    saved = out["items"][0]["analysis"]
+    assert "Почему важно:" in saved
+    assert "Польза:" in saved
+    assert "Вред:" in saved
+    assert "Возможные последствия:" in saved
+
+
 def test_analytics_prompt_is_editor_facing():
     prompt = _ANALYTICS_EDITORIAL.lower()
     assert "для редактора" in prompt
@@ -96,11 +123,11 @@ def test_analytics_prompt_requires_overall_analysis_on_step3():
     assert "overall_analysis_from_selected_five" in prompt
 
 
-def test_reader_copy_prompt_requires_three_to_four_sentences():
+def test_reader_copy_prompt_requires_short_plain_sentences():
     prompt = _READER_COPY_EDITORIAL.lower()
-    assert "3–4 предложения" in prompt
+    assert "предложения" in prompt
     assert "article_excerpt" in prompt
-    assert "reader_text_3_4_sentences" in prompt
+    assert "reader_text_max_" in prompt
 
 
 def test_complete_reader_descriptions_fills_missing():

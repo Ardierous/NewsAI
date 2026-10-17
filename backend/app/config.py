@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     step1_urls_checked_per_collect: int = 24
     step1_soft_time_limit_sec: int = 90
     step1_hard_time_limit_sec: int = 150
-    step1_max_candidates_for_ui: int = 20
+    step1_max_candidates_for_ui: int = 25
     step1_verify_workers: int = 6
     step1_crew_fallback_only_if_empty: bool = True
     step1_crew_enrich_verified_scores: bool = False
@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     step1_serious_use_curious_tiers: bool = True
     step1_serious_curious_search_batches: int = 4
     step1_serious_curious_extra_batches: int = 0
-    step1_first_offer_min_candidates: int = 15
+    step1_first_offer_min_candidates: int = 20
     step1_telegram_monitor_enabled: bool = True
     step1_telegram_monitor_channels: str = "technokratos"
     step1_telegram_max_pages: int = 2

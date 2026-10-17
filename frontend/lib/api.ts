@@ -143,7 +143,11 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ value }),
     }),
-  createTodayDigest: () => request<any>("/digests/create", { method: "POST" }),
+  createTodayDigest: (opts?: { digest_topic?: "ai" | "style" }) =>
+    request<any>("/digests/create", {
+      method: "POST",
+      body: JSON.stringify(opts?.digest_topic ? { digest_topic: opts.digest_topic } : {}),
+    }),
   getDigest: (id: number) => request<any>(`/digests/${id}`),
   step0: (
     id: number,
@@ -378,6 +382,25 @@ export const api = {
       release_cost_rub: number;
       finalized_at: string | null;
     }>(`/digests/${id}/finalize`, { method: "POST", body: "{}" }),
+  downloadStyleMaxExtendedPdf: async (id: number) => {
+    const res = await fetch(`${API_BASE}/digests/${id}/export/style-max-extended.pdf`, { cache: "no-store" });
+    if (!res.ok) {
+      throw new Error(await readErrorMessage(res));
+    }
+    const blob = await res.blob();
+    const fromHeader = res.headers.get("content-disposition") || "";
+    const match = /filename="?([^";]+)"?/i.exec(fromHeader);
+    const filename = match?.[1] || `style_max_extended_id${id}.pdf`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.rel = "noopener";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  },
 };
 
 export const assetUrl = (id: number, type: "docx" | "image", variant?: number) => {

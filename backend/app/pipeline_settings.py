@@ -36,7 +36,7 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "urls_checked_per_collect": 24,
             "soft_time_limit_sec": 90,
             "hard_time_limit_sec": 150,
-            "max_candidates_for_ui": 15,
+            "max_candidates_for_ui": 25,
             "verify_workers": 6,
             "crew_fallback_only_if_empty": True,
             "crew_enrich_verified_scores": False,
@@ -47,7 +47,7 @@ def _bootstrap_pipeline_config() -> dict[str, Any]:
             "serious_use_curious_tiers": True,
             "serious_curious_search_batches": 4,
             "serious_curious_extra_batches": 0,
-            "first_offer_min_candidates": 15,
+            "first_offer_min_candidates": 20,
             "telegram_monitor_enabled": True,
             "telegram_monitor_channels": "technokratos",
             "telegram_max_pages": 2,
@@ -239,7 +239,7 @@ def normalize_pipeline_config(raw: dict[str, Any] | None) -> dict[str, Any]:
     step1["first_offer_min_candidates"] = _int(
         step1_raw,
         "first_offer_min_candidates",
-        step1.get("first_offer_min_candidates", 15),
+        step1.get("first_offer_min_candidates", 20),
         lo=10,
         hi=30,
     )

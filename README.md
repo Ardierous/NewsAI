@@ -248,9 +248,9 @@ PROXYAPI_API_KEY=ваш_ключ
 | `hard_time_limit_sec` | 600 | жёсткий таймаут |
 | `tier_max_web_search_batches` | 8 | батчей ProxyAPI за tier-проход |
 | `max_cost_rub` | 50 | бюджет ProxyAPI на шаг 1 |
-| `max_candidates_for_ui` | 20 | целевой размер пула в UI |
-| `first_offer_min_candidates` | 15 | минимальный размер первого предложения пула (добор без пересборки) |
-| `serious_curious_extra_batches` | 0–10 | усиление курьёзного добора в unified режиме |
+| `max_candidates_for_ui` | 25 | верхняя граница пула в UI |
+| `first_offer_min_candidates` | 20 | минимальный размер первого предложения пула (добор без пересборки) |
+| `serious_curious_extra_batches` | 0–10 | усиление курьёзного добора в unified режиме (ползунок шага 0) |
 | `verify_workers` | 8 | параллельные HTTP-проверки |
 | `crew_fallback_only_if_empty` | true | Crew только если verified = 0 |
 | `crew_enrich_verified_scores` | true | доп. скоринг ScoringAgent по verified |

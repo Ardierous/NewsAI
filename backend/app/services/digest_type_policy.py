@@ -265,6 +265,27 @@ def curious_ru_share_bounds() -> tuple[float, float]:
     return 0.55, 0.85
 
 
+def resolve_curious_mix_ratio(slider: int | float | None) -> float:
+    """Ориентир доли курьёзных в пуле: ползунок N (1–10) → ~N×10% (макс. 90% при N=10).
+
+    Мягкий ориентир, не жёсткая квота: 5 → 0.5, 7 → 0.7, 10 → 0.9.
+    """
+    try:
+        n = int(slider) if slider is not None else 5
+    except (TypeError, ValueError):
+        n = 5
+    n = max(1, min(10, n))
+    return min(0.9, n / 10.0)
+
+
+def curious_mix_target_count(pool_size: int, slider: int | float | None) -> int:
+    """Сколько курьёзных карточек целимся набрать в пуле данного размера."""
+    size = max(0, int(pool_size or 0))
+    if size <= 0:
+        return 0
+    return max(0, min(size, int(round(size * resolve_curious_mix_ratio(slider)))))
+
+
 def step1_product_excludes_for_digest_type(digest_type: str | None) -> str:
     _ = normalize_digest_type(digest_type)
     return _STEP1_PRODUCT_EXCLUDES_COMMON + _STEP1_PRODUCT_EXCLUDES_SERIOUS_EXTRA

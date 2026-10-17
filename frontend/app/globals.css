@@ -55,7 +55,38 @@ button.btn-rebuild:active:not(:disabled) {
 }
 
 button:disabled {
-  background: #475569;
+  background: #334155;
+  border: 1px solid #475569;
+  color: #94a3b8;
+  opacity: 0.7;
+  cursor: not-allowed;
+  box-shadow: none;
+  font-weight: 400;
+}
+
+/* Шаг 0: яркая, когда нужно сохранить; бледная, когда уже сохранено */
+button.btn-step0-save {
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+  border: 2px solid #38bdf8;
+  color: #f8fafc;
+  font-weight: 600;
+  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.2);
+}
+
+button.btn-step0-save:hover:not(:disabled) {
+  background: linear-gradient(180deg, #3b82f6 0%, #2563eb 100%);
+  border-color: #7dd3fc;
+}
+
+button.btn-step0-save:disabled {
+  background: #334155;
+  border: 1px solid #475569;
+  color: #94a3b8;
+  opacity: 0.7;
+  font-weight: 400;
+  box-shadow: none;
   cursor: not-allowed;
 }
 
@@ -294,6 +325,18 @@ input[type="checkbox"] {
 
 .step4-copy-all-bar .step4-home-btn {
   margin-left: auto;
+  /* Как активные кнопки копирования: яркая, когда можно перейти */
+  background: #4f46e5;
+  border: none;
+  color: #fff;
+  font-weight: 600;
+  padding: 10px 14px;
+}
+
+.step4-copy-all-bar .step4-home-btn:hover {
+  background: #6366f1;
+  border-color: transparent;
+  color: #fff;
 }
 
 .step4-copy-all-feedback {

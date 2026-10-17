@@ -161,6 +161,16 @@ def test_ai_topic_accepts_ai_headline_even_if_corpus_too_short():
     assert ds._ai_digest_topic_matches("", "ChatGPT: обновление API для разработчиков") is True
 
 
+def test_ai_topic_keeps_article_if_ai_mentioned_even_on_fashion_site():
+    corpus = (
+        "Кутюр против ИИ. Да, это то, что не заменит искусственный интеллект. "
+        "Русский кутюр и высокая мода остаются ручным ремеслом."
+    )
+    title = "Актриса Софья Эрнст — кутюрье Марии Белик: «Кутюр выбирают те, кто готов вкладываться в смыслы»"
+    assert ds._ai_digest_topic_matches(corpus, title) is True
+    assert ds._digest_topic_matches(corpus, title, digest_topic="ai") is True
+
+
 def test_article_markers_detects_article_element():
     chunk = '<html><body><article><h1>Нейросеть и ИИ</h1><p>Текст</p></article></body></html>'
     assert ds._has_article_markers(chunk, []) is True
@@ -564,6 +574,19 @@ def test_choose_coherent_headline_prefers_longer_h1_over_truncated_og():
 def test_title_looks_truncated_detects_mid_word_cut():
     assert ds._title_looks_truncated("Как Google Search помогает организовать идеальный ужин: AI-и")
     assert not ds._title_looks_truncated("OpenAI выпустила обновление API для разработчиков.")
+
+
+def test_clean_headline_text_restores_missing_opening_guillemet():
+    fixed = ds._clean_headline_text(
+        "Мы давно вышли за рамки вайбов»: Антон Осика из Lovable о том, кто должен создавать ПО"
+    )
+    assert fixed.startswith("«Мы давно")
+    assert "вайбов»:" in fixed
+    numbered = ds._clean_headline_text(
+        "11. Я — охотник на ложь»: Трамп усиливает свою атаку на предупреждения о безопасности ИИ"
+    )
+    assert numbered.startswith("11. «Я — охотник")
+    assert ds._clean_headline_text("«Уже нормально»: текст") == "«Уже нормально»: текст"
 
 
 def test_mass_http_unreachable_connectivity_hint():

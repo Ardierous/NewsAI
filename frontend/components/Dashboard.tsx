@@ -123,6 +123,7 @@ export function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [progressLabel, setProgressLabel] = useState("");
   const [showArchiveModal, setShowArchiveModal] = useState(false);
+  const [createTopic, setCreateTopic] = useState<"ai" | "style">("ai");
 
   const { visible: visibleDigests, archive: archiveDigests } = splitDigestsForDashboard(digests);
 
@@ -151,7 +152,7 @@ export function Dashboard() {
     setLoading(true);
     try {
       setError("");
-      const created = await api.createTodayDigest();
+      const created = await api.createTodayDigest({ digest_topic: createTopic });
       window.location.href = `/digests/${created.id}`;
     } catch (e) {
       setError((e as Error).message);
@@ -183,8 +184,39 @@ export function Dashboard() {
             </p>
           </div>
         </details>
+        <fieldset className="wizard-radio-group" style={{ marginTop: 14, marginBottom: 4 }}>
+          <legend>Тематика выпуска на сегодня</legend>
+          <label className="wizard-radio-option">
+            <input
+              type="radio"
+              name="createDigestTopic"
+              value="ai"
+              checked={createTopic === "ai"}
+              disabled={loading}
+              onChange={() => setCreateTopic("ai")}
+            />
+            Дайджест ИИ
+          </label>
+          <label className="wizard-radio-option">
+            <input
+              type="radio"
+              name="createDigestTopic"
+              value="style"
+              checked={createTopic === "style"}
+              disabled={loading}
+              onChange={() => setCreateTopic("style")}
+            />
+            Стиль (мода)
+          </label>
+        </fieldset>
+        <p className="wizard-hint-do" style={{ margin: "8px 0 0", fontSize: "0.88rem", color: "#94a3b8" }}>
+          На одну дату можно вести отдельно выпуск <strong>ИИ</strong> и выпуск <strong>Стиль</strong> — выбор здесь
+          открывает нужный.
+        </p>
         <button type="button" disabled={loading} onClick={createDigest} style={{ marginTop: 12 }}>
-          Создать или открыть сегодняшний дайджест
+          {createTopic === "style"
+            ? "Создать или открыть сегодняшний выпуск «Стиль»"
+            : "Создать или открыть сегодняшний дайджест ИИ"}
         </button>
       </div>
       {error && <div className="card">{error}</div>}

@@ -6,6 +6,7 @@ from app.services.platform_assembly import (
     HEADER_TITLE,
     HEADER_TITLE_CURIOUS,
     HEADER_TITLE_SERIOUS,
+    HEADER_TITLE_STYLE,
     MAX_NEWS_SEP,
     MAX_PLATFORM_MAX_CHARS,
     assemble_dzen,
@@ -89,6 +90,13 @@ def test_max_html_header_links_and_inline_subscription():
     sub_end = text.index("boosty.to/extellect")
     tags_start = text.index("#ИИ", sub_end)
     assert "<br><br>" in text[sub_end:tags_start]
+
+
+def test_max_uses_content_based_lead_by_default():
+    text = assemble_max(_sample_payload())
+    assert "В выпуске:" in text
+    assert "Компания объединяет ChatGPT и Codex." in text
+    assert "Коротко: деловые, практичные и неожиданные истории про ИИ и нейросети за этот период." not in text
 
 
 def test_vk_hashtags_separated_from_subscription():
@@ -225,10 +233,61 @@ def test_style_topic_outputs_without_subscription_signature():
     assert "Подпишитесь на ExTellect" not in vk
     assert "Подпишитесь на ExTellect" not in max_text
     assert "Подпишитесь на ExTellect" not in dzen
-    assert "#ИИ" in tg
-    assert "#ИИ" in vk
-    assert "#ИИ" in max_text
-    assert "#ИИ" in dzen
+    assert f"<b>{HEADER_TITLE_STYLE} | 16 мая 2026</b>" in max_text
+    assert "про ИИ" not in max_text
+    assert "#мода" in max_text or "#стиль" in max_text
+    assert len(max_text) <= MAX_PLATFORM_MAX_CHARS
+
+
+def test_style_max_uses_reader_text_without_analytics_scaffold():
+    news = {
+        "title": "Новая коллекция на неделе моды",
+        "url": "https://example.com/style-1",
+        "reader_text": (
+            "Коллекция сочетает красный total look и прозрачные ткани. "
+            "Дизайнеры делают акцент на удобстве повседневной носки."
+        ),
+        "essence": "Коллекция сочетает красный total look и прозрачные ткани.",
+        "summary_short": "Кратко.",
+        "summary": (
+            "Дубль для аналитики. Аудитория: стилисты. Почему важно: задаёт тренд. "
+            "Польза: можно планировать закупки."
+        ),
+    }
+    payload = {
+        "date": "2026-05-16",
+        "digest_topic": "style",
+        "hashtags": ["#мода"],
+        "selected_news": [news, news, news, news, news],
+    }
+    max_text = assemble_max(payload)
+    assert "удобстве повседневной носки." in max_text
+    assert "Аудитория:" not in max_text
+    assert "Почему важно:" not in max_text
+    assert "…" not in max_text
+    assert len(max_text) <= MAX_PLATFORM_MAX_CHARS
+
+
+def test_style_max_fills_budget_with_long_reader_blocks():
+    sentence = "Подробное описание тренда и деталей образа для читателя. "
+    news = {
+        "title": "Новость моды",
+        "url": "https://example.com/style-n",
+        "reader_text": sentence * 12,
+        "summary_short": "",
+        "essence": "",
+        "summary": "",
+    }
+    payload = {
+        "date": "2026-10-16",
+        "digest_topic": "style",
+        "hashtags": ["#мода", "#стиль", "#fashion", "#тренды"],
+        "selected_news": [news, news, news, news, news],
+    }
+    max_text = assemble_max(payload)
+    assert len(max_text) >= 3200
+    assert len(max_text) <= MAX_PLATFORM_MAX_CHARS
+    assert max_text.count("Подробное описание тренда") >= 5
 
 
 def test_needs_html_layout_refresh_accepts_style_html_without_subscription():

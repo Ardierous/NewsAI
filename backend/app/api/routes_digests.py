@@ -19,6 +19,7 @@ from app.services.step1_manual_ratings_export import sync_step1_manual_ratings_e
 from app.schemas import (
     CandidateOut,
     CommandRequest,
+    DigestCreateRequest,
     DigestCreateResponse,
     DigestDetail,
     DigestItem,
@@ -61,9 +62,13 @@ def _candidate_row_is_demo_placeholder(c: NewsCandidate) -> bool:
 
 
 @router.post("/create", response_model=DigestCreateResponse)
-def create_digest(db: Session = Depends(get_db)) -> DigestCreateResponse:
+def create_digest(
+    payload: DigestCreateRequest | None = None,
+    db: Session = Depends(get_db),
+) -> DigestCreateResponse:
     service = DigestService(db)
-    digest = service.create_digest_for_today()
+    topic = payload.digest_topic if payload else None
+    digest = service.create_digest_for_today(digest_topic=topic)
     return DigestCreateResponse(id=digest.id, date=digest.date, status=digest.status, current_step=digest.current_step)
 
 
@@ -573,6 +578,13 @@ def get_final_blocks(digest_id: int, db: Session = Depends(get_db)) -> dict:
     service.get_digest(digest_id)
     rows = db.query(FinalOutput).filter(FinalOutput.digest_id == digest_id).all()
     return {row.platform: row.content for row in rows}
+
+
+@router.get("/{digest_id}/export/style-max-extended.pdf")
+def download_style_max_extended_pdf(digest_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    service = DigestService(db)
+    path = service.export_style_max_extended_pdf(digest_id)
+    return FileResponse(path=str(path), filename=path.name, media_type="application/pdf")
 
 
 @router.get("/{digest_id}/docx")

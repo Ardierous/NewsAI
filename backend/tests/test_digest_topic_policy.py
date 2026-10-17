@@ -25,6 +25,7 @@ def test_normalize_digest_topic_defaults_to_ai() -> None:
 def test_style_topic_matches_fashion_material() -> None:
     assert style_digest_topic_matches("", "Неделя моды в Милане: главные тренды сезона") is True
     assert style_digest_topic_matches("новая коллекция одежды", "Дизайнер представил lookbook") is True
+    assert style_digest_topic_matches("", "Актриса Софья Эрнст — кутюрье Марии Белик: кутюр и смыслы") is True
 
 
 def test_style_topic_rejects_homonyms() -> None:

@@ -33,8 +33,25 @@ _SERVICE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Шаблон аналитики шага 3 (не для читателя на площадках).
+_ANALYTICS_SCAFFOLD_RE = re.compile(
+    r"\s+(?:Аудитория|Почему важно|Польза|Вред|Возможные последствия)\s*:",
+    re.IGNORECASE,
+)
 
-def sanitize_reader_description(text: str) -> str:
+
+def strip_analytics_scaffold(text: str) -> str:
+    """Обрезает служебные блоки «Аудитория: … Почему важно: …» из текста для читателя."""
+    s = " ".join(str(text or "").split()).strip()
+    if not s:
+        return ""
+    match = _ANALYTICS_SCAFFOLD_RE.search(s)
+    if match:
+        s = s[: match.start()].strip()
+    return s
+
+
+def sanitize_reader_description(text: str, *, keep_analytics_labels: bool = False) -> str:
     """Убирает служебную информацию и штампы из текста для площадок."""
     s = str(text or "").strip()
     if not s:
@@ -44,14 +61,17 @@ def sanitize_reader_description(text: str) -> str:
     for pref in _BANNED_PREFIXES:
         if s.lower().startswith(pref):
             s = s[len(pref) :].strip()
-    low = s.lower()
     for phrase in _BANNED_PHRASES:
         s = re.sub(re.escape(phrase), "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s{2,}", " ", s).strip(" ,;.")
+    if not keep_analytics_labels:
+        s = strip_analytics_scaffold(s)
     return s
 
 
 READER_TEXT_MAX_CHARS = 450
+# Тема «Стиль»: один пост MAX на 5 новостей — можно длиннее, чем для ИИ.
+READER_TEXT_MAX_CHARS_STYLE = 1000
 
 
 def _trim_to_sentences(text: str, max_sentences: int, *, max_chars: int | None = None) -> str:
@@ -64,8 +84,19 @@ def _trim_to_sentences(text: str, max_sentences: int, *, max_chars: int | None =
         return s
     result = " ".join(parts[:max_sentences])
     if max_chars is not None and len(result) > max_chars:
-        cut = result[:max_chars].rsplit(". ", 1)
-        result = (cut[0] + ".") if len(cut) > 1 else result[:max_chars].rstrip() + "…"
+        parts_fit: list[str] = []
+        cur = 0
+        for part in parts:
+            add = len(part) + (1 if parts_fit else 0)
+            if cur + add > max_chars:
+                break
+            parts_fit.append(part)
+            cur += add
+        if parts_fit:
+            result = " ".join(parts_fit)
+        else:
+            cut = result[:max_chars].rsplit(". ", 1)
+            result = (cut[0] + ".") if len(cut) > 1 and cut[0] else result[:max_chars].rstrip(" ,;:-") + "."
     return result
 
 

@@ -5,6 +5,18 @@ from app.services.reader_copy import (
 )
 
 
+def test_sanitize_keeps_analytics_labels_when_asked():
+    raw = (
+        "Аудитория: банки. Почему важно: риск атак. "
+        "Польза: можно усилить защиту. Вред: паника. Возможные последствия: аудит."
+    )
+    stripped = sanitize_reader_description(raw)
+    kept = sanitize_reader_description(raw, keep_analytics_labels=True)
+    assert "Почему важно:" not in stripped
+    assert "Почему важно:" in kept
+    assert "Польза:" in kept
+
+
 def test_sanitize_strips_tier_and_stamps():
     raw = "Ключевая суть: Tier-2 кандидат. Это важно для рынка ИИ."
     out = sanitize_reader_description(raw)

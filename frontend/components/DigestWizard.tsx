@@ -1192,6 +1192,26 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
+function groupStep2CandidatesByDomain(candidates: Step2PickCandidate[]) {
+  const groups = new Map<string, Step2PickCandidate[]>();
+  for (const c of candidates) {
+    const host = publisherHostForCandidate(c) || "—";
+    const list = groups.get(host) ?? [];
+    list.push(c);
+    groups.set(host, list);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b, "ru"))
+    .map(([host, items]) => ({
+      host,
+      items: [...items].sort((a, b) => a.original_number - b.original_number),
+    }));
+}
+
+function step2CandidatesInUiOrder(candidates: Step2PickCandidate[]): Step2PickCandidate[] {
+  return groupStep2CandidatesByDomain(candidates).flatMap((g) => g.items);
+}
+
 function candidateChecksSummary(c: Step2PickCandidate): string {
   const reliability = String(c.reliability_status || "статус не задан");
   const headline = headlineEditorialOk(c) ? "заголовок читабельный" : "заголовок не готов";
@@ -1347,7 +1367,6 @@ export function DigestWizard({ digestId }: Props) {
   const [step4Elapsed, setStep4Elapsed] = useState(0);
   const [newsWindowDays, setNewsWindowDays] = useState(3);
   const [newsWindowDayKind, setNewsWindowDayKind] = useState<"calendar" | "working">("working");
-  const [digestTopic, setDigestTopic] = useState<"ai" | "style">("ai");
   const [step1CuriousBalance, setStep1CuriousBalance] = useState(3);
   const [savedStep1CuriousBalance, setSavedStep1CuriousBalance] = useState<number | null>(null);
   const [showAllFoundNews, setShowAllFoundNews] = useState(false);
@@ -1437,6 +1456,16 @@ export function DigestWizard({ digestId }: Props) {
     },
     [flashCopyFeedback],
   );
+
+  const handleDownloadStyleMaxExtendedPdf = useCallback(async () => {
+    try {
+      await api.downloadStyleMaxExtendedPdf(digestId);
+      flashCopyFeedback("style_max_pdf", true);
+    } catch (e) {
+      flashCopyFeedback("style_max_pdf", false);
+      setError(e instanceof Error ? e.message : "Не удалось скачать PDF");
+    }
+  }, [digestId, flashCopyFeedback]);
 
   const splitTelegramForImageCaption = useCallback((text: string): { caption: string; post: string } => {
     const raw = String(text || "").trim();
@@ -1540,10 +1569,6 @@ export function DigestWizard({ digestId }: Props) {
     if (kind === "working" || kind === "calendar") {
       setNewsWindowDayKind(kind);
     }
-    const topic = d.digest_topic;
-    if (topic === "ai" || topic === "style") {
-      setDigestTopic(topic);
-    }
   }, [digestId, digest?.digest]);
 
   useEffect(() => {
@@ -1622,30 +1647,23 @@ export function DigestWizard({ digestId }: Props) {
     () => [...(digest?.candidates || [])].sort((a, b) => a.original_number - b.original_number),
     [digest],
   );
-  const step2CandidatesTelegramText = useMemo(
-    () => buildStep2CandidatesTelegramText(candidatesSorted as Step2PickCandidate[]),
+  const step2CandidatesForCopy = useMemo(
+    () => step2CandidatesInUiOrder(candidatesSorted as Step2PickCandidate[]),
     [candidatesSorted],
+  );
+  const step2CandidatesTelegramText = useMemo(
+    () => buildStep2CandidatesTelegramText(step2CandidatesForCopy),
+    [step2CandidatesForCopy],
   );
   const step2CandidatesMaxHtml = useMemo(
-    () => buildStep2CandidatesMaxHtml(candidatesSorted as Step2PickCandidate[]),
-    [candidatesSorted],
+    () => buildStep2CandidatesMaxHtml(step2CandidatesForCopy),
+    [step2CandidatesForCopy],
   );
 
-  const candidatesGroupedByDomain = useMemo(() => {
-    const groups = new Map<string, typeof candidatesSorted>();
-    for (const c of candidatesSorted) {
-      const host = publisherHostForCandidate(c) || "—";
-      const list = groups.get(host) ?? [];
-      list.push(c);
-      groups.set(host, list);
-    }
-    return [...groups.entries()]
-      .sort(([a], [b]) => a.localeCompare(b, "ru"))
-      .map(([host, items]) => ({
-        host,
-        items: [...items].sort((a, b) => a.original_number - b.original_number),
-      }));
-  }, [candidatesSorted]);
+  const candidatesGroupedByDomain = useMemo(
+    () => groupStep2CandidatesByDomain(candidatesSorted as Step2PickCandidate[]),
+    [candidatesSorted],
+  );
 
   useEffect(() => {
     lastSelectedUrlsRef.current = selected
@@ -2678,6 +2696,8 @@ export function DigestWizard({ digestId }: Props) {
     return false;
   }, [candidatesSorted.length, digest?.digest?.status, step1CollectionInProgress]);
 
+  const digestTopic: "ai" | "style" =
+    digest?.digest?.digest_topic === "style" ? "style" : "ai";
   const isStyleTopic = digestTopic === "style";
   const stepThemeAccent = isStyleTopic ? "#ec4899" : "#38bdf8";
 
@@ -2713,9 +2733,6 @@ export function DigestWizard({ digestId }: Props) {
     if (!d) return false;
     const status = String(d.status || "");
     if (status === "" || status === "draft") return true;
-
-    const savedTopic = d.digest_topic === "style" ? "style" : "ai";
-    if (digestTopic !== savedTopic) return true;
 
     const savedDays = Math.max(1, Math.min(90, Number(d.news_window_days) || 3));
     if (newsWindowDays !== savedDays) return true;
@@ -2927,7 +2944,7 @@ export function DigestWizard({ digestId }: Props) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
           <h3 style={{ margin: 0 }}>
             <StepTopicDot />
-            Шаг 0 — тематика, тон и окно новостей
+            Шаг 0 — окно новостей{!isStyleTopic ? " и тон" : ""}
           </h3>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
@@ -2948,48 +2965,32 @@ export function DigestWizard({ digestId }: Props) {
           </div>
         </div>
         <StepProgressBar active={runningStepKey === "0" || runningStepKey === "init"} />
+        <p className="wizard-hint-do" style={{ marginBottom: 12 }}>
+          Выпуск:{" "}
+          <strong style={{ color: isStyleTopic ? "#f9a8d4" : "#7dd3fc" }}>
+            {isStyleTopic ? "Стиль (мода)" : "Дайджест ИИ"}
+          </strong>
+          . Тематику выбирают на{" "}
+          <Link href="/" style={{ color: "#7dd3fc" }}>
+            главной
+          </Link>
+          ; здесь настраивается только окно поиска
+          {!isStyleTopic ? " и баланс серьёзный/курьёзный" : ""}.
+        </p>
         <p className="wizard-hint-do">
-          Выберите <strong>тематику</strong> выпуска и окно по дате публикации.
           {isStyleTopic ? (
             <>
-              {" "}
-              Для темы <strong>«Стиль»</strong> по умолчанию ставится окно{" "}
-              <strong>7 календарных дней</strong>; тон общий нейтральный — кнопки тона скрыты. Нажмите{" "}
-              <strong>«Сохранить тематику»</strong> и дождитесь полоски загрузки.
+              Для <strong>«Стиль»</strong> обычно окно <strong>7 календарных дней</strong>. Нажмите{" "}
+              <strong>«Сохранить параметры шага 0»</strong> и дождитесь полоски загрузки.
             </>
           ) : (
             <>
-              {" "}
-              Режим выпуска — <strong>«Дайджест ИИ»</strong> (деловые, практичные и умеренно развлекательные новости).
-              Нажмите <strong>«Сохранить параметры шага 0»</strong> и дождитесь полоски загрузки.
+              Настройте окно и ползунок курьёзности, нажмите <strong>«Сохранить параметры шага 0»</strong> и дождитесь
+              полоски загрузки.
             </>
           )}{" "}
-          Если в выпуске уже есть собранные шаги, смена тематики создаст/откроет отдельный выпуск этой же даты под новую тему.
-          После успеха статус в шапке станет{" "}
-          <code>step_0</code> — откроется шаг 1.
+          После успеха статус в шапке станет <code>step_0</code> — откроется шаг 1.
         </p>
-        <label style={{ display: "block", marginBottom: 12 }}>
-          Тематика:{" "}
-          <select
-            value={digestTopic}
-            disabled={loading}
-            onChange={(e) => {
-              const next = e.target.value === "style" ? "style" : "ai";
-              setDigestTopic(next);
-              if (next === "style") {
-                setNewsWindowDays(7);
-                setNewsWindowDayKind("calendar");
-              } else {
-                setNewsWindowDays(3);
-                setNewsWindowDayKind("working");
-              }
-            }}
-            style={{ marginLeft: 6, padding: "6px 8px", borderRadius: 6 }}
-          >
-            <option value="ai">Искусственный интеллект</option>
-            <option value="style">Стиль (мода)</option>
-          </select>
-        </label>
         <label style={{ display: "block", marginBottom: 8 }}>
           Окно поиска (дней от даты выпуска):{" "}
           <input
@@ -3042,22 +3043,25 @@ export function DigestWizard({ digestId }: Props) {
               style={{ width: "100%", marginTop: 8 }}
             />
             <div style={{ display: "flex", justifyContent: "space-between", color: "#94a3b8", fontSize: "0.85rem", marginTop: 4 }}>
-              <span>1 — больше серьёзных</span>
-              <span>10 — больше курьёзных</span>
+              <span>1 — ~10% курьёзных</span>
+              <span>5 — ~50%</span>
+              <span>10 — ~90% курьёзных</span>
             </div>
+            <p style={{ margin: "6px 0 0", fontSize: "0.85rem", color: "#94a3b8" }}>
+              Ориентир доли курьёзных/смешных в пуле ≈ значение ползунка × 10% (не жёсткая квота).
+            </p>
           </label>
         ) : null}
         <WizardWhy summary="Зачем тематика и режим важны">
           <p>
-            <strong>Тематика</strong> определяет, какие источники и ключевые слова использует поиск на шаге 1, и как
-            формируются тексты на шагах 3–4. <strong>ИИ</strong> — единый режим «Дайджест ИИ»: деловые новости,
-            практичные обзоры инструментов и умеренно курьёзные истории про нейросети.{" "}
-            <strong>Стиль</strong> — отдельный пул fashion-источников и фильтры по моде/одежде.
+            <strong>ИИ</strong> или <strong>Стиль</strong> выбирается на главной при создании выпуска. От темы зависят
+            источники, поиск на шаге 1 и тексты на шагах 3–4.
           </p>
           {!isStyleTopic ? (
             <p>
-              Отдельного переключателя «серьёзный/курьёзный» больше нет: разнообразие обеспечивает автоматический добор
-              источников на шаге 1.
+              Ползунок <strong>«Баланс серьёзный ↔ курьёзный»</strong> задаёт ориентир доли курьёзных в пуле:
+              значение N ≈ N×10% (при 5 — около половины, при 7 — около 70%). После сохранения параметров шага 0
+              это влияет на добор и отбор кандидатов на шаге 1.
             </p>
           ) : (
             <p>
@@ -3071,58 +3075,25 @@ export function DigestWizard({ digestId }: Props) {
             <strong>запуске или пересборке шага 1</strong> сервер берёт текущие значения из полей шага 0.
           </p>
         </WizardWhy>
-        {isStyleTopic ? (
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
-            <button
-              type="button"
-              disabled={loading || !step0NeedsSave}
-              style={{
-                padding: "10px 16px",
-                borderRadius: 8,
-                cursor: loading || !step0NeedsSave ? "not-allowed" : "pointer",
-                border: step0NeedsSave ? "1px solid #475569" : "2px solid #38bdf8",
-                background: step0NeedsSave ? "#1e293b" : "#1e3a5f",
-                color: "#e2e8f0",
-                fontWeight: step0NeedsSave ? 400 : 600,
-              }}
-              onClick={() => runStep0("Сохранение тематики: стиль…", { digest_type: "serious", ...step0ApiOpts() })}
-            >
-              {step0NeedsSave ? "Сохранить тематику" : "Параметры шага 0 сохранены"}
-            </button>
-          </div>
-        ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 8 }}>
-          <p style={{ margin: 0, fontSize: "0.95rem", color: "#cbd5e1" }}>
-            Режим выпуска: <strong style={{ color: "#e2e8f0" }}>Дайджест ИИ</strong> — объединяет деловые, практичные и
-            умеренно развлекательные материалы про искусственный интеллект.
-          </p>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              type="button"
-              disabled={loading || !step0NeedsSave}
-              style={{
-                padding: "10px 16px",
-                borderRadius: 8,
-                cursor: loading || !step0NeedsSave ? "not-allowed" : "pointer",
-                border: !step0NeedsSave ? "2px solid #38bdf8" : "1px solid #475569",
-                background: !step0NeedsSave ? "#1e3a5f" : "#1e293b",
-                color: "#e2e8f0",
-                fontWeight: !step0NeedsSave ? 600 : 400,
-              }}
-              title={
-                step0NeedsSave
-                  ? "Сохранить тематику, окно новостей и баланс серьёзный/курьёзный перед запуском шага 1."
-                  : "Параметры шага 0 уже сохранены — повторно нажимать не требуется."
-              }
-              onClick={() =>
-                runStep0("Сохранение параметров шага 0…", { digest_type: "serious", ...step0ApiOpts() })
-              }
-            >
-              {!step0NeedsSave && step0Saved ? "Параметры шага 0 сохранены" : "Сохранить параметры шага 0"}
-            </button>
-          </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <button
+            type="button"
+            className="btn-step0-save"
+            disabled={loading || !step0NeedsSave}
+            title={
+              step0NeedsSave
+                ? isStyleTopic
+                  ? "Сохранить окно новостей перед запуском шага 1."
+                  : "Сохранить окно новостей и баланс серьёзный/курьёзный перед запуском шага 1."
+                : "Параметры шага 0 уже сохранены — повторно нажимать не требуется."
+            }
+            onClick={() =>
+              runStep0("Сохранение параметров шага 0…", { digest_type: "serious", ...step0ApiOpts() })
+            }
+          >
+            {!step0NeedsSave && step0Saved ? "Параметры шага 0 сохранены" : "Сохранить параметры шага 0"}
+          </button>
         </div>
-        )}
       </div>
 
       <div className="card" ref={step1CardRef}>
@@ -4964,6 +4935,28 @@ export function DigestWizard({ digestId }: Props) {
                       </div>
                     );
                   }
+                  if (o.platform === "max" && isStyleTopic) {
+                    return (
+                      <div key={o.platform} className="step4-telegram-copy-stack">
+                        <button
+                          type="button"
+                          className="step4-copy-btn"
+                          onClick={() => void handleCopyPlatform(o.platform, String(o.content ?? ""))}
+                        >
+                          Скопировать для {label}
+                        </button>
+                        <button
+                          type="button"
+                          className="step4-copy-btn step4-copy-btn--compact"
+                          disabled={loading || (digest?.selected?.length ?? 0) !== 5}
+                          title="PDF с расширенным описанием каждой из 5 новостей (20–25 предложений)"
+                          onClick={() => void handleDownloadStyleMaxExtendedPdf()}
+                        >
+                          Экспорт расширенного PDF для MAX
+                        </button>
+                      </div>
+                    );
+                  }
                   return (
                     <button
                       key={o.platform}
@@ -4982,7 +4975,11 @@ export function DigestWizard({ digestId }: Props) {
               {sortedOutputs.map((o: any) => {
                 const label = PLATFORM_LABELS[o.platform] ?? String(o.platform).toUpperCase();
                 const keys =
-                  o.platform === "telegram" ? ["telegram_caption", "telegram_post"] : [o.platform];
+                  o.platform === "telegram"
+                    ? ["telegram_caption", "telegram_post"]
+                    : o.platform === "max" && isStyleTopic
+                      ? [o.platform, "style_max_pdf"]
+                      : [o.platform];
                 const rows = keys
                   .map((k) => ({ key: k, st: copyStatus[k] ?? "idle" }))
                   .filter((x) => x.st !== "idle");
@@ -4995,18 +4992,22 @@ export function DigestWizard({ digestId }: Props) {
                         style={{ color: st === "ok" ? "#4ade80" : "#f87171", margin: 0 }}
                       >
                         {st === "ok"
-                          ? key === "telegram_caption"
-                            ? `${label}: анонс скопирован — вставьте как подпись к картинке.`
-                            : key === "telegram_post"
-                              ? `${label}: основной пост скопирован — отправьте отдельным сообщением.`
-                              : o.platform === "max" || o.platform === "dzen"
-                                ? `${label}: скопировано с форматированием — вставьте в редактор (Ctrl+V).`
-                                : `${label}: скопировано — вставьте в редактор (Ctrl+V).`
-                          : key === "telegram_caption"
-                            ? `${label}: не удалось скопировать анонс — выделите текст в поле ниже и Ctrl+C.`
-                            : key === "telegram_post"
-                              ? `${label}: не удалось скопировать основной пост — выделите текст в поле ниже и Ctrl+C.`
-                              : `${label}: не удалось записать в буфер — выделите текст в поле ниже и Ctrl+C.`}
+                          ? key === "style_max_pdf"
+                            ? "Расширенный PDF для MAX скачан."
+                            : key === "telegram_caption"
+                              ? `${label}: анонс скопирован — вставьте как подпись к картинке.`
+                              : key === "telegram_post"
+                                ? `${label}: основной пост скопирован — отправьте отдельным сообщением.`
+                                : o.platform === "max" || o.platform === "dzen"
+                                  ? `${label}: скопировано с форматированием — вставьте в редактор (Ctrl+V).`
+                                  : `${label}: скопировано — вставьте в редактор (Ctrl+V).`
+                          : key === "style_max_pdf"
+                            ? "Не удалось скачать расширенный PDF — проверьте шаг 3 и backend."
+                            : key === "telegram_caption"
+                              ? `${label}: не удалось скопировать анонс — выделите текст в поле ниже и Ctrl+C.`
+                              : key === "telegram_post"
+                                ? `${label}: не удалось скопировать основной пост — выделите текст в поле ниже и Ctrl+C.`
+                                : `${label}: не удалось записать в буфер — выделите текст в поле ниже и Ctrl+C.`}
                       </p>
                     ))}
                   </div>

@@ -175,6 +175,9 @@ _STYLE_STRONG_RES: tuple[re.Pattern[str], ...] = tuple(
         r"одежд",
         r"гардероб",
         r"коллекци\w*\s+одежд",
+        r"\bкутюр",
+        r"\bcouture\b",
+        r"\bhaute\s+couture\b",
     )
 )
 

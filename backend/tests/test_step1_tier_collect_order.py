@@ -238,4 +238,48 @@ def test_short_pool_applies_extra_curious_batches(monkeypatch: pytest.MonkeyPatc
         verified_pool_size=0,
     )
 
-    assert seen["max_search_batches"] == 6
+    assert seen["max_search_batches"] == 5
+
+
+def test_curious_slider_keeps_curious_search_after_min_verified(monkeypatch: pytest.MonkeyPatch):
+    """Ползунок ≥2 должен добирать курьёзное даже при verified ≥ 10 и целевом пуле UI."""
+    seen: dict[str, int] = {}
+
+    monkeypatch.setattr(
+        "app.services.digest_service.fetch_tier_prioritized_raw_urls",
+        lambda *_a, **_k: [f"https://techcrunch.com/a/{i}" for i in range(12)],
+    )
+
+    def _fake_curious(*_a, **kwargs):
+        seen["max_search_batches"] = int(kwargs.get("max_search_batches") or 0)
+        seen["called"] = 1
+        return []
+
+    monkeypatch.setattr("app.services.digest_service.fetch_curious_prioritized_raw_urls", _fake_curious)
+    monkeypatch.setattr(DigestService, "_step1_seed_collect_from_registry", lambda *_a, **_k: 0)
+    monkeypatch.setattr(DigestService, "_step1_add_seed_listing_raw_urls", lambda *_a, **_k: 0)
+    monkeypatch.setattr(DigestService, "_ingest_step1_urls_with_listing_expansion", lambda *_a, **_k: [])
+    monkeypatch.setattr(DigestService, "_step1_search_query_parts", lambda self, d: ("after:2026-06-01 ", "ИИ", "-pricing"))
+    monkeypatch.setattr("app.services.step1_web_search_stats.reset_empty_citation_streak", lambda: None)
+    monkeypatch.setattr("app.services.digest_service.register_raw_urls", lambda *a, **k: 0)
+    monkeypatch.setattr(DigestService, "_step1_prioritize_search_urls", lambda self, urls, digest=None: list(urls))
+
+    service, digest = _make_service(
+        {
+            "step1_serious_curious_search_batches": 4,
+            "step1_serious_curious_extra_batches": 7,
+            "step1_cheap_sources_first": True,
+        }
+    )
+    service._collect_search_verified_candidates(
+        99,
+        digest,
+        "2026-06-16T12:00:00+03:00",
+        set(),
+        limit=10,
+        verified_pool_size=10,
+        pool_target_size=20,
+    )
+
+    assert seen.get("called") == 1
+    assert seen["max_search_batches"] >= 7

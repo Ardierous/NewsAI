@@ -44,6 +44,7 @@ MATERIAL_FORM_MARKER_PREFIX = "MATERIAL_FORM:"
 NOT_AD_MARKER_PREFIX = "NOT_AD:"
 EDITORIAL_ANGLE_MARKER_PREFIX = "EDITORIAL_ANGLE:"
 NOT_AD_DISCLOSURE_RU = "не реклама"
+CURIOUS_MIX_SEED_MARKER = "curious_mix"
 
 EditorialAngle = Literal["serious", "curious"]
 
@@ -817,6 +818,23 @@ def classify_material_form(item: dict[str, Any], extra: str = "") -> MaterialFor
     return MATERIAL_FORM_ARTICLE
 
 
+def repair_unbalanced_guillemets(title: str) -> str:
+    """Восстанавливает «, если есть закрывающая », но нет открывающей до неё."""
+    s = str(title or "")
+    if "»" not in s:
+        return s
+    first_close = s.index("»")
+    if "«" in s[:first_close]:
+        return s
+    m = re.match(r"^(\s*(?:\d{1,2}\.\s*)?)(.+)$", s[:first_close])
+    if not m:
+        return s
+    prefix, body = m.group(1), m.group(2)
+    if not body.strip():
+        return s
+    return prefix + "«" + body + s[first_close:]
+
+
 def strip_material_form_title_suffix(title: str) -> str:
     return _MATERIAL_FORM_TITLE_SUFFIX_RE.sub("", (title or "").strip()).strip()
 
@@ -838,11 +856,71 @@ def parse_editorial_angle_from_comment(comment: str | None) -> EditorialAngle:
     return "serious"
 
 
+def _curious_mix_seed_marker(item: dict[str, Any]) -> bool:
+    from app.services.seed_source_tracking import seed_marker_from_item
+
+    marker = str(seed_marker_from_item(item) or "").strip().lower()
+    return marker == CURIOUS_MIX_SEED_MARKER or marker.startswith("curious")
+
+
+def _min_curious_editorial_score(mix_ratio: float, *, curious_src: bool) -> int:
+    mix = max(0.0, min(1.0, float(mix_ratio or 0)))
+    if mix >= 0.8:
+        return 0 if curious_src else 1
+    if mix >= 0.6:
+        return 1 if curious_src else 2
+    if mix >= 0.4:
+        return 2
+    return 3
+
+
+def curious_editorial_score(
+    item: dict[str, Any],
+    *,
+    extra: str = "",
+    curious_mix_ratio: float | None = None,
+) -> int:
+    """Чем выше — тем уместнее плашка «курьёз» при смешанном выпуске."""
+    from app.curious_source_policy import is_curious_policy_source
+    from app.services.curious_tone import (
+        curious_tone_score,
+        curious_url_positive_hints,
+        has_curious_positive_signal,
+        has_curious_serious_blockers,
+    )
+
+    url = str(item.get("url") or "")
+    title = str(item.get("title") or "")
+    corpus = _text_blob(item, extra)
+    score = 0
+    if _curious_mix_seed_marker(item):
+        score += 8
+    tier = str(item.get("tier") or "")
+    if tier.startswith("Curious-"):
+        score += 5
+    curious_src = is_curious_policy_source(url)
+    if curious_src:
+        score += 4
+    tone = int(item.get("curious_tone_score", 0) or 0) or curious_tone_score(title, corpus)
+    score += tone
+    if curious_url_positive_hints(url):
+        score += 2
+    if has_curious_positive_signal(title, corpus):
+        score += 2
+    if has_curious_serious_blockers(title, corpus) and not has_curious_positive_signal(title, corpus):
+        score -= 10
+    mix = max(0.0, min(1.0, float(curious_mix_ratio or 0)))
+    if mix >= 0.7 and curious_src:
+        score += 2
+    return score
+
+
 def classify_editorial_angle(
     item: dict[str, Any],
     *,
     digest_type: str | None = None,
     extra: str = "",
+    curious_mix_ratio: float | None = None,
 ) -> EditorialAngle:
     """Угол материала для плашки «курьёз / серьёз» в пуле кандидатов."""
     from app.curious_source_policy import is_curious_policy_source
@@ -855,8 +933,13 @@ def classify_editorial_angle(
     url = str(item.get("url") or "")
     title = str(item.get("title") or "")
     corpus = _text_blob(item, extra)
+    mix = max(0.0, min(1.0, float(curious_mix_ratio or 0)))
     curious_src = is_curious_policy_source(url)
     tier_src = is_policy_tier_source(url)
+    tier = str(item.get("tier") or "")
+
+    if _curious_mix_seed_marker(item) or tier.startswith("Curious-"):
+        return "curious"
 
     if curious_src and not tier_src:
         return "curious"
@@ -871,11 +954,118 @@ def classify_editorial_angle(
     )
 
     tone = int(item.get("curious_tone_score", 0) or 0) or curious_tone_score(title, corpus)
+    min_tone = max(1, 4 - int(round(mix * 4)))
+    if mix >= 0.8 and curious_src:
+        if not has_curious_serious_blockers(title, corpus) or has_curious_positive_signal(title, corpus):
+            return "curious"
+    if mix >= 0.5 and curious_src and (tone >= min_tone or has_curious_positive_signal(title, corpus)):
+        if not has_curious_serious_blockers(title, corpus) or has_curious_positive_signal(title, corpus):
+            return "curious"
     if passes_curious_tone_gate(title, corpus, url=url) or tone >= 4:
         return "curious"
     if has_curious_positive_signal(title, corpus) and not has_curious_serious_blockers(title, corpus):
         return "curious"
+    if mix >= 0.7 and tone >= min_tone and not has_curious_serious_blockers(title, corpus):
+        return "curious"
     return "serious"
+
+
+def reconcile_pool_editorial_angles(
+    pool: list[dict[str, Any]],
+    slider: int | float,
+    *,
+    digest_type: str | None = None,
+) -> None:
+    """Переразмечает пул под ориентир ползунка (N → ~N×10% курьёзных), без новых API-запросов."""
+    from app.curious_source_policy import is_curious_policy_source
+    from app.services.digest_type_policy import curious_mix_target_count, resolve_curious_mix_ratio
+    from app.services.curious_tone import has_curious_positive_signal, has_curious_serious_blockers
+
+    if not pool:
+        return
+    mix_ratio = resolve_curious_mix_ratio(slider)
+    if mix_ratio < 0.2:
+        return
+    target = curious_mix_target_count(len(pool), slider)
+    if target <= 0:
+        return
+
+    scored: list[tuple[int, int, dict[str, Any]]] = []
+    for idx, item in enumerate(pool):
+        extra = f"{item.get('article_excerpt', '')} {item.get('description', '')}"
+        score = curious_editorial_score(item, extra=extra, curious_mix_ratio=mix_ratio)
+        scored.append((score, idx, item))
+    scored.sort(key=lambda row: (-row[0], row[1]))
+
+    curious_indices: set[int] = set()
+    for score, idx, item in scored:
+        if len(curious_indices) >= target:
+            break
+        url = str(item.get("url") or "")
+        curious_src = is_curious_policy_source(url)
+        min_score = _min_curious_editorial_score(mix_ratio, curious_src=curious_src)
+        if score < min_score:
+            continue
+        title = str(item.get("title") or "")
+        item_extra = f"{item.get('article_excerpt', '')} {item.get('description', '')}"
+        corpus = _text_blob(item, item_extra)
+        if has_curious_serious_blockers(title, corpus) and not has_curious_positive_signal(title, corpus):
+            continue
+        curious_indices.add(idx)
+
+    if len(curious_indices) < target and mix_ratio >= 0.5:
+        for score, idx, item in scored:
+            if len(curious_indices) >= target:
+                break
+            if idx in curious_indices:
+                continue
+            url = str(item.get("url") or "")
+            if not (is_curious_policy_source(url) or _curious_mix_seed_marker(item)):
+                continue
+            title = str(item.get("title") or "")
+            relax_extra = f"{item.get('article_excerpt', '')} {item.get('description', '')}"
+            corpus = _text_blob(item, relax_extra)
+            if has_curious_serious_blockers(title, corpus) and not has_curious_positive_signal(title, corpus):
+                continue
+            curious_indices.add(idx)
+
+    if len(curious_indices) < target and mix_ratio >= 0.85:
+        from app.services.curious_tone import curious_tone_score
+
+        for score, idx, item in scored:
+            if len(curious_indices) >= target:
+                break
+            if idx in curious_indices:
+                continue
+            relax_extra = f"{item.get('article_excerpt', '')} {item.get('description', '')}"
+            title = str(item.get("title") or "")
+            corpus = _text_blob(item, relax_extra)
+            if has_curious_serious_blockers(title, corpus) and not has_curious_positive_signal(title, corpus):
+                continue
+            tone = int(item.get("curious_tone_score", 0) or 0) or curious_tone_score(title, corpus)
+            if tone >= 1 or score >= 1:
+                curious_indices.add(idx)
+
+    if len(curious_indices) < target and mix_ratio >= 0.9:
+        for score, idx, item in scored:
+            if len(curious_indices) >= target:
+                break
+            if idx in curious_indices:
+                continue
+            if "MANUAL_REQUIRED" in str(item.get("verification_comment") or ""):
+                continue
+            curious_indices.add(idx)
+
+    for idx, item in enumerate(pool):
+        extra = f"{item.get('article_excerpt', '')} {item.get('description', '')}"
+        angle: EditorialAngle = "curious" if idx in curious_indices else "serious"
+        apply_material_form_to_candidate(
+            item,
+            extra=extra,
+            digest_type=digest_type,
+            curious_mix_ratio=mix_ratio,
+            editorial_angle=angle,
+        )
 
 
 def parse_material_form_from_comment(comment: str | None) -> MaterialForm:
@@ -918,10 +1108,17 @@ def apply_material_form_to_candidate(
     *,
     extra: str = "",
     digest_type: str | None = None,
+    curious_mix_ratio: float | None = None,
+    editorial_angle: EditorialAngle | None = None,
 ) -> MaterialForm:
     """Классифицирует форму материала и пишет её в material_form / verification_comment (без метки в заголовке)."""
     form = classify_material_form(item, extra=extra)
-    angle = classify_editorial_angle(item, digest_type=digest_type, extra=extra)
+    angle = editorial_angle or classify_editorial_angle(
+        item,
+        digest_type=digest_type,
+        extra=extra,
+        curious_mix_ratio=curious_mix_ratio,
+    )
     item["material_form"] = form
     item["editorial_angle"] = angle
     title = str(item.get("title") or "").strip()

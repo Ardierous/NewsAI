@@ -7,6 +7,12 @@ from app.digest_defaults import get_digest_defaults
 from app.services.candidate_origin import resolve_candidate_origin
 
 
+class DigestCreateRequest(BaseModel):
+    """Тематика выпуска на сегодня: ИИ (по умолчанию) или стиль."""
+
+    digest_topic: Literal["ai", "style"] | None = None
+
+
 class DigestCreateResponse(BaseModel):
     id: int
     date: date
@@ -223,14 +229,21 @@ class CandidateOut(BaseModel):
             has_not_ad_disclosure,
             parse_editorial_angle_from_comment,
             parse_material_form_from_comment,
+            repair_unbalanced_guillemets,
         )
 
+        raw_title = str(payload.get("title") or "")
+        if raw_title:
+            payload["title"] = repair_unbalanced_guillemets(raw_title)
         comment = str(payload.get("verification_comment") or "")
         payload["material_form"] = parse_material_form_from_comment(comment)
         payload["not_ad_disclosure"] = has_not_ad_disclosure(comment)
         angle = parse_editorial_angle_from_comment(comment)
         tier = str(payload.get("tier") or "")
+        seed_marker = str(payload.get("seed_marker") or "").strip().lower()
         if angle == "serious" and tier.startswith("Curious-"):
+            angle = "curious"
+        if angle == "serious" and seed_marker in {"curious_mix", "curious"}:
             angle = "curious"
         payload["editorial_angle"] = angle
         return payload

@@ -9,8 +9,8 @@
 | Параметр | Значение | Источник |
 |----------|----------|----------|
 | Минимум успешного пула | **10** проверенных материалов | `STEP1_MIN_VERIFIED` в `digest_service.py` |
-| Целевой размер пула для UI | до **20** | `max_candidates_for_ui` в `pipeline_settings.json` |
-| Минимум первого предложения | **15** | `first_offer_min_candidates` в `pipeline_settings.json` |
+| Целевой размер пула для UI | до **25** | `max_candidates_for_ui` в `pipeline_settings.json` |
+| Минимум первого предложения | **20** | `first_offer_min_candidates` в `pipeline_settings.json` |
 | Порог воронки | **10** | `min_discovered_pages` в `step1_filter_settings.json` |
 | Батч tier-поиска | **14** URL | `batch_size` |
 | Сырые URL за collect | до **64** | `search_fetch_limit` |
