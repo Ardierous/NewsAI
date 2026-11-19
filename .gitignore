@@ -16,7 +16,6 @@ backend/storage/images/*
 backend/storage/docx/*
 backend/storage/pdf/*
 
-# Служебные логи
+# Служебные логи (docs/push_protocol.log — журнал push_to_github.bat, в репозитории)
 backend/logs/
 debug-*.log
-docs/push_protocol.log

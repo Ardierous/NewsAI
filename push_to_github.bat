@@ -136,7 +136,8 @@ if not exist docs mkdir docs >nul 2>nul
 powershell -NoProfile -Command "$line='[%ts%] %msg%'; Add-Content -LiteralPath 'docs\push_protocol.log' -Value $line -Encoding UTF8"
 if errorlevel 1 goto :err
 
-git add docs\push_protocol.log
+REM Журнал протокола — часть проекта; -f на случай, если файл снова попадёт в ignore.
+git add -f docs\push_protocol.log
 if errorlevel 1 goto :err
 
 echo.
