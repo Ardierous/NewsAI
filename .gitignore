@@ -5,7 +5,12 @@ backend/.env
 frontend/.env.local
 backend/storage/images/*
 backend/storage/docx/*
+backend/storage/pdf/*
 backend/digest.db
+backend/digest.db-wal
+backend/digest.db-shm
 backend/logs/
+debug-*.log
+docs/push_protocol.log
 node_modules/
 .next/

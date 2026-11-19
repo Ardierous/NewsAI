@@ -16,7 +16,11 @@ from app.services.digest_type_policy import (
     step1_scoring_editorial_block,
 )
 from app.services.digest_topic_policy import is_style_digest, step2_order_system_prompt_for_topic
-from app.services.platform_assembly import assemble_platform_outputs, subscription_md_inline
+from app.services.platform_assembly import (
+    assemble_platform_outputs,
+    promote_best_leads_in_payload,
+    subscription_md_inline,
+)
 from app.services.reader_copy import build_reader_text_fallback, sanitize_reader_description
 
 _ANALYTICS_EDITORIAL = (
@@ -516,14 +520,23 @@ class CrewWorkflow:
         target = list(platforms) if platforms else ["telegram", "max", "vk", "dzen"]
         keys_str = ",".join(target)
         topic = str(payload.get("digest_topic") or "ai")
+        sub_example = subscription_md_inline(
+            payload.get("subscription_intro"),
+            payload.get("subscription_channels") if isinstance(payload.get("subscription_channels"), dict) else None,
+        )
         sub_rule = (
             "Для digest_topic=style подпись ExTellect в финале НЕ добавляется. "
             if is_style_digest(topic)
-            else f"Подпись в финале будет в одну строку, пример: {subscription_md_inline()!r}. "
+            else f"Подпись в финале будет в одну строку, пример: {sub_example!r}. "
         )
         extra_rules = (
             "Дополнительно к контракту: итоговую вёрстку собирает сервер (platform_assembly) — верни JSON только с полями "
-            "telegram_lead, max_lead, dzen_intro (короткие вводные 1–2 предложения для TG/MAX/Дзен). "
+            "telegram_lead, max_lead, dzen_intro. "
+            "Для дайджеста ИИ: telegram_lead — самый содержательный анонс выпуска (3–5 предложений): "
+            "назови конкретные темы пятёрки, без пустых фраз вроде «рассмотрим пять актуальных новостей». "
+            "max_lead — тот же смысл, можно чуть короче (2–4 предложения). "
+            "dzen_intro — 2–3 предложения контекста выпуска по тем же темам. "
+            "Не используй шаблон «Коротко:». "
             "Не возвращай готовые тексты платформ: сервер сам соберёт markdown (Telegram), HTML (MAX, Дzen) и plain text (VK). "
             f"{sub_rule}"
             "Хэштеги: в telegram и max — 4–6; в vk и dzen — 3–5. "
@@ -547,12 +560,15 @@ class CrewWorkflow:
             dzen_intro = str(parsed.get("dzen_intro") or "").strip()
             if dzen_intro:
                 assembly_payload["dzen_intro"] = dzen_intro
-            tg_lead = str(parsed.get("telegram_lead") or "").strip()
-            if tg_lead:
-                assembly_payload["telegram_lead"] = tg_lead
             max_lead = str(parsed.get("max_lead") or "").strip()
+            tg_lead = str(parsed.get("telegram_lead") or "").strip()
             if max_lead:
                 assembly_payload["max_lead"] = max_lead
+            if tg_lead:
+                assembly_payload["telegram_lead"] = tg_lead
+            # Если один из лидов слабый/пустой — подтянуть лучший с других площадок / overall_analysis.
+            if not is_style_digest(topic):
+                promote_best_leads_in_payload(assembly_payload)
         return assemble_platform_outputs(assembly_payload, platforms=target)
 
     def run_qc(

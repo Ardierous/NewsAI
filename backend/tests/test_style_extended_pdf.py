@@ -2,7 +2,15 @@ from pathlib import Path
 
 import pytest
 
-from app.services.style_extended_pdf import build_style_extended_pdf
+from app.services.style_extended_pdf import build_style_extended_pdf, style_extended_pdf_filename
+
+
+def test_style_extended_pdf_filename_has_style_date_and_id():
+    name = style_extended_pdf_filename("2026-10-20", 12)
+    assert name == "digest_style_2026-10-20_id12.pdf"
+    assert "style" in name
+    assert "2026-10-20" in name
+    assert "id12" in name
 
 
 def test_build_style_extended_pdf_smoke(tmp_path: Path):

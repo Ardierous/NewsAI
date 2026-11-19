@@ -356,10 +356,25 @@ export const api = {
     platforms: string[],
     hook_variant?: "A" | "B" | "V",
     signal?: AbortSignal,
+    subscription?: {
+      subscription_intro?: string;
+      subscription_channels?: {
+        telegram: boolean;
+        vk: boolean;
+        max: boolean;
+        dzen: boolean;
+        boosty: boolean;
+      };
+    },
   ) =>
     request<any>(`/digests/${id}/step4/generate-texts`, {
       method: "POST",
-      body: JSON.stringify({ platforms, hook_variant }),
+      body: JSON.stringify({
+        platforms,
+        hook_variant,
+        subscription_intro: subscription?.subscription_intro,
+        subscription_channels: subscription?.subscription_channels,
+      }),
       timeoutMs: LONG_POST_MS,
       signal,
     }),
@@ -389,8 +404,10 @@ export const api = {
     }
     const blob = await res.blob();
     const fromHeader = res.headers.get("content-disposition") || "";
-    const match = /filename="?([^";]+)"?/i.exec(fromHeader);
-    const filename = match?.[1] || `style_max_extended_id${id}.pdf`;
+    const starred = /filename\*=(?:UTF-8'')?([^;]+)/i.exec(fromHeader);
+    const quoted = /filename="?([^";]+)"?/i.exec(fromHeader);
+    const rawName = decodeURIComponent((starred?.[1] || quoted?.[1] || "").trim().replace(/^UTF-8''/i, ""));
+    const filename = rawName && !/^filename\*?$/i.test(rawName) ? rawName : `digest_style_id${id}.pdf`;
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;

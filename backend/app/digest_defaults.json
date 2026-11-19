@@ -4,5 +4,15 @@
     "digest_topic_default": "ai",
     "news_window_days_default": 3,
     "news_window_day_kind_default": "working"
+  },
+  "step4": {
+    "subscription_intro": "👉 Будьте в курсе мировых новостей про ИИ:",
+    "subscription_channels": {
+      "telegram": true,
+      "vk": true,
+      "max": true,
+      "dzen": true,
+      "boosty": false
+    }
   }
 }

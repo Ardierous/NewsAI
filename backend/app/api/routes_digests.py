@@ -41,6 +41,7 @@ from app.schemas import (
     Step4GenerateImagesRequest,
     Step4GenerateTextsRequest,
     Step4SelectImageRequest,
+    Step4SubscriptionDefaultsOut,
     ImageVariantOut,
     FinalizeReleaseResponse,
 )
@@ -296,6 +297,9 @@ def get_digest(digest_id: int, db: Session = Depends(get_db)) -> DigestDetail:
         tracked_spend_today_rub=tracked_spend_today_rub,
         proxyapi_spent_today_rub=spent_today_proxy,
         enable_step4_image_generation=get_settings().enable_step4_image_generation,
+        step4_subscription=Step4SubscriptionDefaultsOut.model_validate(
+            service.get_step4_subscription_defaults_payload()
+        ),
         model_recommendations=service.get_model_recommendations(),
         pool_collection_stats=pool_collection_stats,
         step2_order_rationale=step2_order_rationale,
@@ -544,10 +548,13 @@ def step4_select_image(digest_id: int, payload: Step4SelectImageRequest, db: Ses
 @router.post("/{digest_id}/step4/generate-texts")
 def step4_generate_texts(digest_id: int, payload: Step4GenerateTextsRequest, db: Session = Depends(get_db)) -> dict:
     service = DigestService(db)
+    channels = payload.subscription_channels.model_dump() if payload.subscription_channels is not None else None
     return service.run_step_4_generate_texts(
         digest_id,
         payload.platforms,
         payload.hook_variant,
+        subscription_intro=payload.subscription_intro,
+        subscription_channels=channels,
     )
 
 

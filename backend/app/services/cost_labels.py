@@ -39,6 +39,8 @@ OPERATION_TITLE_RU: dict[str, str] = {
     "proxyapi_web_search_urls": "Веб-поиск URL статей",
     "proxyapi_web_search_supplement": "Дополнительный веб-поиск",
     "manual_headline_translate_ru": "Перевод заголовка на русский",
+    "step1_title_translation": "Перевод заголовка новости на русский",
+    "step1_description_translation": "Перевод описания новости на русский",
 }
 
 STEP_TITLE_RU: dict[str, str] = {

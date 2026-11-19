@@ -12,6 +12,7 @@ def _digest(date_iso: str = "2026-05-15", days: int = 3, kind: str = "calendar")
         date=date.fromisoformat(date_iso),
         news_window_days=days,
         news_window_day_kind=kind,
+        digest_type="serious",
     )
 from app.services import news_search
 
@@ -320,6 +321,12 @@ def test_verify_resets_skeleton_link_status_before_checks(monkeypatch):
     monkeypatch.setattr(ds.requests, "get", fake_get)
     svc = ds.DigestService.__new__(ds.DigestService)
     svc._ensure_russian_candidate_title = lambda _d, _u, h: h
+    svc._active_step1_digest_topic = "ai"
+    svc.settings = SimpleNamespace(
+        step1_curious_use_serious_tiers=False,
+        step1_serious_use_curious_tiers=True,
+        step1_serious_curious_extra_batches=5,
+    )
     item = ds.DigestService._skeleton_dict_from_search_url(svc, "https://example.com/news/ai-api", "2026-05-15", 1)
     assert item["link_status"] is True
     ds.DigestService._verify_llm_candidate_dict(svc, _digest(), item)
@@ -521,6 +528,11 @@ def test_verify_accepts_redirected_article_with_headline(monkeypatch):
 
     svc = MagicMock()
     svc._ensure_russian_candidate_title = lambda _d, _u, h: h
+    svc.settings = SimpleNamespace(
+        step1_curious_use_serious_tiers=False,
+        step1_serious_use_curious_tiers=True,
+        step1_serious_curious_extra_batches=5,
+    )
     ds.DigestService._verify_llm_candidate_dict(svc, _digest(), item)
     assert item.get("link_status") is True
     assert item.get("headline_editorial_ok") is True
@@ -609,11 +621,11 @@ def test_looks_like_article_url_investing_sibling_from_bonds_listing():
 def test_http_get_investing_403_returns_without_second_ua(monkeypatch):
     calls: list[str] = []
 
-    def fake_get(url, *args, **kwargs):
+    def fake_get(self, url, *args, **kwargs):
         calls.append(str(kwargs.get("headers", {}).get("User-Agent") or ""))
         return _Resp(403, url, "Forbidden")
 
-    monkeypatch.setattr(ds.requests, "get", fake_get)
+    monkeypatch.setattr(ds.requests.Session, "get", fake_get)
     resp = ds._http_get_html_for_article("https://ru.investing.com/analysis/bonds")
     assert resp is not None
     assert resp.status_code == 403

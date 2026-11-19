@@ -40,8 +40,13 @@ from app.services.article_reader_fallback import (
 from app.services.reader_copy import (
     READER_TEXT_MAX_CHARS,
     READER_TEXT_MAX_CHARS_STYLE,
+    brief_page_teaser,
     build_platform_description,
+    public_candidate_description,
     sanitize_reader_description,
+    text_primarily_russian,
+    title_needs_russian_translation,
+    title_translation_acceptable,
 )
 from app.services.platform_assembly import (
     assemble_platform_outputs,
@@ -49,6 +54,8 @@ from app.services.platform_assembly import (
     extract_lead_from_legacy_platform_text,
     format_digest_date_ru,
     needs_html_layout_refresh,
+    platform_lead_is_weak,
+    promote_best_leads_in_payload,
 )
 from app.models import (
     Analytics,
@@ -525,11 +532,11 @@ def _curious_foreign_source_url(url: str) -> bool:
 
 
 def _title_primarily_russian(title: str) -> bool:
-    letters = [c for c in title if c.isalpha()]
-    if not letters:
-        return True
-    cyr = sum(1 for c in letters if "\u0400" <= c <= "\u04FF")
-    return cyr / len(letters) >= 0.35
+    return text_primarily_russian(title)
+
+
+def _title_needs_russian_translation(title: str) -> bool:
+    return title_needs_russian_translation(title)
 
 
 def _meta_property_content(chunk: str, prop: str) -> str | None:
@@ -680,8 +687,30 @@ def _truncate_article_excerpt(text: str, max_len: int = 4000) -> str:
 
 
 def _candidate_article_excerpt(item: dict[str, Any]) -> str:
-    raw = str(item.get("article_excerpt") or item.get("topic_corpus") or "").strip()
+    raw = str(
+        item.get("article_excerpt")
+        or item.get("reader_excerpt")
+        or item.get("topic_corpus")
+        or ""
+    ).strip()
     return _truncate_article_excerpt(raw)
+
+
+def _reader_excerpt_from_article_chunk(chunk: str) -> str:
+    """Текст для описания новости: анонс страницы + абзацы после заголовка, без шапки сайта."""
+    parts: list[str] = []
+    for p in (
+        _meta_property_content(chunk, "og:description"),
+        _meta_name_content(chunk, "description"),
+        _meta_name_content(chunk, "twitter:description"),
+        _meta_property_content(chunk, "twitter:description"),
+    ):
+        if p:
+            parts.append(p)
+    after_h1 = _rough_visible_text_after_first_h1(chunk, limit=3500)
+    if after_h1:
+        parts.append(after_h1)
+    return _clean_headline_text(" ".join(parts))[:8000]
 
 
 def _is_site_homepage_url(url: str) -> bool:
@@ -2299,6 +2328,10 @@ def _apply_bundle_published_at(
 
 def _http_get_html_for_article(url: str) -> requests.Response | None:
     """Несколько попыток и второй User-Agent: снижаем ложные http_unreachable (403/таймаут/обрыв)."""
+    from app.services.step1_cancellation import abortable_requests_session, should_abort_step1_web_search
+
+    if should_abort_step1_web_search():
+        return None
     headers_base = {
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -2311,17 +2344,22 @@ def _http_get_html_for_article(url: str) -> requests.Response | None:
     )
     last_exc: BaseException | None = None
     for attempt in range(2):
+        if should_abort_step1_web_search():
+            return None
         if attempt:
             time.sleep(0.45 * attempt)
         last_server_err: requests.Response | None = None
         for agent in agents:
+            if should_abort_step1_web_search():
+                return None
             try:
-                r = requests.get(
-                    url,
-                    timeout=(4, 8),
-                    headers={**headers_base, "User-Agent": agent},
-                    allow_redirects=True,
-                )
+                with abortable_requests_session() as session:
+                    r = session.get(
+                        url,
+                        timeout=(4, 8),
+                        headers={**headers_base, "User-Agent": agent},
+                        allow_redirects=True,
+                    )
                 if r.status_code in (403, 429):
                     if is_investing_com_url(url):
                         logger.info(
@@ -2361,6 +2399,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
         "headline": None,
         "published_at": None,
         "topic_corpus": "",
+        "reader_excerpt": "",
     }
     try:
         r = _http_get_html_for_article(initial_url)
@@ -2423,6 +2462,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
         topic_corpus = _topic_corpus_from_article_chunk(
             chunk, html_title=html_t, og_title=og_title, h1=h1
         )
+        reader_excerpt = _reader_excerpt_from_article_chunk(chunk)
         rough_vis = _rough_visible_text_from_html(chunk, 6500)
         para_n = len(re.findall(r"<p\b", chunk, re.IGNORECASE))
         hl_plain = str(headline or "").strip()
@@ -2444,6 +2484,7 @@ def _fetch_article_page_bundle(initial_url: str) -> dict[str, Any]:
             "article_markers": article_markers,
             "soft_article_signals": soft_article_signals,
             "topic_corpus": topic_corpus,
+            "reader_excerpt": reader_excerpt,
             **headline_raw_fields,
         }
         is_listing = _is_news_listing_page(display or final_url, chunk, partial_bundle)
@@ -3742,11 +3783,13 @@ class DigestService:
         if not digest:
             raise HTTPException(status_code=404, detail="Digest not found")
         self._repair_orphan_step1_status(digest)
+        self._repair_orphan_final_status(digest)
         self._ensure_step0_type_for_draft(digest)
         self._dedupe_digest_candidate_rows(digest_id)
         self._purge_user_excluded_pool_rows(digest_id)
         self._purge_invalid_step1_pool_rows(digest_id)
         self._repair_truncated_pool_titles(digest_id)
+        self._ensure_russian_pool_titles(digest_id)
         return digest
 
     def _repair_truncated_pool_titles(self, digest_id: int, *, max_refresh: int = 3) -> int:
@@ -3776,12 +3819,50 @@ class DigestService:
                 continue
             if len(refreshed_title) <= len(title):
                 continue
-            row.title = refreshed_title
+            row.title = self._ensure_russian_candidate_title(digest_id, url, refreshed_title)[:500]
             updated += 1
         if updated:
             self.db.commit()
             logger.info(
                 "Пул кандидатов: восстановлены обрезанные заголовки | digest_id=%s updated=%s",
+                digest_id,
+                updated,
+            )
+        return updated
+
+    def _ensure_russian_pool_titles(self, digest_id: int, *, max_translate: int = 40) -> int:
+        """Допереводит иностранные заголовки в уже сохранённом пуле шага 2."""
+        from app.services.step1_cancellation import is_running as step1_is_running
+
+        if step1_is_running(digest_id):
+            return 0
+        rows = (
+            self.db.query(NewsCandidate)
+            .filter(NewsCandidate.digest_id == digest_id)
+            .order_by(NewsCandidate.original_number.asc(), NewsCandidate.id.asc())
+            .all()
+        )
+        if not rows:
+            return 0
+        updated = 0
+        attempts = 0
+        for row in rows:
+            if attempts >= max(1, max_translate):
+                break
+            title = str(row.title or "").strip()
+            url = str(row.url or "").strip()
+            if not title or not url or not _title_needs_russian_translation(title):
+                continue
+            attempts += 1
+            translated = self._ensure_russian_candidate_title(digest_id, url, title)[:500]
+            if not translated or not title_translation_acceptable(translated, source=title):
+                continue
+            row.title = translated
+            updated += 1
+        if updated:
+            self.db.commit()
+            logger.info(
+                "Пул кандидатов: заголовки переведены на русский | digest_id=%s updated=%s",
                 digest_id,
                 updated,
             )
@@ -3840,10 +3921,9 @@ class DigestService:
         return True
 
     def refresh_stale_html_platform_outputs(self, digest: Digest) -> bool:
-        """Пересобрать MAX/Дzen из данных выпуска, если в БД остался старый markdown."""
+        """Пересобрать MAX/Дзен (старый markdown) и слабые вводные Telegram/MAX из лучших лидов."""
         rows = self.db.query(FinalOutput).filter(FinalOutput.digest_id == digest.id).all()
-        stale_rows = [row for row in rows if needs_html_layout_refresh(row.platform, row.content or "")]
-        if not stale_rows:
+        if not rows:
             return False
         selected_payload = self._step4_selected_payload(digest)
         if not selected_payload:
@@ -3857,21 +3937,54 @@ class DigestService:
             "overall_analysis": self._step4_overall_analysis(digest),
             "digest_type": digest.digest_type or "serious",
             "digest_topic": getattr(digest, "digest_topic", None) or "ai",
+            **self.get_step4_subscription_defaults_payload(),
         }
         tg_lead = extract_lead_from_legacy_platform_text(by_platform.get("telegram", ""))
-        if tg_lead:
-            assembly_payload["telegram_lead"] = tg_lead
         max_lead = extract_lead_from_legacy_platform_text(by_platform.get("max", ""))
         if max_lead:
             assembly_payload["max_lead"] = max_lead
+        if tg_lead:
+            assembly_payload["telegram_lead"] = tg_lead
         dzen_intro = extract_lead_from_legacy_platform_text(by_platform.get("dzen", ""))
         if dzen_intro:
             assembly_payload["dzen_intro"] = dzen_intro
+        vk_lead = extract_lead_from_legacy_platform_text(by_platform.get("vk", ""))
+        if vk_lead:
+            assembly_payload["lead_vk"] = vk_lead
 
-        platforms = sorted({row.platform for row in stale_rows})
-        regenerated = assemble_platform_outputs(assembly_payload, platforms=platforms)
+        style = is_style_digest(assembly_payload.get("digest_topic"))
+        if not style:
+            promote_best_leads_in_payload(assembly_payload)
+
+        platforms: set[str] = {
+            row.platform for row in rows if needs_html_layout_refresh(row.platform, row.content or "")
+        }
+        if not style:
+            promoted_tg = str(assembly_payload.get("telegram_lead") or "").strip()
+            promoted_max = str(assembly_payload.get("max_lead") or "").strip()
+            if (
+                "telegram" in by_platform
+                and platform_lead_is_weak(tg_lead)
+                and promoted_tg
+                and not platform_lead_is_weak(promoted_tg)
+            ):
+                platforms.add("telegram")
+            if (
+                "max" in by_platform
+                and platform_lead_is_weak(max_lead)
+                and promoted_max
+                and not platform_lead_is_weak(promoted_max)
+            ):
+                platforms.add("max")
+
+        if not platforms:
+            return False
+
+        regenerated = assemble_platform_outputs(assembly_payload, platforms=sorted(platforms))
         changed = False
-        for row in stale_rows:
+        for row in rows:
+            if row.platform not in platforms:
+                continue
             new_content = regenerated.get(row.platform, "")
             if not new_content or new_content == row.content:
                 continue
@@ -3927,6 +4040,26 @@ class DigestService:
         )
         digest.status = STATUS_STEP1
         digest.current_step = STATUS_STEP1
+        self.db.commit()
+
+    def _repair_orphan_final_status(self, digest: Digest) -> None:
+        """Тексты шага 4 уже есть, а статус не final_ready — иначе в UI нет «Зафиксировать»."""
+        if digest.status == STATUS_FINAL:
+            return
+        if digest.status not in {STATUS_ANALYTICS, STATUS_SELECTED}:
+            return
+        has_outputs = (
+            self.db.query(FinalOutput.id).filter(FinalOutput.digest_id == digest.id).limit(1).first() is not None
+        )
+        if not has_outputs:
+            return
+        logger.info(
+            "Восстановление статуса final_ready | digest_id=%s prev_status=%s",
+            digest.id,
+            digest.status,
+        )
+        digest.status = STATUS_FINAL
+        digest.current_step = STATUS_FINAL
         self.db.commit()
 
     def _ensure_step0_type_for_draft(self, digest: Digest) -> None:
@@ -4345,6 +4478,11 @@ class DigestService:
         seen_urls_lower: set[str] = set()
         for idx, item in enumerate(items, start=1):
             apply_resolved_origin(item)
+            item["article_excerpt"] = _candidate_article_excerpt(item)
+            self._fill_public_candidate_description(item)
+            item["title"] = self._ensure_russian_candidate_title(
+                digest_id, str(item.get("url") or ""), str(item.get("title") or "")
+            )[:500]
             url_norm = str(item.get("url", "")).strip().lower()
             is_duplicate = url_norm in seen_urls_lower
             seen_urls_lower.add(url_norm)
@@ -4455,6 +4593,9 @@ class DigestService:
             title = str(item.get("title") or "").strip()
             if len(title) < 4:
                 title = f"Страница: {_host_from_url(str(item.get('url', '')))}"
+            item["article_excerpt"] = _candidate_article_excerpt(item)
+            self._fill_public_candidate_description(item)
+            title = self._ensure_russian_candidate_title(digest_id, str(item.get("url") or ""), title)[:500]
             entities.append(
                 NewsCandidate(
                     digest_id=digest_id,
@@ -7745,6 +7886,7 @@ class DigestService:
             agent_order_result = self.proxy.suggest_news_order(
                 order_input,
                 digest_type=digest.digest_type or "serious",
+                digest_topic=getattr(digest, "digest_topic", None) or "ai",
                 model=STEP2_AI_ORDER_MODEL,
             )
             if isinstance(agent_order_result, dict):
@@ -8160,11 +8302,19 @@ class DigestService:
         logger.info("Шаг 4: выбрана обложка | digest_id=%s variant=%s", digest.id, variant)
         return {"selected_variant": variant, "image_path": str(dst)}
 
+    def get_step4_subscription_defaults_payload(self) -> dict[str, Any]:
+        from app.digest_defaults import get_step4_subscription_defaults
+
+        return get_step4_subscription_defaults().as_payload()
+
     def run_step_4_generate_texts(
         self,
         digest_id: int,
         platforms: list[str],
         hook_variant: str | None,
+        *,
+        subscription_intro: str | None = None,
+        subscription_channels: dict[str, bool] | None = None,
     ) -> dict[str, Any]:
         digest = self.get_digest(digest_id)
         self._step4_allow_status(digest)
@@ -8176,6 +8326,25 @@ class DigestService:
                 raise Step4TextsCancelledError()
 
         try:
+            from app.digest_defaults import get_step4_subscription_defaults, save_step4_subscription_defaults
+            from app.services.platform_assembly import (
+                normalize_subscription_channels,
+                normalize_subscription_intro,
+            )
+
+            saved_sub = get_step4_subscription_defaults()
+            intro = normalize_subscription_intro(
+                subscription_intro if subscription_intro is not None else saved_sub.subscription_intro
+            )
+            channels = normalize_subscription_channels(
+                subscription_channels if subscription_channels is not None else saved_sub.channels()
+            )
+            # При генерации запоминаем актуальный выбор как будущий дефолт.
+            save_step4_subscription_defaults(
+                subscription_intro=intro,
+                subscription_channels=channels,
+            )
+
             hook = self._step4_resolve_hook(digest, hook_variant)
             _raise_if_cancelled()
             self._step4_generate_reader_texts(digest)
@@ -8193,6 +8362,8 @@ class DigestService:
                 "overall_analysis": self._step4_overall_analysis(digest),
                 "digest_type": digest.digest_type or "serious",
                 "digest_topic": getattr(digest, "digest_topic", None) or "ai",
+                "subscription_intro": intro,
+                "subscription_channels": channels,
             }
             logger.info(
                 "Шаг 4: тексты площадок | digest_id=%s hook=%s platforms=%s",
@@ -8227,6 +8398,10 @@ class DigestService:
                             qc_status="pending",
                         )
                     )
+                # Статус сразу после сохранения текстов: иначе при сбое QC/отмене
+                # тексты есть, а кнопка «Зафиксировать» скрыта (ждёт final_ready).
+                digest.status = STATUS_FINAL
+                digest.current_step = STATUS_FINAL
                 self.db.commit()
 
                 _raise_if_cancelled()
@@ -8269,6 +8444,8 @@ class DigestService:
                         "overall_analysis": self._step4_overall_analysis(digest),
                         "digest_type": digest.digest_type or "serious",
                         "digest_topic": digest_topic,
+                        "subscription_intro": intro,
+                        "subscription_channels": channels,
                     }
                     regenerated = self.workflow.run_platform_writer(repair_payload, platforms=platform_keys)
                     _raise_if_cancelled()
@@ -8283,9 +8460,10 @@ class DigestService:
                     self.db.commit()
 
             _raise_if_cancelled()
-            digest.status = STATUS_FINAL
-            digest.current_step = STATUS_FINAL
-            self.db.commit()
+            if digest.status != STATUS_FINAL:
+                digest.status = STATUS_FINAL
+                digest.current_step = STATUS_FINAL
+                self.db.commit()
 
             docx_name = digest_docx_filename(digest.date, digest.id)
             docx_path = self.settings.docx_dir / docx_name
@@ -8468,32 +8646,85 @@ class DigestService:
         t = headline.strip()
         if not t:
             return t
-        if _title_primarily_russian(t):
+        if not _title_needs_russian_translation(t):
             return t[:500]
-        model = AGENT_MODEL_RECOMMENDATIONS["ScoringAgent"]
+        # mini: nano часто возвращал английский или смесь, а строгий приём отбрасывал
+        # перевод с именами (Victoria, Pentagon) — в пуле оставался исходный EN.
+        models = (
+            AGENT_MODEL_RECOMMENDATIONS["ReaderCopyAgent"],
+            AGENT_MODEL_RECOMMENDATIONS["ScoringAgent"],
+        )
+        system_prompt = (
+            "Ты редактор русскоязычного дайджеста. Переведи заголовок новости на русский язык. "
+            "Весь смысл — по-русски. Латиницей допустимы только имена людей, компаний, продуктов "
+            "и моделей (Uber, OpenAI, ChatGPT, Geoffrey Hinton, 1Password и т.п.). "
+            "Не оставляй английских глаголов и служебных слов (unveils, launches, for, with, without, says). "
+            "Ответ — одна строка без кавычек, без префикса «Перевод:», без пояснений."
+        )
         try:
-
-            def do() -> str:
-                return self.proxy.chat(
-                    system_prompt=(
-                        "Ты редактор дайджеста. Переведи заголовок новости на русский язык. "
-                        "Сохрани смысл и имена собственные (GPT, OpenAI, Gemini и т.д.) без искажений. "
-                        "Ответ — одна строка без кавычек, без префиксов вроде «Перевод:», без пояснений."
-                    ),
-                    user_prompt=f"URL страницы: {url}\nЗаголовок:\n{t[:900]}",
-                    model=model,
-                    max_completion_tokens=120,
-                    log_source="step1_title_translation",
-                )
-
-            translated = do()
-            line = translated.strip().splitlines()[0].strip().strip("'\"«»„“")
-            if len(line) >= 6:
-                return line[:500]
+            last_line = ""
+            for model in models:
+                for _attempt in range(2):
+                    translated = self.proxy.chat(
+                        system_prompt=system_prompt,
+                        user_prompt=f"URL страницы: {url}\nЗаголовок:\n{t[:900]}",
+                        model=model,
+                        max_completion_tokens=160,
+                        log_source="step1_title_translation",
+                    )
+                    last_line = str(translated or "").strip().splitlines()[0].strip().strip("'\"«»„“")
+                    if title_translation_acceptable(last_line, source=t):
+                        return last_line[:500]
+            logger.warning(
+                "Перевод заголовка не принят | url=%s src=%r last=%r",
+                url[:100],
+                t[:160],
+                last_line[:160],
+            )
             return t[:500]
         except Exception:
             logger.warning("Перевод заголовка пропущен (ошибка API) | url=%s", url[:100], exc_info=True)
             return t[:500]
+
+    def _translate_blurb_to_russian(self, url: str, text: str) -> str:
+        t = " ".join(str(text or "").split()).strip()
+        if not t or text_primarily_russian(t):
+            return t
+        model = AGENT_MODEL_RECOMMENDATIONS["ScoringAgent"]
+        try:
+            translated = self.proxy.chat(
+                system_prompt=(
+                    "Ты редактор дайджеста. Переведи описание новости на русский язык. "
+                    "Сохрани факты, цифры, имена и названия брендов. "
+                    "Ответ — только русский текст: 3–6 связных предложений без заголовка, "
+                    "без кавычек, без английского абзаца и без пояснений."
+                ),
+                user_prompt=f"URL страницы: {url}\nТекст:\n{t[:1400]}",
+                model=model,
+                max_completion_tokens=360,
+                log_source="step1_description_translation",
+            )
+            line = " ".join(str(translated or "").split()).strip().strip("'\"«»„“")
+            if len(line) >= 24 and text_primarily_russian(line):
+                return line[:1200]
+            return t
+        except Exception:
+            logger.warning("Перевод описания пропущен (ошибка API) | url=%s", str(url)[:100], exc_info=True)
+            return t
+
+    def _fill_public_candidate_description(self, item: dict[str, Any]) -> None:
+        """Описание для карточки и MAX: только русский текст со страницы или перевод."""
+        url = str(item.get("url") or "")
+        title = str(item.get("title") or "")
+        text = public_candidate_description(item, max_chars=560, require_russian=True)
+        if not text:
+            excerpt = str(item.get("article_excerpt") or item.get("reader_excerpt") or item.get("topic_corpus") or "")
+            text = brief_page_teaser(excerpt, title=title, max_chars=560, russian_only=False)
+        if text and not text_primarily_russian(text):
+            text = self._translate_blurb_to_russian(url, text)
+        if text and not text_primarily_russian(text):
+            text = ""
+        item["description"] = text
 
     def _manual_required_candidate_row(
         self,
@@ -11175,6 +11406,10 @@ class DigestService:
         def _verify_one(work: tuple[str, dict[str, Any] | None, int]) -> dict[str, Any]:
             resolved_url, bundle, work_seq = work
             item = self._skeleton_dict_from_search_url(resolved_url, now_msk, work_seq)
+            if step1_is_cancelled(digest.id):
+                item["link_status"] = False
+                item["headline_editorial_ok"] = False
+                return item
             if bundle is None or not bundle.get("ok"):
                 bundle = _fetch_article_page_bundle(resolved_url)
             try:
@@ -11199,13 +11434,20 @@ class DigestService:
                 verified_items = [_verify_one(w) for w in pending]
             else:
                 verified_items = []
-                with ThreadPoolExecutor(max_workers=min(workers, len(pending))) as pool:
+                pool = ThreadPoolExecutor(max_workers=min(workers, len(pending)))
+                stop_waiting = False
+                try:
                     futures = {pool.submit(_verify_one, w): w for w in pending}
                     for fut in as_completed(futures):
+                        if step1_is_cancelled(digest.id):
+                            stop_waiting = True
+                            break
                         try:
                             verified_items.append(fut.result())
                         except Exception:
                             logger.exception("Шаг 1: ошибка параллельной верификации URL")
+                finally:
+                    pool.shutdown(wait=not stop_waiting, cancel_futures=True)
             for item in verified_items:
                 if on_row is not None:
                     on_row(item)
@@ -11605,7 +11847,10 @@ class DigestService:
         _apply_material_form_to_candidate(item, extra=promo_corpus, digest_type=digest.digest_type)
         item["headline_editorial_ok"] = True
         item["page_verified"] = True
-        item["article_excerpt"] = _truncate_article_excerpt(topic_excerpt)
+        item["article_excerpt"] = _truncate_article_excerpt(
+            str(bundle.get("reader_excerpt") or topic_excerpt)
+        )
+        self._fill_public_candidate_description(item)
         item["total_score"] = curious_total_score_from_tone(
             int(item.get("curious_tone_score", 0) or 0),
             low=bool(item.get("curious_tone_low")),
@@ -11819,7 +12064,7 @@ class DigestService:
                 item["curious_tone_low"] = True
         mix_slider = max(
             1,
-            min(10, int(getattr(self.settings, "step1_serious_curious_extra_batches", 5) or 5)),
+            min(10, int(getattr(getattr(self, "settings", None), "step1_serious_curious_extra_batches", 5) or 5)),
         )
         _apply_material_form_to_candidate(
             item,
@@ -11829,7 +12074,10 @@ class DigestService:
         )
         item["headline_editorial_ok"] = True
         item["page_verified"] = True
-        item["article_excerpt"] = _truncate_article_excerpt(topic_excerpt)
+        item["article_excerpt"] = _truncate_article_excerpt(
+            str(bundle.get("reader_excerpt") or topic_excerpt)
+        )
+        self._fill_public_candidate_description(item)
         if curious_mode:
             item["total_score"] = curious_total_score_from_tone(
                 int(item.get("curious_tone_score", 0) or 0),

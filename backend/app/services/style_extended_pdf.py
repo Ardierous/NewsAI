@@ -26,7 +26,7 @@ def style_extended_pdf_filename(digest_date: date | datetime | str, digest_id: i
         iso = digest_date.isoformat()
     else:
         iso = str(digest_date).strip().split("T")[0]
-    return f"style_max_extended_{iso}_id{digest_id}.pdf"
+    return f"digest_style_{iso}_id{digest_id}.pdf"
 
 
 def _resolve_cyrillic_font_path() -> Path:

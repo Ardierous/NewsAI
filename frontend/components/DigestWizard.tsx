@@ -1231,12 +1231,12 @@ function buildStep2CandidatesTelegramText(candidates: Step2PickCandidate[]): str
   const lines: string[] = [`Кандидаты шага 2 — ${dt}`, ""];
   candidates.forEach((c, idx) => {
     const title = displayCandidateTitle((c as any).title);
-    const desc = truncateText(String(c.description || "Краткое описание не заполнено."), 260);
+    const desc = briefCandidateDescription(c, 560);
     const checks = candidateChecksSummary(c);
     const canOpen = Boolean(c.url) && linkOkForStep1(c);
     const linkLine = canOpen ? `🔗 ${String(c.url)}` : "🔗 Ссылка не подтверждена";
     lines.push(`${idx + 1}. ${title}`);
-    lines.push(`Кратко: ${desc}`);
+    if (desc) lines.push(`Кратко: ${desc}`);
     lines.push(`Проверка: ${checks}`);
     lines.push(linkLine);
     lines.push("");
@@ -1244,28 +1244,55 @@ function buildStep2CandidatesTelegramText(candidates: Step2PickCandidate[]): str
   return lines.join("\n").trim();
 }
 
+function isMostlyRussianText(text: string): boolean {
+  const letters = Array.from(String(text || "")).filter((ch) => /\p{L}/u.test(ch));
+  if (!letters.length) return false;
+  const cyr = letters.filter((ch) => /\p{Script=Cyrillic}/u.test(ch)).length;
+  return cyr / letters.length >= 0.35;
+}
+
+function isTechnicalCandidateDescription(text: string): boolean {
+  const s = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!s) return true;
+  return [
+    "кандидат из веб-поиска",
+    "заголовок подтянут со страницы",
+    "заголовок извлечён со страницы",
+    "заголовок извлечен со страницы",
+    "вставлено в поле url",
+    "собрано telegram-монитором",
+    "материал обязателен к использованию",
+    "краткое описание не заполнено",
+    "источник из веб-поиска",
+    "проверка страницы обязательна",
+  ].some((marker) => s.includes(marker));
+}
+
+function briefCandidateDescription(c: Step2PickCandidate, maxChars: number): string {
+  if (maxChars <= 0) return "";
+  let raw = String(c.description || "").replace(/\s+/g, " ").trim();
+  if (!raw || isTechnicalCandidateDescription(raw) || !isMostlyRussianText(raw)) return "";
+  raw = raw
+    .replace(/\b(?:URL_AUDIT|REJECT_REASON|МАРКИРОВКА|Tier-?\d|verification_comment)\b[^.]*/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!raw) return "";
+  if (raw.length <= maxChars) return raw;
+  const cut = raw.slice(0, maxChars).replace(/\s+\S*$/, "").trim();
+  return cut || raw.slice(0, maxChars).trim();
+}
+
 function buildStep2CandidatesMaxHtml(candidates: Step2PickCandidate[]): string {
-  const dt = new Date().toLocaleString("ru-RU", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-  const blocks: string[] = [`<b>Кандидаты шага 2 — ${escapeHtml(dt)}</b>`];
-  candidates.forEach((c, idx) => {
-    const title = escapeHtml(displayCandidateTitle((c as any).title));
-    const desc = escapeHtml(truncateText(String(c.description || "Краткое описание не заполнено."), 260));
-    const checks = escapeHtml(candidateChecksSummary(c));
-    const linkHtml =
-      c.url && linkOkForStep1(c)
-        ? `🔗 <a href="${escapeHtml(String(c.url))}">Открыть новость</a>`
-        : "🔗 Ссылка не подтверждена";
-    blocks.push(
-      `${idx + 1}. <b>${title}</b><br>Кратко: ${desc}<br>Проверка: ${checks}<br>${linkHtml}`,
-    );
-  });
-  return blocks.join("<br><br>");
+  return candidates
+    .map((c, idx) => {
+      const title = escapeHtml(displayCandidateTitle((c as any).title));
+      const href = c.url && linkOkForStep1(c) ? escapeHtml(String(c.url)) : "";
+      const titleHtml = href ? `<a href="${href}">${title}</a>` : title;
+      const head = `${idx + 1}. <b>${titleHtml}</b>`;
+      const desc = escapeHtml(briefCandidateDescription(c, 560));
+      return desc ? `${head}<br>${desc}` : head;
+    })
+    .join("<br><br>");
 }
 
 async function copyHtmlToClipboard(html: string, plainFallback: string): Promise<void> {
@@ -1339,6 +1366,14 @@ export function DigestWizard({ digestId }: Props) {
     vk: true,
     dzen: true,
   });
+  const [subscriptionIntro, setSubscriptionIntro] = useState("👉 Подпишитесь на ExTellect:");
+  const [subscriptionChannels, setSubscriptionChannels] = useState<Record<string, boolean>>({
+    telegram: true,
+    vk: true,
+    max: true,
+    dzen: true,
+    boosty: true,
+  });
   const [selectedImageVariant, setSelectedImageVariant] = useState<number | null>(null);
   const [draggedId, setDraggedId] = useState<number | null>(null);
   const [copyStatus, setCopyStatus] = useState<Record<string, "idle" | "ok" | "err">>({});
@@ -1358,6 +1393,7 @@ export function DigestWizard({ digestId }: Props) {
   const newsWindowHydratedForRef = useRef<number | null>(null);
   const step3ModeRef = useRef<Step3ProgressMode>("analytics");
   const step1AbortRef = useRef<AbortController | null>(null);
+  const step1UserStoppedRef = useRef(false);
   const step4TextsAbortRef = useRef<AbortController | null>(null);
   const [step1Stopping, setStep1Stopping] = useState(false);
   const [step4TextsStopping, setStep4TextsStopping] = useState(false);
@@ -1712,8 +1748,10 @@ export function DigestWizard({ digestId }: Props) {
   const hasStep4Outputs = (digest?.outputs?.length ?? 0) > 0;
   const showStep4Results = isFinal || hasStep4Images || hasStep4Outputs;
 
+  const canFinalizeRelease = (isFinal || hasStep4Outputs) && !releaseCostFinalized;
+
   const handleFinalizeRelease = useCallback(async () => {
-    if (!isFinal || releaseCostFinalized) return;
+    if ((!isFinal && !hasStep4Outputs) || releaseCostFinalized) return;
     const ok = window.confirm(
       "Зафиксировать выпуск?\n\n" +
         "Будет записана накопительная сумма ProxyAPI с начала работы над этим выпуском (шаг 0). " +
@@ -1736,7 +1774,7 @@ export function DigestWizard({ digestId }: Props) {
       setLoading(false);
       setProgressLabel("");
     }
-  }, [digestId, isFinal, loadDigest, releaseCostFinalized]);
+  }, [digestId, hasStep4Outputs, isFinal, loadDigest, releaseCostFinalized]);
 
   const selectedPlatformsList = useMemo(
     () => PLATFORM_ORDER.filter((p) => step4Platforms[p]),
@@ -1748,6 +1786,24 @@ export function DigestWizard({ digestId }: Props) {
       setSelectedImageVariant(Number(digest.step4_selected_image_variant));
     }
   }, [digest?.step4_selected_image_variant]);
+
+  useEffect(() => {
+    const sub = digest?.step4_subscription;
+    if (!sub) return;
+    if (typeof sub.subscription_intro === "string" && sub.subscription_intro.trim()) {
+      setSubscriptionIntro(sub.subscription_intro);
+    }
+    const ch = sub.subscription_channels;
+    if (ch && typeof ch === "object") {
+      setSubscriptionChannels({
+        telegram: Boolean(ch.telegram ?? true),
+        vk: Boolean(ch.vk ?? true),
+        max: Boolean(ch.max ?? true),
+        dzen: Boolean(ch.dzen ?? true),
+        boosty: Boolean(ch.boosty ?? true),
+      });
+    }
+  }, [digest?.step4_subscription]);
 
   const discoveredNewsSorted = useMemo(
     () =>
@@ -2257,13 +2313,19 @@ export function DigestWizard({ digestId }: Props) {
       }
     } catch (e) {
       pendingScrollToStep2Ref.current = false;
+      const stoppedByUser = step1UserStoppedRef.current;
+      step1UserStoppedRef.current = false;
       const errMsg = (e as Error).message;
+      const aborted =
+        stoppedByUser ||
+        (e as Error).name === "AbortError" ||
+        /aborted|abort|The user aborted/i.test(errMsg);
       try {
         await loadDigest({ skipProgress: true, preserveError: true, preserveSelection: true });
       } catch {
         /* игнорируем вторичную ошибку загрузки */
       }
-      setError(errMsg);
+      if (!aborted) setError(errMsg);
     } finally {
       setLoading(false);
       setProgressLabel("");
@@ -2279,9 +2341,16 @@ export function DigestWizard({ digestId }: Props) {
     if (step1Stopping) return;
     setStep1Stopping(true);
     setError("");
+    step1UserStoppedRef.current = true;
     try {
       await api.step1Cancel(digestId);
+      try {
+        step1AbortRef.current?.abort();
+      } catch {
+        /* ignore */
+      }
     } catch (e) {
+      step1UserStoppedRef.current = false;
       setStep1Stopping(false);
       setError((e as Error).message || "Не удалось отправить запрос на остановку.");
     }
@@ -4121,7 +4190,7 @@ export function DigestWizard({ digestId }: Props) {
                   type="button"
                   className="step4-copy-btn"
                   disabled={loading}
-                  title="Скопировать список кандидатов шага 2 в формате MAX (HTML)"
+                  title="Скопировать компактный список кандидатов в одно сообщение MAX"
                   onClick={() => void handleCopyPlatform("max", step2CandidatesMaxHtml, "step2_max")}
                 >
                   Скопировать кандидатов для MAX
@@ -4153,10 +4222,10 @@ export function DigestWizard({ digestId }: Props) {
                   }}
                 >
                   {copyStatus.step2_max === "ok"
-                    ? "MAX: скопировано (HTML)"
+                    ? "MAX: скопировано — вставьте одним сообщением"
                     : copyStatus.step2_max === "err"
                       ? "MAX: ошибка копирования"
-                      : "MAX: список кандидатов с проверками и ссылками"}
+                      : "MAX: номер, заголовок-ссылка и краткое описание"}
                 </div>
               </div>
             </div>
@@ -4376,7 +4445,11 @@ export function DigestWizard({ digestId }: Props) {
                     {(c.description || c.verification_comment) && (
                       <details className="news-pick-details" open={demoRow} onClick={(e) => e.stopPropagation()}>
                         <summary>Подробнее: описание и проверка</summary>
-                        {c.description ? <p className="news-pick-desc">{c.description}</p> : null}
+                        {c.description &&
+                        !isTechnicalCandidateDescription(c.description) &&
+                        isMostlyRussianText(c.description) ? (
+                          <p className="news-pick-desc">{c.description}</p>
+                        ) : null}
                         {rejectCodes.length > 0 ? (
                           <p className="news-pick-verify">
                             Причины отбраковки:{" "}
@@ -4813,6 +4886,58 @@ export function DigestWizard({ digestId }: Props) {
                   </label>
                 ))}
               </div>
+              {!isStyleTopic ? (
+                <div
+                  style={{
+                    marginBottom: 12,
+                    padding: "10px 12px",
+                    border: "1px solid #334155",
+                    borderRadius: 8,
+                    background: "rgba(15, 23, 42, 0.55)",
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: 6 }}>Подпись в конце текста</div>
+                  <p className="wizard-hint-do" style={{ fontSize: "0.86rem", marginTop: 0, marginBottom: 8 }}>
+                    Текст перед ссылками и список площадок в подписи. При генерации выбор сохраняется как значение по
+                    умолчанию для следующих выпусков. Разделители ссылок — как раньше (• в Telegram/MAX/Дзен, с новой
+                    строки во ВКонтакте).
+                  </p>
+                  <label style={{ display: "block", fontSize: "0.9rem", marginBottom: 8 }}>
+                    Текст подписи
+                    <input
+                      type="text"
+                      value={subscriptionIntro}
+                      disabled={loading}
+                      onChange={(e) => setSubscriptionIntro(e.target.value)}
+                      style={{ display: "block", width: "100%", marginTop: 4, boxSizing: "border-box" }}
+                      placeholder="👉 Подпишитесь на ExTellect:"
+                    />
+                  </label>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+                    {(
+                      [
+                        ["telegram", "Telegram"],
+                        ["vk", "ВКонтакте"],
+                        ["max", "MAX"],
+                        ["dzen", "Дзен"],
+                        ["boosty", "Boosty"],
+                      ] as const
+                    ).map(([key, label]) => (
+                      <label key={key} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(subscriptionChannels[key])}
+                          disabled={loading}
+                          onChange={() =>
+                            setSubscriptionChannels((prev) => ({ ...prev, [key]: !prev[key] }))
+                          }
+                        />
+                        {label}
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {digest?.enable_step4_image_generation !== false &&
               !digest?.step4_selected_image_variant &&
               hasStep4Images ? (
@@ -4833,6 +4958,18 @@ export function DigestWizard({ digestId }: Props) {
                         [...selectedPlatformsList],
                         hookVariant || undefined,
                         ac.signal,
+                        isStyleTopic
+                          ? undefined
+                          : {
+                              subscription_intro: subscriptionIntro,
+                              subscription_channels: {
+                                telegram: Boolean(subscriptionChannels.telegram),
+                                vk: Boolean(subscriptionChannels.vk),
+                                max: Boolean(subscriptionChannels.max),
+                                dzen: Boolean(subscriptionChannels.dzen),
+                                boosty: Boolean(subscriptionChannels.boosty),
+                              },
+                            },
                       );
                     },
                   )
@@ -4881,7 +5018,7 @@ export function DigestWizard({ digestId }: Props) {
                 </a>
               ) : null}
             </div>
-            {isFinal ? (
+            {isFinal || hasStep4Outputs ? (
               <div className="step4-results-finalize">
                 {releaseCostFinalized ? (
                   <span className="step4-results-finalize--done">
@@ -4898,8 +5035,13 @@ export function DigestWizard({ digestId }: Props) {
                 <button
                   type="button"
                   className="btn-primary"
-                  disabled={releaseCostFinalized || loading}
+                  disabled={!canFinalizeRelease || loading}
                   onClick={() => void handleFinalizeRelease()}
+                  title={
+                    releaseCostFinalized
+                      ? "Стоимость выпуска уже зафиксирована"
+                      : "Записать стоимость выпуска и топ-5 для фильтра повторов"
+                  }
                 >
                   {releaseCostFinalized ? "Выпуск зафиксирован" : "Зафиксировать"}
                 </button>

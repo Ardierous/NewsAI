@@ -219,11 +219,17 @@ class CandidateOut(BaseModel):
                 "is_foreign_agent": data.is_foreign_agent,
                 "is_aggregator": data.is_aggregator,
                 "is_duplicate": data.is_duplicate,
+                "article_excerpt": getattr(data, "article_excerpt", "") or "",
             }
         payload["category"] = resolve_candidate_origin(
             payload.get("category"),
             payload.get("verification_comment"),
             payload.get("description"),
+        )
+        from app.services.reader_copy import (
+            is_technical_candidate_description,
+            public_candidate_description,
+            text_primarily_russian,
         )
         from app.services.step1_candidate_policy import (
             has_not_ad_disclosure,
@@ -246,6 +252,17 @@ class CandidateOut(BaseModel):
         if angle == "serious" and seed_marker in {"curious_mix", "curious"}:
             angle = "curious"
         payload["editorial_angle"] = angle
+        stored_desc = str(payload.get("description") or "")
+        if (
+            stored_desc
+            and not is_technical_candidate_description(stored_desc)
+            and text_primarily_russian(stored_desc)
+        ):
+            payload["description"] = public_candidate_description(payload, max_chars=560, require_russian=True)
+        else:
+            rebuilt = public_candidate_description(payload, max_chars=560, require_russian=True)
+            payload["description"] = rebuilt if rebuilt and text_primarily_russian(rebuilt) else ""
+        payload.pop("article_excerpt", None)
         return payload
 
 
@@ -276,9 +293,24 @@ class Step4SelectImageRequest(BaseModel):
     variant: int = Field(ge=1, le=4)
 
 
+class Step4SubscriptionChannels(BaseModel):
+    telegram: bool = True
+    vk: bool = True
+    max: bool = True
+    dzen: bool = True
+    boosty: bool = True
+
+
+class Step4SubscriptionDefaultsOut(BaseModel):
+    subscription_intro: str
+    subscription_channels: Step4SubscriptionChannels
+
+
 class Step4GenerateTextsRequest(BaseModel):
     platforms: list[str] = Field(min_length=1)
     hook_variant: Literal["A", "B", "V"] | None = None
+    subscription_intro: str | None = None
+    subscription_channels: Step4SubscriptionChannels | None = None
 
 
 class ImageVariantOut(BaseModel):
@@ -550,6 +582,7 @@ class DigestDetail(BaseModel):
     """Траты за день по балансу ProxyAPI (открытие суток → текущий баланс / budget.used)."""
     proxyapi_spent_today_rub: float | None = None
     enable_step4_image_generation: bool = False
+    step4_subscription: Step4SubscriptionDefaultsOut | None = None
     model_recommendations: list[AgentModelRecommendationOut]
     pool_collection_stats: PoolCollectionStatsOut | None = None
     step2_order_rationale: str = ""

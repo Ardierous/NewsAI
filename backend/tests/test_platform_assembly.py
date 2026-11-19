@@ -18,6 +18,7 @@ from app.services.platform_assembly import (
     digest_docx_filename,
     extract_lead_from_legacy_platform_text,
     format_digest_date_ru,
+    format_subscription_md_inline,
     needs_html_layout_refresh,
     subscription_html_inline,
     subscription_md_inline,
@@ -55,13 +56,33 @@ def test_compress_paragraphs_no_triple_blank():
 def test_telegram_no_sep_inline_subscription_short_lead():
     payload = _sample_payload()
     text = assemble_telegram(payload)
+    max_text = assemble_max(payload)
     assert "———" not in text
     assert "16 мая 2026" in text
     assert "• [Telegram]" in text or "• [ВКонтакте]" in text
     assert subscription_md_inline() in text
-    assert payload["overall_analysis"] not in text
-    assert "Коротко: деловые, практичные" in text
+    # overall_analysis достаточно содержателен — его можно взять во вводную Telegram.
+    assert "В выпуске:" in text or "ускорение прикладного ИИ" in text
+    assert "Компания объединяет ChatGPT и Codex." in text or "ускорение прикладного ИИ" in text
+    assert "Коротко: деловые, практичные" not in text
+    assert "В выпуске:" in max_text or "ускорение прикладного ИИ" in max_text
     assert re.search(r"➤ \[OpenAI[^\]]+\]\(https://3dnews\.ru/[^\)]+\)\nКомпания объединяет", text)
+
+
+def test_telegram_prefers_rich_dzen_intro_over_fluffy_max_lead():
+    payload = _sample_payload()
+    payload["max_lead"] = (
+        "В этом выпуске мы подробно рассмотрим пять актуальных новостей про искусственный интеллект."
+    )
+    payload["dzen_intro"] = (
+        "В сегодняшнем выпуске — почему нейросети сохраняют свой стиль письма, как ИИ-агенты "
+        "используются в кибератаках, почему Rust набирает вес в ML, уязвимость «Яндекс Станции» "
+        "и позиция Роскомнадзора по автономным агентам."
+    )
+    text = assemble_telegram(payload)
+    lead = text.split("\n\n➤ [", 1)[0]
+    assert "кибератаках" in lead or "Rust" in lead
+    assert "подробно рассмотрим пять актуальных новостей" not in lead
 
 
 def test_telegram_hashtags_separated_from_subscription():
@@ -70,6 +91,36 @@ def test_telegram_hashtags_separated_from_subscription():
     tags_start = text.index("#ИИ", sub_end)
     between = text[sub_end:tags_start]
     assert "\n\n" in between
+
+
+def test_default_subscription_matches_legacy_exact_string():
+    expected = (
+        "👉 Подпишитесь на ExTellect: [Telegram](https://t.me/extellect) • "
+        "[ВКонтакте](https://vk.com/extellect) • "
+        "[MAX](https://max.ru/channel_extellect) • "
+        "[Дзен](https://dzen.ru/extellect) • [Boosty](https://boosty.to/extellect)"
+    )
+    assert subscription_md_inline() == expected
+    assert format_subscription_md_inline() == expected
+
+
+def test_subscription_channels_subset_keeps_separators():
+    payload = _sample_payload()
+    payload["subscription_intro"] = "👉 Подпишитесь на ExTellect:"
+    payload["subscription_channels"] = {
+        "telegram": True,
+        "vk": False,
+        "max": True,
+        "dzen": False,
+        "boosty": True,
+    }
+    text = assemble_telegram(payload)
+    assert (
+        "👉 Подпишитесь на ExTellect: [Telegram](https://t.me/extellect) • "
+        "[MAX](https://max.ru/channel_extellect) • [Boosty](https://boosty.to/extellect)"
+    ) in text
+    assert "vk.com/extellect" not in text
+    assert "dzen.ru/extellect" not in text
 
 
 def test_max_html_header_links_and_inline_subscription():
@@ -202,7 +253,7 @@ def test_max_long_summaries_preserve_subscription_and_tags():
 def test_extract_lead_from_legacy_platform_text():
     legacy = assemble_telegram(_sample_payload())
     lead = extract_lead_from_legacy_platform_text(legacy)
-    assert lead.startswith("Коротко:")
+    assert lead.startswith("В выпуске:")
     assert "➤" not in lead
 
 

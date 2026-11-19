@@ -31,6 +31,17 @@ DEFAULT_LEAD = DEFAULT_LEAD_AI
 
 MAX_CHANNEL_URL = "https://max.ru/channel_extellect"
 
+DEFAULT_SUBSCRIPTION_INTRO = "👉 Подпишитесь на ExTellect:"
+SUBSCRIPTION_CHANNEL_ORDER: tuple[str, ...] = ("telegram", "vk", "max", "dzen", "boosty")
+SUBSCRIPTION_CHANNEL_META: dict[str, tuple[str, str]] = {
+    "telegram": ("Telegram", "https://t.me/extellect"),
+    "vk": ("ВКонтакте", "https://vk.com/extellect"),
+    "max": ("MAX", MAX_CHANNEL_URL),
+    "dzen": ("Дзен", "https://dzen.ru/extellect"),
+    "boosty": ("Boosty", "https://boosty.to/extellect"),
+}
+DEFAULT_SUBSCRIPTION_CHANNELS: dict[str, bool] = {key: True for key in SUBSCRIPTION_CHANNEL_ORDER}
+
 _MONTHS_RU = (
     "января",
     "февраля",
@@ -124,48 +135,134 @@ def compress_paragraphs(text: str, max_blank: int = 1) -> str:
     return "\n".join(out).strip()
 
 
-def subscription_md_inline() -> str:
-    return (
-        "👉 Подпишитесь на ExTellect: [Telegram](https://t.me/extellect) • "
-        "[ВКонтакте](https://vk.com/extellect) • "
-        f"[MAX]({MAX_CHANNEL_URL}) • "
-        "[Дзен](https://dzen.ru/extellect) • [Boosty](https://boosty.to/extellect)"
-    )
+def normalize_subscription_channels(raw: Any = None) -> dict[str, bool]:
+    """Нормализует набор площадок в подписи; по умолчанию все пять включены."""
+    out = dict(DEFAULT_SUBSCRIPTION_CHANNELS)
+    if isinstance(raw, dict):
+        for key in SUBSCRIPTION_CHANNEL_ORDER:
+            if key in raw:
+                out[key] = bool(raw.get(key))
+    elif isinstance(raw, (list, tuple, set)):
+        selected = {str(x).strip().lower() for x in raw}
+        for key in SUBSCRIPTION_CHANNEL_ORDER:
+            out[key] = key in selected
+    return out
 
 
-def subscription_html_inline() -> str:
+def normalize_subscription_intro(raw: Any = None) -> str:
+    text = " ".join(str(raw or "").split()).strip()
+    return text or DEFAULT_SUBSCRIPTION_INTRO
+
+
+def resolve_subscription_options(payload: dict[str, Any] | None = None) -> tuple[str, dict[str, bool]]:
+    data = payload or {}
+    intro = normalize_subscription_intro(data.get("subscription_intro"))
+    channels = normalize_subscription_channels(data.get("subscription_channels"))
+    return intro, channels
+
+
+def _selected_subscription_channels(channels: dict[str, bool] | None = None) -> list[tuple[str, str, str]]:
+    flags = normalize_subscription_channels(channels)
+    selected: list[tuple[str, str, str]] = []
+    for key in SUBSCRIPTION_CHANNEL_ORDER:
+        if not flags.get(key):
+            continue
+        label, url = SUBSCRIPTION_CHANNEL_META[key]
+        selected.append((key, label, url))
+    return selected
+
+
+def format_subscription_md_inline(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
+    head = normalize_subscription_intro(intro)
+    links = [f"[{label}]({url})" for _key, label, url in _selected_subscription_channels(channels)]
+    if not links:
+        return head
+    return f"{head} {' • '.join(links)}"
+
+
+def format_subscription_html_inline(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
+    head = escape_html_text(normalize_subscription_intro(intro))
+    links = [
+        f'<a href="{escape_html_attr(url)}">{escape_html_text(label)}</a>'
+        for _key, label, url in _selected_subscription_channels(channels)
+    ]
+    if not links:
+        return head
+    return f"{head} {' • '.join(links)}"
+
+
+def format_subscription_md_block(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
+    head = normalize_subscription_intro(intro)
+    lines = [f"[{label}]({url})" for _key, label, url in _selected_subscription_channels(channels)]
+    if not lines:
+        return head
+    return head + "\n" + "\n".join(lines)
+
+
+def format_subscription_vk_block(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
+    head = normalize_subscription_intro(intro)
+    lines = [f"{label}: {url}" for _key, label, url in _selected_subscription_channels(channels)]
+    if not lines:
+        return head
+    return head + "\n" + "\n".join(lines)
+
+
+def subscription_md_inline(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
+    return format_subscription_md_inline(intro, channels)
+
+
+def subscription_html_inline(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
     """Подпись для веб-редактора MAX (вставка HTML из буфера)."""
-    return (
-        "👉 Подпишитесь на ExTellect: "
-        '<a href="https://t.me/extellect">Telegram</a> • '
-        '<a href="https://vk.com/extellect">ВКонтакте</a> • '
-        f'<a href="{MAX_CHANNEL_URL}">MAX</a> • '
-        '<a href="https://dzen.ru/extellect">Дзен</a> • '
-        '<a href="https://boosty.to/extellect">Boosty</a>'
-    )
+    return format_subscription_html_inline(intro, channels)
 
 
-def subscription_md_block() -> str:
+def subscription_md_block(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
     """Многострочная подпись (Дзен и совместимость)."""
-    return (
-        "👉 Подпишитесь на ExTellect:\n"
-        "[Telegram](https://t.me/extellect)\n"
-        "[ВКонтакте](https://vk.com/extellect)\n"
-        f"[MAX]({MAX_CHANNEL_URL})\n"
-        "[Дзен](https://dzen.ru/extellect)\n"
-        "[Boosty](https://boosty.to/extellect)"
-    )
+    return format_subscription_md_block(intro, channels)
 
 
-def subscription_vk_block() -> str:
-    return (
-        "👉 Подпишитесь на ExTellect:\n"
-        "Telegram: https://t.me/extellect\n"
-        "ВКонтакте: https://vk.com/extellect\n"
-        f"MAX: {MAX_CHANNEL_URL}\n"
-        "Дзен: https://dzen.ru/extellect\n"
-        "Boosty: https://boosty.to/extellect"
-    )
+def subscription_vk_block(
+    intro: str | None = None,
+    channels: dict[str, bool] | None = None,
+) -> str:
+    return format_subscription_vk_block(intro, channels)
+
+
+def subscription_for_payload(payload: dict[str, Any], kind: str) -> str:
+    """Подпись для площадки с учётом payload; для style — пусто."""
+    if is_style_digest(payload.get("digest_topic")):
+        return ""
+    intro, channels = resolve_subscription_options(payload)
+    if kind == "md_inline":
+        return format_subscription_md_inline(intro, channels)
+    if kind == "html_inline":
+        return format_subscription_html_inline(intro, channels)
+    if kind == "vk_block":
+        return format_subscription_vk_block(intro, channels)
+    if kind == "md_block":
+        return format_subscription_md_block(intro, channels)
+    return format_subscription_md_inline(intro, channels)
 
 
 def resolve_header_title(payload: dict[str, Any]) -> str:
@@ -367,31 +464,179 @@ def _compact_plain_text(text: str, max_len: int) -> str:
     return cut
 
 
-def _compose_max_specific_lead(payload: dict[str, Any], max_len: int = 280) -> str:
-    """Содержательный лид для MAX на основе фактуры выбранных новостей."""
-    custom = str(payload.get("max_lead") or "").strip()
-    if custom:
-        return _compact_plain_text(custom, max_len)
+_GENERIC_LEAD_START_RE = re.compile(
+    r"^\s*(в этом выпуске|в сегодняшнем выпуске|сегодня в (нашем )?дайджесте|в выпуске)\b",
+    re.IGNORECASE,
+)
+_GENERIC_LEAD_FLUFF_RE = re.compile(
+    r"(рассмотрим|расскажем|осветим|поговорим о)\s+пять\s+"
+    r"(актуальных |важных |главных )?(новост|событи)",
+    re.IGNORECASE,
+)
 
+# Подпись к картинке в Telegram ≈ 1024 символа; шапка + вводная должны укладываться уверенно.
+TELEGRAM_CAPTION_LEAD_MAX_CHARS = 620
+
+
+def _plain_lead_text(text: str) -> str:
+    raw = str(text or "")
+    raw = raw.replace("<br><br>", "\n").replace("<br>", "\n")
+    raw = re.sub(r"<[^>]+>", " ", raw)
+    return " ".join(raw.split()).strip()
+
+
+def _lead_looks_generic_fluff(text: str) -> bool:
+    """Пустая «обёртка» без фактуры выпуска (типичный слабый MAX/Telegram-лид)."""
+    t = _plain_lead_text(text)
+    if not t:
+        return True
+    defaults = {
+        DEFAULT_LEAD_AI,
+        DEFAULT_LEAD_SERIOUS,
+        DEFAULT_LEAD_CURIOUS,
+        DEFAULT_LEAD_STYLE,
+        DEFAULT_LEAD,
+    }
+    if t in defaults:
+        return True
+    if len(t) < 160 and _GENERIC_LEAD_FLUFF_RE.search(t):
+        return True
+    if len(t) < 110 and _GENERIC_LEAD_START_RE.search(t):
+        return True
+    return False
+
+
+def platform_lead_is_weak(text: str) -> bool:
+    """Публичная проверка: вводная слишком общая и почти без фактуры."""
+    return _lead_looks_generic_fluff(text)
+
+
+def _lead_quality_score(text: str) -> int:
+    t = _plain_lead_text(text)
+    if not t:
+        return -10_000
+    score = len(t)
+    if _lead_looks_generic_fluff(t):
+        score -= 280
+    if re.search(r"\d", t):
+        score += 25
+    # Конкретика тем обычно длиннее общей фразы «пять новостей».
+    if len(t) >= 180:
+        score += 40
+    return score
+
+
+def _iter_payload_lead_candidates(payload: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for key in ("telegram_lead", "max_lead", "dzen_intro", "lead_vk"):
+        t = _plain_lead_text(payload.get(key))
+        if not t:
+            continue
+        key_norm = t.casefold()
+        if key_norm in seen:
+            continue
+        seen.add(key_norm)
+        out.append(t)
+    analysis = _plain_lead_text(payload.get("overall_analysis"))
+    if analysis:
+        key_norm = analysis.casefold()
+        if key_norm not in seen:
+            out.append(analysis)
+    return out
+
+
+def _pick_best_payload_lead(payload: dict[str, Any], max_len: int) -> str:
+    """Лучший содержательный анонс из уже готовых лидов площадок / overall_analysis."""
+    candidates = _iter_payload_lead_candidates(payload)
+    if not candidates:
+        return ""
+    best = max(candidates, key=_lead_quality_score)
+    if _lead_quality_score(best) < 90:
+        return ""
+    if _lead_looks_generic_fluff(best):
+        return ""
+    return _compact_plain_text(best, max_len)
+
+
+def _compose_news_facts_lead(payload: dict[str, Any], max_len: int, *, max_points: int = 4) -> str:
     points: list[str] = []
-    for item in list(payload.get("selected_news") or [])[:3]:
+    per_point = 150 if max_len >= 500 else 110
+    for item in list(payload.get("selected_news") or [])[:5]:
         summary = _item_summary_short(item)
-        snippet = _compact_plain_text(summary, 110).strip(" ,;:-")
+        snippet = _compact_plain_text(summary, per_point).strip(" ,;:-")
         if snippet and snippet not in points:
             points.append(snippet)
-        if len(points) >= 2:
+        if len(points) >= max_points:
             break
+    if not points:
+        return ""
+    return _compact_plain_text(f"В выпуске: {'; '.join(points)}.", max_len)
 
-    if points:
-        joined = "; ".join(points)
-        return _compact_plain_text(f"В выпуске: {joined}.", max_len)
 
+def promote_best_leads_in_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Подтянуть лучший лид в telegram/max, если текущий пустой или шаблонный."""
+    best = _pick_best_payload_lead(payload, TELEGRAM_CAPTION_LEAD_MAX_CHARS)
+    if not best:
+        return payload
+    tg = _plain_lead_text(payload.get("telegram_lead"))
+    mx = _plain_lead_text(payload.get("max_lead"))
+    if not tg or _lead_looks_generic_fluff(tg) or len(best) > len(tg) + 40:
+        payload["telegram_lead"] = best
+    if not mx or _lead_looks_generic_fluff(mx):
+        payload["max_lead"] = _compact_plain_text(best, 320)
+    return payload
+
+
+def _compose_max_specific_lead(payload: dict[str, Any], max_len: int = 280) -> str:
+    """Содержательный лид для MAX: свой max_lead, иначе лучший с других площадок / факты новостей."""
+    custom = _plain_lead_text(payload.get("max_lead"))
+    if custom and not _lead_looks_generic_fluff(custom):
+        return _compact_plain_text(custom, max_len)
+
+    best = _pick_best_payload_lead(payload, max_len)
+    if best:
+        return best
+
+    facts = _compose_news_facts_lead(payload, max_len, max_points=3)
+    if facts:
+        return facts
+
+    if custom:
+        return _compact_plain_text(custom, max_len)
+    return _compact_plain_text(resolve_default_lead(payload), max_len)
+
+
+def _compose_telegram_lead(payload: dict[str, Any], max_len: int = TELEGRAM_CAPTION_LEAD_MAX_CHARS) -> str:
+    """Вводная первого сообщения Telegram (под картинку): богаче MAX, с фактурой выпуска."""
+    best = _pick_best_payload_lead(payload, max_len)
+    facts = _compose_news_facts_lead(payload, max_len, max_points=4)
+
+    if best and not _lead_looks_generic_fluff(best) and len(best) >= 160:
+        # Если лид площадки хороший, но короткий — дополняем фактами новостей.
+        if len(best) < 280 and facts and not _text_largely_contained(best, facts[:80], min_needle=40):
+            merged = _compact_plain_text(f"{best} {facts}", max_len)
+            if len(merged) > len(best) + 30:
+                return merged
+        return best
+
+    if facts and (not best or len(facts) >= len(best)):
+        return facts
+    if best:
+        return best
+    if facts:
+        return facts
     return _compact_plain_text(resolve_default_lead(payload), max_len)
 
 
 def _split_platform_html_footer(text: str) -> tuple[str, str]:
-    sub = subscription_html_inline()
-    idx = text.find(sub)
+    idx = text.find(subscription_html_inline())
+    if idx < 0:
+        for needle in ("👉", "Подпишитесь", "boosty.to/extellect", "t.me/extellect"):
+            found = text.rfind(needle)
+            if found >= 0:
+                idx = found
+                break
     if idx >= 0:
         start = text.rfind("<br><br>", 0, idx)
         if start >= 0:
@@ -508,14 +753,18 @@ def assemble_telegram(payload: dict[str, Any]) -> str:
     date_ru = format_digest_date_ru(payload.get("date"))
     header_title = resolve_header_title(payload)
     topic = payload.get("digest_topic")
-    lead = _compact_plain_text(resolve_lead(payload, "telegram"), 420)
+    if is_style_digest(topic):
+        lead = _compact_plain_text(resolve_lead(payload, "telegram"), 420)
+    else:
+        # Первое сообщение с картинкой: берём лучший лид площадок и делаем его содержательнее.
+        lead = _compose_telegram_lead(payload, TELEGRAM_CAPTION_LEAD_MAX_CHARS)
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6, digest_topic=topic)
     news_blocks: list[str] = []
     for item in payload.get("selected_news") or []:
         summary = _compact_plain_text(_item_summary_short(item), 240)
         news_blocks.append(f"{_news_link_line(item['title'], item['url'])}\n{summary}")
     body = "\n\n".join(news_blocks)
-    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_md_inline()
+    sub = subscription_for_payload(payload, "md_inline")
     text = f"**{header_title} | {date_ru}**\n\n{lead}\n\n{body}\n\n"
     if sub:
         text += f"{sub}\n\n"
@@ -535,7 +784,7 @@ def assemble_max(payload: dict[str, Any]) -> str:
         # Для MAX делаем более содержательный лид по фактуре выпуска, без обрыва многоточием.
         lead = _compose_max_specific_lead(payload, 280)
     tags = normalize_hashtag_tokens(list(payload.get("hashtags") or []), 4, 6, digest_topic=topic)
-    sub = "" if style else subscription_html_inline()
+    sub = subscription_for_payload(payload, "html_inline")
     footer = (
         f"<br><br>{escape_html_text(tags)}"
         if not sub
@@ -593,7 +842,7 @@ def assemble_vk(payload: dict[str, Any]) -> str:
         url = str(item["url"]).strip()
         news_blocks.append(f"{title}\n{summary}\nПодробности: {url}")
     body = f"\n\n{SEP_VK}\n\n".join(news_blocks)
-    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_vk_block()
+    sub = subscription_for_payload(payload, "vk_block")
     text = f"{header_title} | {date_ru}\n\n{lead}\n\n{SEP_VK}\n\n{body}\n\n"
     if sub:
         text += f"{sub}\n\n"
@@ -611,7 +860,7 @@ def assemble_dzen(payload: dict[str, Any]) -> str:
     if not intro:
         intro = resolve_default_lead(payload)
     intro = _truncate_at_word(intro, 280)
-    sub = "" if is_style_digest(payload.get("digest_topic")) else subscription_html_inline()
+    sub = subscription_for_payload(payload, "html_inline")
     footer = (
         f"<br><br>{escape_html_text(tags)}"
         if not sub

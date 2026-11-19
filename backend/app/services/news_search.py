@@ -828,6 +828,10 @@ def fetch_article_urls_raw_merged(
     Сырые уникальные URL (до _filter_search_urls).
     При web_search_prefer_alt_providers: SerpAPI/Tavily первыми, ProxyAPI — если мало URL или force_proxyapi.
     """
+    from app.services.step1_cancellation import should_abort_step1_web_search
+
+    if should_abort_step1_web_search():
+        return []
     fetch_cap = max(limit, 15)
     prefer_alt = bool(getattr(settings, "step1_web_search_prefer_alt_providers", False))
     if int(pool_shortfall or 0) > 0 and getattr(settings, "serpapi_api_key", None):
@@ -838,8 +842,12 @@ def fetch_article_urls_raw_merged(
     from app.services.step1_phase_timers import step1_phase
 
     with step1_phase("alt_search"):
+        if should_abort_step1_web_search():
+            return []
         if settings.serpapi_api_key:
             merged.extend(_serpapi_google_news_urls(settings.serpapi_api_key, query, fetch_cap))
+        if should_abort_step1_web_search():
+            return _uniq_urls(merged)
         if settings.tavily_api_key:
             merged.extend(
                 _tavily_search_urls(
@@ -1142,8 +1150,7 @@ def fetch_tier_prioritized_raw_urls(
                     batches_used,
                     len(merged),
                 )
-                tier_api_cap_hit = True
-                break
+                return merged
             if step1_web_search_api_cap_should_stop(
                 verified_count=int(current_verified or 0),
                 pool_shortfall=int(pool_shortfall or 0),
@@ -1223,6 +1230,9 @@ def fetch_tier_prioritized_raw_urls(
                 current_verified=current_verified,
                 pool_shortfall=pool_shortfall,
             )
+            if _abort_search():
+                _accept(batch_urls)
+                return merged
             if (
                 not batch_urls
                 and not economy
@@ -1753,20 +1763,25 @@ def _strip_markdown_fence(raw: str) -> str:
 
 
 def _serpapi_google_news_urls(api_key: str, query: str, limit: int) -> list[str]:
+    from app.services.step1_cancellation import abortable_requests_session, should_abort_step1_web_search
+
+    if should_abort_step1_web_search():
+        return []
     try:
-        r = requests.get(
-            "https://serpapi.com/search.json",
-            params={
-                "engine": "google_news",
-                "q": query,
-                "api_key": api_key,
-                "hl": "ru",
-                # Серверная фильтрация по свежести: прошлая неделя. Перекрывает 3 рабочих дня окна + буфер,
-                # сильно снижает долю старых evergreen-статей из архивов tier-сайтов (habr, vc.ru и т.д.).
-                "tbs": "qdr:w",
-            },
-            timeout=25,
-        )
+        with abortable_requests_session() as session:
+            r = session.get(
+                "https://serpapi.com/search.json",
+                params={
+                    "engine": "google_news",
+                    "q": query,
+                    "api_key": api_key,
+                    "hl": "ru",
+                    # Серверная фильтрация по свежести: прошлая неделя. Перекрывает 3 рабочих дня окна + буфер,
+                    # сильно снижает долю старых evergreen-статей из архивов tier-сайтов (habr, vc.ru и т.д.).
+                    "tbs": "qdr:w",
+                },
+                timeout=25,
+            )
         if r.status_code >= 400:
             logger.warning("SerpAPI HTTP %s", r.status_code)
             return []
@@ -1801,11 +1816,16 @@ def _tavily_search_urls(
         }
         if include_domains:
             payload["include_domains"] = [str(x).strip() for x in include_domains if str(x).strip()][:20]
-        r = requests.post(
-            "https://api.tavily.com/search",
-            json=payload,
-            timeout=25,
-        )
+        from app.services.step1_cancellation import abortable_requests_session, should_abort_step1_web_search
+
+        if should_abort_step1_web_search():
+            return []
+        with abortable_requests_session() as session:
+            r = session.post(
+                "https://api.tavily.com/search",
+                json=payload,
+                timeout=25,
+            )
         if r.status_code >= 400:
             logger.warning("Tavily HTTP %s", r.status_code)
             return []

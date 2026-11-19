@@ -328,6 +328,40 @@ class ProxyApiClient:
             default_headers={"Authorization": f"Bearer {settings.proxyapi_api_key}"},
         )
 
+    def _openai_client_for_cancellable_search(self) -> tuple[Any, Any]:
+        """Отдельный HTTP-клиент, чтобы «стоп» оборвал текущий web_search, а не ждал ответ."""
+        from app.services.step1_cancellation import (
+            register_io_abort,
+            should_abort_step1_web_search,
+        )
+
+        if should_abort_step1_web_search():
+            return None, None
+        try:
+            import httpx
+        except ImportError:
+            return self.client, None
+        http = httpx.Client(timeout=httpx.Timeout(connect=8.0, read=90.0, write=30.0, pool=8.0))
+        register_io_abort(http.close)
+        client = OpenAI(
+            api_key=self.settings.proxyapi_api_key,
+            base_url=self.settings.proxyapi_base_url,
+            default_headers={"Authorization": f"Bearer {self.settings.proxyapi_api_key}"},
+            http_client=http,
+        )
+        return client, http
+
+    def _close_cancellable_search_http(self, http: Any) -> None:
+        if http is None:
+            return
+        from app.services.step1_cancellation import unregister_io_abort
+
+        unregister_io_abort(http.close)
+        try:
+            http.close()
+        except Exception:
+            pass
+
     def chat(
         self,
         system_prompt: str,
@@ -396,6 +430,11 @@ class ProxyApiClient:
         """
         if not self.settings.proxyapi_web_search_enabled:
             return []
+        from app.services.step1_cancellation import should_abort_step1_web_search
+
+        if should_abort_step1_web_search():
+            logger.info("ProxyAPI web_search: пропуск — сбор шага 1 остановлен")
+            return []
         if not consume_web_search_api_call(kind="responses"):
             logger.warning("ProxyAPI web_search: лимит API-вызовов шага 1 исчерпан | query=%s", query[:120])
             self.last_error_kind = "api_cap"
@@ -433,8 +472,12 @@ class ProxyApiClient:
         ]
         model = self.settings.proxyapi_web_search_model
         self.last_error_kind = None
+        client, http = self._openai_client_for_cancellable_search()
+        if client is None:
+            logger.info("ProxyAPI web_search: пропуск — сбор шага 1 остановлен")
+            return []
         try:
-            response = self.client.responses.create(
+            response = client.responses.create(
                 model=model,
                 tools=tools,
                 input=[{"role": "user", "content": user_prompt}],
@@ -469,7 +512,7 @@ class ProxyApiClient:
                 not step1_strict_web_search_economy(self.settings)
                 or not step1_web_search_api_cap_reached()
             )
-            if allow_preview:
+            if allow_preview and not should_abort_step1_web_search():
                 preview_urls = self._search_news_urls_chat_preview(
                     user_prompt,
                     limit,
@@ -485,15 +528,22 @@ class ProxyApiClient:
                 return preview_urls
             return []
         except Exception as exc:
+            if should_abort_step1_web_search():
+                logger.info("ProxyAPI web_search: оборван по остановке сбора")
+                return []
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
             _log_proxyapi_exception(exc, kind="responses.web_search", model=model)
             logger.warning("ProxyAPI responses web_search failed, fallback to search-preview", exc_info=True)
+        finally:
+            self._close_cancellable_search_http(http)
         from app.services.step1_web_search_stats import (
             step1_strict_web_search_economy,
             step1_web_search_api_cap_reached,
         )
 
+        if should_abort_step1_web_search():
+            return []
         if step1_strict_web_search_economy(self.settings) and step1_web_search_api_cap_reached():
             return []
         if step1_strict_web_search_economy(self.settings) and not fallback_on_empty:
@@ -509,11 +559,18 @@ class ProxyApiClient:
     ) -> list[str]:
         preview_model = self.settings.proxyapi_web_search_preview_model
         ctx_size = search_context_size if search_context_size in ("low", "medium", "high") else "medium"
+        from app.services.step1_cancellation import should_abort_step1_web_search
+
+        if should_abort_step1_web_search():
+            return []
         if not consume_web_search_api_call(kind="preview"):
             mark_step1_web_search_api_cap_hit()
             return []
+        client, http = self._openai_client_for_cancellable_search()
+        if client is None:
+            return []
         try:
-            response = self.client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=preview_model,
                 messages=[{"role": "user", "content": user_prompt}],
                 max_completion_tokens=min(900, max(220, int(limit) * 28)),
@@ -546,11 +603,16 @@ class ProxyApiClient:
             record_empty_citation_web_search()
             return []
         except Exception as exc:
+            if should_abort_step1_web_search():
+                logger.info("ProxyAPI web_search preview: оборван по остановке сбора")
+                return []
             if _is_proxyapi_budget_error(exc):
                 self.last_error_kind = "budget_exceeded"
             _log_proxyapi_exception(exc, kind="chat.web_search_preview", model=preview_model)
             logger.exception("ProxyAPI chat search-preview failed | model=%s", preview_model)
             return []
+        finally:
+            self._close_cancellable_search_http(http)
 
     def fetch_article_metadata_by_url(self, url: str) -> dict[str, str]:
         """
@@ -794,20 +856,28 @@ class ProxyApiClient:
             return []
 
     def suggest_news_order(
-        self, items: list[dict[str, Any]], digest_type: str = "serious", model: str | None = None
+        self,
+        items: list[dict[str, Any]],
+        digest_type: str = "serious",
+        model: str | None = None,
+        digest_topic: str | None = None,
     ) -> list[dict[str, Any]]:
         """
-        Оптимальный порядок пятёрки для удержания читателя (без CrewAI).
+        Оптимальный порядок пятёрки для удержания рядового читателя (без CrewAI).
         Возвращает список {candidate_id, output_position, ordering_reason}.
         """
-        from app.services.digest_type_policy import normalize_digest_type, step2_order_system_prompt
+        from app.services.digest_type_policy import normalize_digest_type
+        from app.services.digest_topic_policy import step2_order_system_prompt_for_topic
 
         use_model = model or STEP2_AI_ORDER_MODEL
-        system_prompt = step2_order_system_prompt(normalize_digest_type(digest_type))
+        system_prompt = step2_order_system_prompt_for_topic(
+            digest_topic,
+            normalize_digest_type(digest_type),
+        )
         user_prompt = (
             f"digest_type={digest_type}\n"
             f"Новости для упорядочивания:\n{json.dumps(items, ensure_ascii=False)}\n"
-            "Ответ — JSON-объект: overall_rationale (3–5 предложений, почему этот порядок оптимален для читателя), "
+            "Ответ — JSON-объект: overall_rationale (3–5 предложений, почему этот порядок удобен обычному читателю, не профессионалу в ИИ), "
             "items — массив из 5 объектов с полями candidate_id (int), output_position (1..5, все уникальны), "
             "ordering_reason (1–2 предложения: почему эта позиция удерживает читателя)."
         )
@@ -825,7 +895,7 @@ class ProxyApiClient:
             return {
                 "items": fallback_items,
                 "overall_rationale": (
-                    "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                    "Резервный порядок: сначала понятная новость для обычного читателя, затем более тяжёлые темы."
                 ),
             }
         out: list[dict[str, Any]] = []
@@ -837,7 +907,7 @@ class ProxyApiClient:
                 return {
                     "items": fallback_items,
                     "overall_rationale": (
-                        "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                        "Резервный порядок: сначала понятная новость для обычного читателя, затем более тяжёлые темы."
                     ),
                 }
             try:
@@ -848,7 +918,7 @@ class ProxyApiClient:
                 return {
                     "items": fallback_items,
                     "overall_rationale": (
-                        "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                        "Резервный порядок: сначала понятная новость для обычного читателя, затем более тяжёлые темы."
                     ),
                 }
             if cid not in allowed_ids or cid in seen_ids or pos < 1 or pos > 5 or pos in seen_pos:
@@ -856,7 +926,7 @@ class ProxyApiClient:
                 return {
                     "items": fallback_items,
                     "overall_rationale": (
-                        "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                        "Резервный порядок: сначала понятная новость для обычного читателя, затем более тяжёлые темы."
                     ),
                 }
             seen_ids.add(cid)
@@ -868,7 +938,7 @@ class ProxyApiClient:
             return {
                 "items": fallback_items,
                 "overall_rationale": (
-                    "Резервный порядок по суммарным баллам: от самой заметной новости к финальному аккорду."
+                    "Резервный порядок: сначала понятная новость для обычного читателя, затем более тяжёлые темы."
                 ),
             }
         out.sort(key=lambda x: int(x["output_position"]))
@@ -936,13 +1006,75 @@ def _parse_ordering_payload(raw: str) -> tuple[list[Any], str]:
     return [], ""
 
 
+_HEAVY_OPENER_RE = re.compile(
+    r"регулир|закон\b|акт об ии|eu ai act|инвест(?:иц|ор)|млрд|выручк|капитализац|"
+    r"инфраструктур|суперкомпут|дата.?центр|цод|санкц|кибербезопас|"
+    r"научн(?:ый|ое|ая)|исследовательск|препринт|arxiv|white.?paper|"
+    r"слияни|поглощен|\bipo\b|акци(?:и|ях)",
+    re.IGNORECASE,
+)
+_EASY_OPENER_RE = re.compile(
+    r"как\b|зачем\b|можно\b|в работе|в быту|пользовател|ученик|школ|"
+    r"помощник|чат.?бот|лайфхак|фейл|глюк|забавн|странн|необычн|"
+    r"приложение|для людей|обычн",
+    re.IGNORECASE,
+)
+
+
+def _order_item_blob(item: dict[str, Any]) -> str:
+    return f"{item.get('title') or ''} {item.get('description') or ''} {item.get('category') or ''}"
+
+
+def _is_heavy_opener(item: dict[str, Any]) -> bool:
+    return bool(_HEAVY_OPENER_RE.search(_order_item_blob(item)))
+
+
+def _is_easy_opener(item: dict[str, Any]) -> bool:
+    return bool(_EASY_OPENER_RE.search(_order_item_blob(item)))
+
+
 def _fallback_news_order(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    ranked = sorted(items, key=lambda x: (-int(x.get("total_score") or 0), int(x.get("candidate_id") or 0)))
+    """Сначала понятная новость для обычного читателя, не самый высокий балл любой ценой."""
+    if not items:
+        return []
+
+    def _score_key(item: dict[str, Any]) -> tuple[int, int]:
+        return (-int(item.get("total_score") or 0), int(item.get("candidate_id") or 0))
+
+    def _open_key(item: dict[str, Any]) -> tuple[int, int, int, int]:
+        return (
+            0 if _is_easy_opener(item) else 1,
+            1 if _is_heavy_opener(item) else 0,
+            -int(item.get("total_score") or 0),
+            int(item.get("candidate_id") or 0),
+        )
+
+    opener = min(items, key=_open_key)
+    opener_id = int(opener["candidate_id"])
+    rest = [item for item in items if int(item["candidate_id"]) != opener_id]
+    rest_by_score = sorted(rest, key=_score_key)
+    ordered = [opener]
+    if rest_by_score:
+        closer = min(
+            rest_by_score,
+            key=lambda item: (
+                0 if _is_easy_opener(item) else 1,
+                1 if _is_heavy_opener(item) else 0,
+                int(item.get("candidate_id") or 0),
+            ),
+        )
+        closer_id = int(closer["candidate_id"])
+        middle = [item for item in rest_by_score if int(item["candidate_id"]) != closer_id]
+        ordered = [opener, *middle, closer]
     return [
         {
             "candidate_id": int(item["candidate_id"]),
             "output_position": idx,
-            "ordering_reason": f"Позиция {idx}: резервный порядок по суммарному баллу ({item.get('total_score', 0)}).",
+            "ordering_reason": (
+                f"Позиция {idx}: понятный заход для обычного читателя."
+                if idx == 1
+                else f"Позиция {idx}: резервный порядок с учётом темы и балла ({item.get('total_score', 0)})."
+            ),
         }
-        for idx, item in enumerate(ranked, start=1)
+        for idx, item in enumerate(ordered, start=1)
     ]

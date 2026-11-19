@@ -280,6 +280,7 @@ def fetch_article_bundle_via_reader_proxy(initial_url: str) -> dict[str, Any] | 
                 "article_markers": not listing_ok,
                 "soft_article_signals": not listing_ok,
                 "topic_corpus": topic_corpus,
+                "reader_excerpt": topic_corpus[:8000],
                 "published_at": published_at,
                 "is_listing_page": listing_ok,
                 "listing_article_urls": [],

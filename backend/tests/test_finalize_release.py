@@ -55,3 +55,27 @@ def test_finalize_requires_final_status(db_session):
     with pytest.raises(HTTPException) as exc:
         service.finalize_digest_release(digest.id)
     assert exc.value.status_code == 400
+
+
+def test_repair_orphan_final_status_when_outputs_exist(db_session, monkeypatch: pytest.MonkeyPatch):
+    digest = Digest(date=date(2026, 6, 6), status="analytics_ready", current_step="analytics_ready")
+    digest.proxyapi_release_open_balance = 100.0
+    db_session.add(digest)
+    db_session.flush()
+    db_session.add(
+        FinalOutput(digest_id=digest.id, platform="telegram", content="ready", character_count=5, qc_status="ok")
+    )
+    db_session.commit()
+
+    service = DigestService(db_session)
+    monkeypatch.setattr(
+        service.cost_tracker,
+        "get_balance_snapshot",
+        lambda: BalanceSnapshot(balance=95.0, budget_limit=None, budget_used=None),
+    )
+    repaired = service.get_digest(digest.id)
+    assert repaired.status == STATUS_FINAL
+
+    result = service.finalize_digest_release(digest.id)
+    assert result["finalized"] is True
+    assert result["release_cost_rub"] == 5.0
