@@ -1,16 +1,22 @@
+# Окружение и секреты (не часть исходников проекта)
 .venv/
+node_modules/
+.next/
 __pycache__/
 *.pyc
 backend/.env
 frontend/.env.local
+
+# Временные файлы SQLite (сама БД digest.db — в репозитории)
+backend/digest.db-wal
+backend/digest.db-shm
+
+# Сгенерированные выгрузки (можно пересобрать)
 backend/storage/images/*
 backend/storage/docx/*
 backend/storage/pdf/*
-backend/digest.db
-backend/digest.db-wal
-backend/digest.db-shm
+
+# Служебные логи
 backend/logs/
 debug-*.log
 docs/push_protocol.log
-node_modules/
-.next/
